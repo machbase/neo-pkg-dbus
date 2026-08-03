@@ -1,0 +1,996 @@
+@import "tailwindcss";
+
+:root {
+  --neo-bg: #1e1e1e;
+  --neo-panel: #252525;
+  --neo-elevated: #2c2c2c;
+  --neo-selected: #005fb8;
+  --neo-hover: #0075e2;
+  --neo-border: rgba(255, 255, 255, 0.13);
+  --neo-radius: 4px;
+  --neo-side-width: 256px;
+  --neo-side-header-height: 40px;
+  --neo-section-header-height: 22px;
+  --neo-job-row-height: 28px;
+  --neo-switch-width: 28px;
+  --neo-switch-height: 13px;
+  --neo-switch-thumb: 9px;
+  --neo-font-sans: Pretendard, sans-serif;
+  --neo-font-mono: D2Coding, monospace;
+  --neo-text: #f1f1f1;
+  --neo-text-secondary: #c4c4c4;
+  --neo-text-muted: #a3a3a3;
+  --neo-success: #71e071;
+  --neo-warning: #f5c451;
+  --neo-error: #ff5353;
+  color: var(--neo-text);
+  background: var(--neo-bg);
+  font-family: var(--neo-font-sans);
+  font-synthesis: none;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  font-family: var(--neo-font-sans);
+}
+
+html, body, #root {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  overflow-x: hidden;
+  background: var(--neo-bg);
+  color: var(--neo-text);
+  font-family: var(--neo-font-sans);
+  font-size: 13px;
+}
+
+button, input {
+  font-family: var(--neo-font-sans);
+  font-size: 12px;
+}
+
+button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--neo-border);
+  border-radius: var(--neo-radius);
+  background: transparent;
+  color: var(--neo-text-secondary);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+  border-color: var(--neo-hover);
+  background: var(--neo-hover);
+  color: #fff;
+}
+
+button:focus-visible,
+input:focus-visible,
+[role="button"]:focus-visible {
+  outline: 2px solid var(--neo-hover);
+  outline-offset: -2px;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+input {
+  width: 100%;
+  min-width: 0;
+  height: 32px;
+  padding: 0 9px;
+  border: 1px solid var(--neo-border);
+  border-radius: var(--neo-radius);
+  background: var(--neo-bg);
+  color: var(--neo-text);
+}
+
+.material-symbols-outlined {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  font-variation-settings: "FILL" 0, "wght" 400, "GRAD" 0, "opsz" 20;
+  line-height: 1;
+}
+
+.neo-mono {
+  font-family: var(--neo-font-mono);
+}
+
+.starter-index {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow-x: hidden;
+  background: var(--neo-bg);
+}
+
+.starter-index--split {
+  grid-template-columns: var(--neo-side-width) minmax(0, 1fr);
+}
+
+.starter-index-side {
+  min-width: 0;
+  overflow-x: hidden;
+  border-right: 1px solid var(--neo-border);
+  background: var(--neo-panel);
+}
+
+.starter-index-main {
+  width: 100%;
+  min-width: 0;
+  overflow-x: hidden;
+  background: var(--neo-panel);
+}
+
+.starter-entry {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow-x: hidden;
+}
+
+.starter-shell {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  background: var(--neo-panel);
+}
+
+.starter-panel {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow-x: hidden;
+  background: var(--neo-panel);
+}
+
+.starter-panel:has(> .neo-empty-state) {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: 24px;
+}
+
+.neo-status-message {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  margin: 0;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--neo-border);
+  color: var(--neo-text-secondary);
+  background: var(--neo-bg);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.neo-status-message--error {
+  color: var(--neo-error);
+}
+
+.neo-status-message--warning {
+  color: var(--neo-warning);
+}
+
+.neo-jobs-side {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  overflow-x: hidden;
+  background: var(--neo-panel);
+}
+
+.neo-jobs-side__header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: var(--neo-side-header-height);
+  min-width: 0;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--neo-border);
+  background: var(--neo-panel);
+}
+
+.neo-jobs-side__header h2 {
+  display: flex;
+  align-items: center;
+  flex: 1;
+  height: var(--neo-section-header-height);
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: var(--neo-text);
+  font-family: var(--neo-font-sans);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.neo-side-package-icon {
+  flex: 0 0 auto;
+  color: var(--neo-hover);
+  font-size: 18px;
+}
+
+.neo-job-list__header {
+  display: flex;
+  align-items: center;
+  flex: 0 0 var(--neo-section-header-height);
+  min-width: 0;
+  height: var(--neo-section-header-height);
+  padding: 0 12px;
+  border-bottom: 1px solid var(--neo-border);
+  color: var(--neo-text-secondary);
+  font-family: var(--neo-font-sans);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: var(--neo-section-header-height);
+}
+
+.neo-job-list__header h3 {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  font: inherit;
+  line-height: 1;
+}
+
+.neo-side-header-action,
+.neo-side-section-action {
+  flex: 0 0 auto;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.neo-side-header-action {
+  width: 28px;
+  height: 28px;
+  min-height: 28px;
+  color: var(--neo-text-secondary);
+}
+
+.neo-side-section-action {
+  width: var(--neo-section-header-height);
+  height: var(--neo-section-header-height);
+  min-height: var(--neo-section-header-height);
+  color: var(--neo-text-muted);
+}
+
+.neo-side-header-action:hover:not(:disabled),
+.neo-side-section-action:hover:not(:disabled) {
+  border-color: transparent;
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--neo-text);
+}
+
+.neo-side-section-action .material-symbols-outlined {
+  font-size: 14px;
+}
+
+.neo-job-list {
+  flex: 1;
+  min-width: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+.neo-job-row {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  height: var(--neo-job-row-height);
+  min-width: 0;
+  padding: 0;
+  color: var(--neo-text-secondary);
+  font-family: var(--neo-font-sans);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.neo-job-select {
+  display: flex;
+  align-items: center;
+  align-self: stretch;
+  min-width: 0;
+  flex: 1 1 auto;
+  padding: 0;
+  padding-right: 6px;
+  padding-left: 12px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.neo-job-select:hover:not(:disabled) {
+  border: 0;
+  background: transparent;
+  color: inherit;
+}
+
+.neo-job-row--selected {
+  background: var(--neo-selected);
+}
+
+.neo-job-row:hover {
+  background: var(--neo-hover);
+  color: #fff;
+}
+
+.neo-job-row--selected:hover {
+  background: var(--neo-selected);
+}
+
+.neo-job-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.neo-switch {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  min-height: 28px;
+  margin-right: 12px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.neo-switch:hover:not(:disabled) {
+  border-color: transparent;
+  background: transparent;
+}
+
+.neo-switch__visual {
+  position: absolute;
+  width: 28px;
+  height: 13px;
+  border: 1px solid #555;
+  border-radius: 9999px;
+  background: #3a3a3a;
+  transition: background-color 120ms ease, border-color 120ms ease;
+}
+
+.neo-switch[aria-pressed="true"] .neo-switch__visual {
+  border-color: var(--neo-hover);
+  background: var(--neo-selected);
+}
+
+.neo-switch__thumb {
+  position: absolute;
+  top: 1px;
+  left: 2px;
+  width: 9px;
+  height: 9px;
+  border-radius: 9999px;
+  background: #888;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
+  transition: left 120ms ease, right 120ms ease, background-color 120ms ease;
+}
+
+.neo-switch[aria-pressed="true"] .neo-switch__thumb {
+  right: 2px;
+  left: auto;
+  background: #fff;
+}
+
+.neo-job-detail {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-content: start;
+  width: 100%;
+  min-height: 100%;
+  min-width: 0;
+  overflow-x: hidden;
+  background: var(--neo-panel);
+}
+
+.neo-single-detail {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-content: start;
+  width: 100%;
+  min-height: 100%;
+  min-width: 0;
+  overflow-x: hidden;
+  background: var(--neo-panel);
+}
+
+.neo-job-detail__header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  grid-column: 1;
+  grid-row: 1;
+  height: 80px;
+  min-height: 80px;
+  min-width: 0;
+  padding: 0 12px 0 40px;
+  border-bottom: 1px solid var(--neo-border);
+}
+
+.neo-single-detail__header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  grid-column: 1;
+  grid-row: 1;
+  height: 80px;
+  min-height: 80px;
+  min-width: 0;
+  padding: 0 12px 0 40px;
+  border-bottom: 1px solid var(--neo-border);
+}
+
+.neo-job-detail__header h2,
+.neo-single-detail__header h2 {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--neo-text);
+  font-size: 17px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.neo-status-badge {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  padding: 4px 10px;
+  border: 1px solid var(--neo-border);
+  border-radius: var(--neo-radius);
+  color: var(--neo-text-secondary);
+  font-family: var(--neo-font-sans);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.neo-status-badge--running {
+  border-color: rgba(113, 224, 113, 0.3);
+  background: rgba(113, 224, 113, 0.15);
+  color: var(--neo-success);
+}
+
+.neo-status-badge--error,
+.neo-status-badge--failed {
+  border-color: rgba(255, 83, 83, 0.3);
+  background: rgba(255, 83, 83, 0.15);
+  color: var(--neo-error);
+}
+
+.neo-status-badge--stopped {
+  border-color: rgba(255, 83, 83, 0.3);
+  background: rgba(255, 83, 83, 0.15);
+  color: var(--neo-text);
+}
+
+.neo-status-badge--starting,
+.neo-status-badge--stopping {
+  border-color: rgba(0, 117, 226, 0.65);
+  background: rgba(0, 117, 226, 0.15);
+  color: #74b9ff;
+}
+
+.neo-job-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  grid-column: 2;
+  grid-row: 1;
+  height: 80px;
+  min-height: 80px;
+  min-width: 0;
+  padding: 0 40px 0 0;
+  border-bottom: 1px solid var(--neo-border);
+}
+
+.neo-single-detail__actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  grid-column: 2;
+  grid-row: 1;
+  height: 80px;
+  min-height: 80px;
+  min-width: 0;
+  padding: 0 40px 0 0;
+  border-bottom: 1px solid var(--neo-border);
+}
+
+.neo-job-actions button,
+.neo-single-detail__actions button {
+  gap: 6px;
+  height: 32px;
+  min-height: 32px;
+  padding: 0 16px;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1;
+}
+
+.neo-job-actions .material-symbols-outlined,
+.neo-single-detail__actions .material-symbols-outlined {
+  font-size: 14px;
+}
+
+.starter-button--danger {
+  border-color: #fa6464;
+  background: #ff4747;
+  color: #f1f1f1;
+}
+
+.starter-button--danger:hover:not(:disabled) {
+  border-color: var(--neo-error);
+  background: var(--neo-error);
+  color: #fff;
+}
+
+.neo-job-detail__metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+  grid-column: 1 / -1;
+  min-width: 0;
+  margin: 32px 40px 16px;
+}
+
+.neo-single-detail__metrics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-column: 1 / -1;
+  min-width: 0;
+  margin: 16px 16px 12px;
+  border: 1px solid var(--neo-border);
+  border-radius: var(--neo-radius);
+  background: var(--neo-elevated);
+}
+
+.neo-metric {
+  min-width: 0;
+  padding: 12px 14px;
+  border-right: 1px solid var(--neo-border);
+  border-bottom: 1px solid var(--neo-border);
+}
+
+.neo-summary-card {
+  min-width: 0;
+  min-height: 224px;
+  padding: 32px;
+  border: 1px solid var(--neo-border);
+  border-radius: var(--neo-radius);
+  background: var(--neo-bg);
+}
+
+.neo-summary-card h3 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 24px;
+  color: var(--neo-text);
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.neo-summary-card .neo-metric {
+  padding: 0;
+  border: 0;
+}
+
+.neo-summary-card .neo-metric + .neo-metric {
+  margin-top: 20px;
+}
+
+.neo-summary-card--count .neo-metric__value {
+  color: var(--neo-hover);
+  font-size: 32px;
+}
+
+.neo-summary-card:first-child .neo-metric:last-child .neo-metric__value {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.neo-metric:nth-child(2n) {
+  border-right: 0;
+}
+
+.neo-metric__label {
+  display: block;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--neo-text-muted);
+  font-family: var(--neo-font-sans);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.neo-metric__value {
+  display: block;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  margin-top: 7px;
+  color: var(--neo-text);
+  font-size: 16px;
+  line-height: 1.35;
+}
+
+.neo-job-errors {
+  grid-column: 1 / -1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  margin: 0 40px 16px;
+  padding: 10px 12px 10px 30px;
+  border: 1px solid rgba(255, 83, 83, 0.4);
+  border-radius: var(--neo-radius);
+  color: #ffaaa8;
+  background: var(--neo-elevated);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.neo-result-json {
+  grid-column: 1 / -1;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-wrap: anywhere;
+  margin: 0 40px 40px;
+  padding: 32px;
+  border: 1px solid var(--neo-border);
+  border-radius: var(--neo-radius);
+  background: var(--neo-bg);
+  color: #9ecbff;
+  font-size: 11px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.neo-result-card {
+  grid-column: 1 / -1;
+  min-width: 0;
+  margin: 0 40px 40px;
+  padding: 32px;
+  border: 1px solid var(--neo-border);
+  border-radius: var(--neo-radius);
+  background: var(--neo-bg);
+}
+
+.neo-result-card h3 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.neo-result-card .neo-result-json {
+  margin: 24px 0 0;
+  padding: 0;
+  border: 0;
+}
+
+.neo-empty-result,
+.starter-controller-detail {
+  grid-column: 1 / -1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  margin: 0 16px 16px;
+  padding: 10px 12px;
+  border: 1px solid var(--neo-border);
+  border-radius: var(--neo-radius);
+  color: var(--neo-text-secondary);
+  background: var(--neo-elevated);
+  font-size: 12px;
+}
+
+.starter-controller-detail {
+  color: #ffaaa8;
+}
+
+.neo-job-form {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  min-height: 100%;
+  min-width: 0;
+  margin: 0;
+  background: var(--neo-panel);
+}
+
+.neo-page-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 80px;
+  height: 80px;
+  min-width: 0;
+  min-height: 80px;
+  padding: 0 40px;
+  border-bottom: 1px solid var(--neo-border);
+}
+
+.neo-page-header h2 {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  font-size: 17px;
+  font-weight: 600;
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.neo-page-header__actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.neo-page-header__actions button {
+  height: 32px;
+  min-height: 32px;
+  padding: 0 16px;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1;
+}
+
+.neo-page-header__actions .material-symbols-outlined {
+  font-size: 14px;
+}
+
+.neo-icon-button {
+  width: 32px;
+  min-width: 32px;
+  height: 32px;
+  min-height: 32px;
+  padding: 0;
+  border-color: transparent;
+}
+
+.neo-button-primary {
+  border-color: var(--neo-hover);
+  background: var(--neo-selected);
+  color: #fff;
+}
+
+.neo-job-form__body {
+  flex: 1;
+  padding: 32px 40px 40px;
+}
+
+.neo-form-card {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--neo-border);
+  border-radius: var(--neo-radius);
+  padding: 32px;
+  background: var(--neo-bg);
+}
+
+.neo-form-card h3 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 0;
+  margin: 0 0 24px;
+  padding: 0;
+  border-bottom: 0;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.neo-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  padding: 0;
+}
+
+.neo-form-grid label {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  color: var(--neo-text-secondary);
+  font-family: var(--neo-font-sans);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.neo-empty-state {
+  width: min(100%, 560px);
+  min-width: 0;
+  margin: auto;
+  padding: 24px;
+  border: 1px solid var(--neo-border);
+  border-radius: var(--neo-radius);
+  background: var(--neo-elevated);
+  text-align: center;
+}
+
+.neo-empty-state h2 {
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-size: 16px;
+}
+
+.neo-empty-state p {
+  margin: 10px 0 0;
+  overflow-wrap: anywhere;
+  color: var(--neo-text-secondary);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.neo-empty-state button {
+  margin-top: 14px;
+}
+
+.neo-single-side {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  overflow-x: hidden;
+  background: var(--neo-panel);
+}
+
+.neo-single-side > h2 {
+  display: flex;
+  align-items: center;
+  height: var(--neo-side-header-height);
+  min-width: 0;
+  margin: 0;
+  gap: 6px;
+  padding: 0 16px;
+  overflow-wrap: anywhere;
+  border-bottom: 1px solid var(--neo-border);
+  color: var(--neo-text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.neo-single-side__summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
+  margin: 0;
+}
+
+.neo-single-side__summary div {
+  display: grid;
+  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
+  gap: 8px;
+  min-width: 0;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--neo-border);
+  font-family: var(--neo-font-sans);
+  font-size: 12px;
+}
+
+.neo-single-side__summary dt {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--neo-text-muted);
+}
+
+.neo-single-side__summary dd {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  margin: 0;
+  color: var(--neo-text);
+  text-align: right;
+}
+
+.neo-single-side__error {
+  min-width: 0;
+  margin: 8px 12px 0;
+  overflow: hidden;
+  color: #ffaaa8;
+  font-size: 12px;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 640px) {
+  .starter-index:not(.starter-index--split) .neo-job-detail,
+  .starter-index:not(.starter-index--split) .neo-single-detail {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .starter-entry .neo-job-detail,
+  .starter-entry .neo-single-detail {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .starter-index:not(.starter-index--split) .neo-job-actions,
+  .starter-index:not(.starter-index--split) .neo-single-detail__actions {
+    grid-column: 1;
+    grid-row: 2;
+    justify-content: flex-start;
+    padding: 5px 16px;
+  }
+
+  .starter-entry .neo-job-actions,
+  .starter-entry .neo-single-detail__actions {
+    grid-column: 1;
+    grid-row: 2;
+    justify-content: flex-start;
+    padding: 5px 16px;
+  }
+
+  .starter-index:not(.starter-index--split) .neo-job-detail__metrics, .starter-index:not(.starter-index--split) .neo-single-detail__metrics {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .starter-entry .neo-job-detail__metrics, .starter-entry .neo-single-detail__metrics {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .starter-index:not(.starter-index--split) .neo-metric {
+    border-right: 0;
+  }
+
+  .starter-entry .neo-metric {
+    border-right: 0;
+  }
+
+  .neo-form-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

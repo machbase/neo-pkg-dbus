@@ -1,0 +1,12 @@
+{
+  "/public/neo-pkg-dbus": {
+    "target": "http://localhost:5654"
+  },
+  "/api": {
+    "target": "http://localhost:5654"
+  },
+  "/web": {
+    "target": "http://localhost:5654",
+    "ws": true
+  }
+}

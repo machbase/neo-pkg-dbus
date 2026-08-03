@@ -1,0 +1,22 @@
+{
+  "name": "neo-pkg-template-frontend",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host",
+    "test:layout": "node tests/layout.test.mjs && node tests/async-contract.test.mjs && node tests/react-contract.test.mjs",
+    "build:root": "vite build --mode index && vite build --mode main && vite build --mode side"
+  },
+  "dependencies": {
+    "@tailwindcss/vite": "4.0.8",
+    "react": "19.1.0",
+    "react-dom": "19.1.0",
+    "tailwindcss": "4.0.8",
+    "vite": "6.4.3",
+    "vite-plugin-singlefile": "2.2.0"
+  },
+  "devDependencies": {
+    "react-test-renderer": "19.1.0"
+  }
+}

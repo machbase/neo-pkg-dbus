@@ -1,0 +1,16 @@
+{
+  "name": "neo-pkg-dbus",
+  "version": "1.0.0",
+  "description": "Machbase Neo jobs service package",
+  "minServerVersion": "8.5.6",
+  "scripts": {
+    "install": "scripts/install.js",
+    "start": "scripts/start.js",
+    "stop": "scripts/stop.js",
+    "uninstall": "scripts/uninstall.js"
+  },
+  "packageService": {
+    "managed": false,
+    "reason": "This package manages one Neo service per configured job."
+  }
+}

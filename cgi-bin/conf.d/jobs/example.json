@@ -1,0 +1,6 @@
+{
+  "name": "example",
+  "config": {
+    "intervalMs": 1000
+  }
+}
