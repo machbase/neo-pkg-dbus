@@ -125,6 +125,8 @@ export function AppProvider({ children, surface }) {
   const [selected, setSelected] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [createModal, setCreateModal] = useState("");
+  const [resourceRevision, setResourceRevision] = useState(0);
   const channelRef = useRef(null);
   const refreshGeneration = useRef(0);
 
@@ -156,6 +158,7 @@ export function AppProvider({ children, surface }) {
       if (message.type === "select-job") { setSelected(message.name); if (surface !== "side") navigate(`/jobs/${encodeURIComponent(message.name)}`); }
       if (message.type === "new-job" && surface !== "side") navigate("/jobs/new");
       if (message.type === "navigate" && surface !== "side") navigate(message.path);
+      if (message.type === "open-create-modal" && surface !== "side") setCreateModal(message.target);
     } });
     channelRef.current = channel;
     return () => { channel.close(); channelRef.current = null; };
@@ -168,6 +171,9 @@ export function AppProvider({ children, surface }) {
   }, [navigate, surface]);
   const newJob = useCallback(() => { if (surface !== "side") navigate("/jobs/new"); channelRef.current?.newJob(); }, [navigate, surface]);
   const go = useCallback((path) => { if (surface !== "side") navigate(path); channelRef.current?.navigate(path); }, [navigate, surface]);
+  const openCreateModal = useCallback((target) => { if (surface !== "side") setCreateModal(target); channelRef.current?.openCreateModal(target); }, [surface]);
+  const closeCreateModal = useCallback(() => setCreateModal(""), []);
+  const resourceChanged = useCallback(() => setResourceRevision((value) => value + 1), []);
   const run = useCallback(async (operation, { signal, isCurrent = () => true, onError } = {}) => {
     if (signal?.aborted || !isCurrent()) return false;
     setError(null);
@@ -185,11 +191,11 @@ export function AppProvider({ children, surface }) {
     }
   }, [refresh]);
 
-  return <AppContext.Provider value={{ jobs, selected, loading, error, refresh, selectJob, newJob, go, run }}>{children}</AppContext.Provider>;
+  return <AppContext.Provider value={{ jobs, selected, loading, error, createModal, resourceRevision, refresh, selectJob, newJob, go, openCreateModal, closeCreateModal, resourceChanged, run }}>{children}</AppContext.Provider>;
 }
 
 function useApp() {
-  return useContext(AppContext) || { jobs: [], selected: "", loading: false, error: null, refresh() {}, selectJob() {}, newJob() {}, go() {}, run: async () => false };
+  return useContext(AppContext) || { jobs: [], selected: "", loading: false, error: null, createModal: "", resourceRevision: 0, refresh() {}, selectJob() {}, newJob() {}, go() {}, openCreateModal() {}, closeCreateModal() {}, resourceChanged() {}, run: async () => false };
 }
 
 function StatusText({ job }) {
@@ -198,14 +204,24 @@ function StatusText({ job }) {
   return <span className={`neo-status neo-status--${key}`}>{state.replaceAll("_", " ")}</span>;
 }
 
-function IconButton({ icon, label, ...props }) {
-  return <button className="neo-icon-button" type="button" aria-label={label} title={label} {...props}><Icon name={icon} /></button>;
+function IconButton({ icon, label, className = "", ...props }) {
+  return <button className={`neo-icon-button ${className}`.trim()} type="button" aria-label={label} title={label} {...props}><Icon name={icon} /></button>;
 }
 
-export function JobSide({ jobs, selected, loading = false, error = null, onSelect, onNew, onRefresh, onToggle }) {
+function Modal({ title, onClose, children }) {
+  useEffect(() => {
+    if (typeof window === "undefined") return undefined;
+    const closeOnEscape = (event) => { if (event.key === "Escape") onClose(); };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [onClose]);
+  return <div className="neo-modal" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section className="neo-modal__dialog" role="dialog" aria-modal="true" aria-label={title}><header className="neo-modal__header"><h2>{title}</h2><IconButton icon="close" label={`Close ${title}`} onClick={onClose} /></header><div className="neo-modal__body">{children}</div></section></div>;
+}
+
+export function JobSide({ jobs, selected, loading = false, error = null, onSelect, onNew, onOpenModal = () => {}, onRefresh, onToggle }) {
   return <aside className="neo-side" aria-label="DBus Collector jobs">
-    <header className="neo-side__header"><span className="neo-package-mark"><Icon name="memory" /></span><strong title="neo-pkg-dbus">neo-pkg-dbus</strong></header>
-    <div className="neo-side__section"><span>JOBS</span><span className="neo-side__tools"><IconButton icon="add" label="New Job" onClick={onNew} /><IconButton icon="refresh" label="Refresh" onClick={onRefresh} /></span></div>
+    <header className="neo-side__header"><span className="neo-package-mark"><Icon name="memory" /></span><strong title="neo-pkg-dbus">neo-pkg-dbus</strong><span className="neo-side__header-actions"><IconButton icon="add" label="New Job" onClick={onNew} /><IconButton icon="dns" label="New DB Server" onClick={() => onOpenModal("db-server")} /><IconButton icon="account_tree" label="New Profile" onClick={() => onOpenModal("profile")} /></span></header>
+    <div className="neo-side__section"><span>JOBS</span><span className="neo-side__tools"><IconButton icon="refresh" label="Refresh" onClick={onRefresh} /></span></div>
     {loading ? <p className="neo-message" aria-live="polite">Loading jobs…</p> : null}
     {error ? <p className="neo-message neo-message--error" role="alert">{messageOf(error)}</p> : null}
     <div className="neo-job-list">
@@ -237,11 +253,11 @@ export function ConnectedSide() {
       mutation.finish();
     }
   };
-  return <JobSide {...app} onSelect={app.selectJob} onNew={app.newJob} onRefresh={app.refresh} onToggle={toggle} />;
+  return <JobSide {...app} onSelect={app.selectJob} onNew={app.newJob} onOpenModal={app.openCreateModal} onRefresh={app.refresh} onToggle={toggle} />;
 }
 
-function MainHeader({ title, subtitle, children }) {
-  return <header className="neo-main-header"><div><h1 title={title}>{title}</h1>{subtitle ? <p>{subtitle}</p> : null}</div><div className="neo-actions">{children}</div></header>;
+function MainHeader({ title, subtitle, onBack, children }) {
+  return <header className="neo-main-header"><div className="neo-main-header__title">{onBack ? <IconButton className="neo-back-button" icon="arrow_back" label="Back" onClick={onBack} /> : null}<div><h1 title={title}>{title}</h1>{subtitle ? <p>{subtitle}</p> : null}</div></div><div className="neo-actions">{children}</div></header>;
 }
 
 function Notice({ error, status, children }) {
@@ -251,14 +267,14 @@ function Notice({ error, status, children }) {
 
 function PageNav() {
   return <nav className="neo-nav" aria-label="Package sections">
-    <Link to="/profiles">Profiles</Link><Link to="/db-servers">DB Servers</Link><Link to="/logs">Logs</Link>
+    <Link to="/logs">Logs</Link>
   </nav>;
 }
 
 function Home() {
   const { jobs } = useApp();
-  if (jobs[0]) return <Navigate to={`/jobs/${encodeURIComponent(jobs[0].name)}`} replace />;
-  return <main className="neo-main" aria-label="DBus Collector main"><MainHeader title="DBus Collector"><Link className="neo-button neo-button--primary" to="/jobs/new">New Job</Link></MainHeader><PageNav /><section className="neo-empty"><h2>No jobs</h2><p>Create a Job to collect DBus values.</p></section></main>;
+  const noJobs = jobs.length === 0;
+  return <main className="neo-main neo-main--home" aria-label="DBus Collector main"><section className="neo-home-empty"><Icon name="inbox" /><p>{noJobs ? "No jobs yet" : "Select a job from the sidebar"}</p>{noJobs ? <p>Click "New" to get started</p> : null}</section></main>;
 }
 
 function JobDetail() {
@@ -524,7 +540,7 @@ function JobForm({ mode }) {
   const editBlockMessage = !editBlocked || !editJob ? "" : editJob.statusKnown !== true
     ? "Job status is unknown. Refresh the page after the controller is available."
     : "Stop this Job before editing, then refresh the page.";
-  return <main className="neo-main" aria-label="DBus Collector main"><MainHeader title={editing ? `Edit ${params.name}` : "New Job"}><button className="neo-button" type="button" onClick={() => navigate(-1)}>Cancel</button><button className="neo-button neo-button--primary" type="submit" form="job-form" disabled={editBlocked} title={editBlockMessage || undefined}>{editing ? "Save" : "Create"}</button></MainHeader>
+  return <main className="neo-main" aria-label="DBus Collector main"><MainHeader title={editing ? `Edit ${params.name}` : "New Job"} onBack={() => navigate(-1)}><button className="neo-button neo-button--primary" type="submit" form="job-form" disabled={editBlocked} title={editBlockMessage || undefined}>{editing ? "Save" : "Create"}</button></MainHeader>
     {loaded.loading ? <p className="neo-message" aria-live="polite">Loading form…</p> : null}<Notice error={loaded.error} /><Notice status>{editBlockMessage}</Notice>{errors.length ? <div className="neo-message neo-message--error" role="alert">{errors.map((error) => <p key={error}>{error}</p>)}</div> : null}{validationWarnings.length ? <div className="neo-message neo-message--warning" role="status"><p>Validation warnings found. Review them, then press {editing ? "Save" : "Create"} again to continue.</p>{validationWarnings.map((warning) => <p key={`${warning.code}-${JSON.stringify(warning.details || {})}`}>{warning.code}: {[...(warning.details?.jobs || []), ...(warning.details?.tags || [])].join(", ")}</p>)}</div> : null}
     <form id="job-form" className="neo-page-body" onSubmit={save}>
       <fieldset className="neo-form-lock" aria-label="Job editing controls" disabled={editBlocked}>
@@ -538,7 +554,8 @@ function JobForm({ mode }) {
 }
 
 function ProfilesPage() {
-  const loaded = useLoad((signal) => Promise.all([api.profiles.list({ signal }), api.settings.get({ signal })]), []);
+  const app = useApp();
+  const loaded = useLoad((signal) => Promise.all([api.profiles.list({ signal }), api.settings.get({ signal })]), [app.resourceRevision]);
   const [selected, setSelected] = useState("");
   const [draft, setDraft] = useState(createProfileDraft);
   const [detail, setDetail] = useState(null);
@@ -556,11 +573,12 @@ function ProfilesPage() {
   useEffect(() => {
     if (blocked && editing) { setEditing(false); setDraft(createProfileDraft()); }
   }, [blocked, editing]);
+  const profileForm = <section className="neo-panel"><h2>{editing ? "EDIT CUSTOM PROFILE" : "NEW CUSTOM PROFILE"}</h2><div className="neo-form-grid"><Field label="ID"><Input maxLength={100} value={draft.id} readOnly={editing} onChange={(id) => setDraft({ ...draft, id: id.toLowerCase() })} /></Field><Field label="Display Name"><Input value={draft.displayName} onChange={(displayName) => setDraft({ ...draft, displayName })} /></Field><Field label="Vendor"><Input value={draft.vendor} onChange={(vendor) => setDraft({ ...draft, vendor })} /></Field><Field label="Minimum Neo Version"><Input value={draft.compatibility.minNeoVersion} onChange={(minNeoVersion) => setDraft({ ...draft, compatibility: { minNeoVersion } })} /></Field><Field label="Bus Type"><select value={draft.defaults.busType} onChange={(event) => setDraft({ ...draft, defaults: { ...draft.defaults, busType: event.target.value } })}><option value="system">system</option><option value="session">session</option></select></Field><Field label="Destination"><Input value={draft.defaults.destination} onChange={(destination) => setDraft({ ...draft, defaults: { ...draft.defaults, destination } })} /></Field></div><span className="neo-actions"><button className="neo-button neo-button--primary" disabled={editing && blocked} onClick={save}>{editing ? "Save Profile" : "Create Profile"}</button>{editing ? <button className="neo-button" onClick={() => { setEditing(false); setDraft(createProfileDraft()); }}>Cancel</button> : null}</span></section>;
   return <main className="neo-main" aria-label="DBus Collector main"><MainHeader title="Profiles" subtitle="Built-in profiles are read-only." /><PageNav /><Notice error={loaded.error || error} /><Notice status>{message}</Notice><div className="neo-page-body neo-management">
     {settingsDraft ? <section className="neo-panel"><h2>SETTINGS</h2><div className="neo-form-grid"><Field label="Default Profile"><select aria-label="Default Profile" value={settingsDraft.defaultProfileId} onChange={(event) => setSettingsDraft({ ...settingsDraft, defaultProfileId: event.target.value })}>{(loaded.data?.[0] || []).map((profile) => <option value={profile.id} key={profile.id}>{profile.displayName}</option>)}</select></Field><Field label="Max Generated Tags"><Input aria-label="Max Generated Tags" type="number" value={settingsDraft.limits.maxGeneratedTagsPerCall} onChange={(value) => setSettingsDraft({ ...settingsDraft, limits: { ...settingsDraft.limits, maxGeneratedTagsPerCall: Number(value) } })} /></Field><Field label="Max Buffered Rows"><Input aria-label="Max Buffered Rows" type="number" value={settingsDraft.limits.maxBufferedRowsPerCycle} onChange={(value) => setSettingsDraft({ ...settingsDraft, limits: { ...settingsDraft.limits, maxBufferedRowsPerCycle: Number(value) } })} /></Field></div><button className="neo-button neo-button--primary" onClick={saveSettings}>Save Settings</button></section> : null}
     <section className="neo-panel"><h2>PROFILE LIST</h2><table><thead><tr><th>Name</th><th>Vendor</th><th>Type</th><th>Version</th><th>Neo</th><th>Methods</th></tr></thead><tbody>{(loaded.data?.[0] || []).map((profile) => <tr key={profile.id}><td><button className="neo-link-button" onClick={() => setSelected(profile.id)}>{profile.displayName}</button>{profile.default ? <small> DEFAULT</small> : null}</td><td>{profile.vendor}</td><td>{profile.builtIn ? "Built-in" : "Custom"}</td><td>{profile.profileVersion}</td><td>{profile.compatible ? "Compatible" : profile.compatibilityReason}</td><td>{profile.methodCount}</td></tr>)}</tbody></table></section>
     {detail ? <section className="neo-panel"><div className="neo-panel__title"><h2>{detail.profile.displayName}</h2><span className="neo-actions">{detail.profile.builtIn ? "READ ONLY" : <><button className="neo-button" disabled={blocked} title={blocked ? "Running or unknown reference blocks changes." : "Edit Profile"} onClick={() => { setDraft(detail.profile); setEditing(true); }}>Edit Profile</button><button className="neo-button neo-button--danger" disabled={referenced} title={referenced ? "Referenced Profiles cannot be deleted." : "Delete Profile"} onClick={remove}>Delete Profile</button></>}</span></div><p>{detail.compatibilityReason || `Compatible with Neo ${detail.profile.compatibility.minNeoVersion}+`}</p><p>Referenced by: {(detail.references || []).map((item) => `${item.name} (${item.controllerState})`).join(", ") || "None"}</p><MethodManager profile={detail.profile} profileBlocked={blocked} onError={setError} reload={() => { api.profiles.get(detail.profile.id).then(setDetail, setError); loaded.reload(); }} /></section> : null}
-    <section className="neo-panel"><h2>{editing ? "EDIT CUSTOM PROFILE" : "NEW CUSTOM PROFILE"}</h2><div className="neo-form-grid"><Field label="ID"><Input maxLength={100} value={draft.id} readOnly={editing} onChange={(id) => setDraft({ ...draft, id: id.toLowerCase() })} /></Field><Field label="Display Name"><Input value={draft.displayName} onChange={(displayName) => setDraft({ ...draft, displayName })} /></Field><Field label="Vendor"><Input value={draft.vendor} onChange={(vendor) => setDraft({ ...draft, vendor })} /></Field><Field label="Minimum Neo Version"><Input value={draft.compatibility.minNeoVersion} onChange={(minNeoVersion) => setDraft({ ...draft, compatibility: { minNeoVersion } })} /></Field><Field label="Bus Type"><select value={draft.defaults.busType} onChange={(event) => setDraft({ ...draft, defaults: { ...draft.defaults, busType: event.target.value } })}><option value="system">system</option><option value="session">session</option></select></Field><Field label="Destination"><Input value={draft.defaults.destination} onChange={(destination) => setDraft({ ...draft, defaults: { ...draft.defaults, destination } })} /></Field></div><span className="neo-actions"><button className="neo-button neo-button--primary" disabled={editing && blocked} onClick={save}>{editing ? "Save Profile" : "Create Profile"}</button>{editing ? <button className="neo-button" onClick={() => { setEditing(false); setDraft(createProfileDraft()); }}>Cancel</button> : null}</span></section></div></main>;
+    {editing ? profileForm : null}</div></main>;
 }
 
 function MethodManager({ profile, profileBlocked = false, onError, reload }) {
@@ -593,7 +611,8 @@ function MethodManager({ profile, profileBlocked = false, onError, reload }) {
 }
 
 function DbServersPage() {
-  const loaded = useLoad((signal) => api.db.servers.list({ signal }), []);
+  const app = useApp();
+  const loaded = useLoad((signal) => api.db.servers.list({ signal }), [app.resourceRevision]);
   const [draft, setDraft] = useState({ name: "", host: "127.0.0.1", port: 5656, user: "", password: "", database: "" });
   const [editing, setEditing] = useState("");
   const [message, setMessage] = useState("");
@@ -604,7 +623,43 @@ function DbServersPage() {
   const test = async (name) => { try { const result = await api.db.connect(name); setMessage(result.reason || `Connection to ${name} succeeded.`); } catch (failure) { setError(failure); } };
   const loadTables = async (server) => { if (!server) { setTables([]); return; } try { const values = await api.db.tables.list({ server }); setTables(values.tables || values || []); } catch (failure) { setError(failure); } };
   const createTable = async () => { try { await api.db.tables.create(tableDraft); setMessage(`${tableDraft.table} created.`); await loadTables(tableDraft.server); } catch (failure) { setError(failure); } };
-  return <main className="neo-main" aria-label="DBus Collector main"><MainHeader title="DB Servers" subtitle="Passwords are write-only." /><PageNav /><Notice error={loaded.error || error} /><Notice status>{message}</Notice><div className="neo-page-body"><section className="neo-panel"><h2>REGISTERED SERVERS</h2>{(loaded.data || []).map((server) => <div className="neo-list-row" key={server.name}><span><strong>{server.name}</strong> {server.host}:{server.port}</span><span className="neo-actions"><button className="neo-button" onClick={() => { setEditing(server.name); setDraft({ ...server, password: "" }); }}>Edit</button><button className="neo-button" onClick={() => test(server.name)}>Test Connection</button><button className="neo-button neo-button--danger" onClick={() => api.db.servers.remove(server.name).then(loaded.reload, setError)}>Delete</button></span></div>)}</section><section className="neo-panel"><h2>{editing ? `EDIT ${editing}` : "NEW SERVER"}</h2><div className="neo-form-grid">{Object.entries(draft).map(([key, value]) => <Field label={key.toUpperCase()} key={key}><Input type={key === "password" ? "password" : key === "port" ? "number" : "text"} value={value} readOnly={editing && key === "name"} onChange={(next) => setDraft({ ...draft, [key]: key === "port" ? Number(next) : next })} /></Field>)}</div><button className="neo-button neo-button--primary" onClick={save}>{editing ? "Save" : "Create"}</button></section><section className="neo-panel"><h2>CREATE TAG TABLE</h2><div className="neo-form-grid"><Field label="Server"><select aria-label="Table server" value={tableDraft.server} onChange={(event) => { const server = event.target.value; setTableDraft({ ...tableDraft, server }); void loadTables(server); }}><option value="">Select server</option>{(loaded.data || []).map((server) => <option key={server.name}>{server.name}</option>)}</select></Field><Field label="Table Name"><Input aria-label="Table name" value={tableDraft.table} onChange={(table) => setTableDraft({ ...tableDraft, table })} /></Field></div><button className="neo-button neo-button--primary" disabled={!tableDraft.server || !tableDraft.table} onClick={createTable}>Create TAG Table</button><p>Tables: {tables.map((table) => table.name || table).join(", ") || "None"}</p></section></div></main>;
+  const serverForm = <section className="neo-panel"><h2>{editing ? `EDIT ${editing}` : "NEW SERVER"}</h2><div className="neo-form-grid">{Object.entries(draft).map(([key, value]) => <Field label={key.toUpperCase()} key={key}><Input type={key === "password" ? "password" : key === "port" ? "number" : "text"} value={value} readOnly={editing && key === "name"} onChange={(next) => setDraft({ ...draft, [key]: key === "port" ? Number(next) : next })} /></Field>)}</div><button className="neo-button neo-button--primary" onClick={save}>{editing ? "Save" : "Create"}</button></section>;
+  return <main className="neo-main" aria-label="DBus Collector main"><MainHeader title="DB Servers" subtitle="Passwords are write-only." /><PageNav /><Notice error={loaded.error || error} /><Notice status>{message}</Notice><div className="neo-page-body"><section className="neo-panel"><h2>REGISTERED SERVERS</h2>{(loaded.data || []).map((server) => <div className="neo-list-row" key={server.name}><span><strong>{server.name}</strong> {server.host}:{server.port}</span><span className="neo-actions"><button className="neo-button" onClick={() => { setEditing(server.name); setDraft({ ...server, password: "" }); }}>Edit</button><button className="neo-button" onClick={() => test(server.name)}>Test Connection</button><button className="neo-button neo-button--danger" onClick={() => api.db.servers.remove(server.name).then(loaded.reload, setError)}>Delete</button></span></div>)}</section>{editing ? serverForm : null}<section className="neo-panel"><h2>CREATE TAG TABLE</h2><div className="neo-form-grid"><Field label="Server"><select aria-label="Table server" value={tableDraft.server} onChange={(event) => { const server = event.target.value; setTableDraft({ ...tableDraft, server }); void loadTables(server); }}><option value="">Select server</option>{(loaded.data || []).map((server) => <option key={server.name}>{server.name}</option>)}</select></Field><Field label="Table Name"><Input aria-label="Table name" value={tableDraft.table} onChange={(table) => setTableDraft({ ...tableDraft, table })} /></Field></div><button className="neo-button neo-button--primary" disabled={!tableDraft.server || !tableDraft.table} onClick={createTable}>Create TAG Table</button><p>Tables: {tables.map((table) => table.name || table).join(", ") || "None"}</p></section></div></main>;
+}
+
+function CreateModalLayer() {
+  const app = useApp();
+  if (app.createModal === "profile") return <ProfileCreateModal />;
+  if (app.createModal === "db-server") return <DbServerCreateModal />;
+  return null;
+}
+
+function ProfileCreateModal() {
+  const app = useApp();
+  const [draft, setDraft] = useState(createProfileDraft);
+  const [error, setError] = useState(null);
+  const save = async () => {
+    try {
+      await api.profiles.create({ ...draft, builtIn: false });
+      app.resourceChanged();
+      app.closeCreateModal();
+    } catch (failure) { setError(failure); }
+  };
+  return <Modal title="New Profile" onClose={app.closeCreateModal}><Notice error={error} /><section className="neo-panel"><div className="neo-form-grid"><Field label="ID"><Input maxLength={100} value={draft.id} onChange={(id) => setDraft({ ...draft, id: id.toLowerCase() })} /></Field><Field label="Display Name"><Input value={draft.displayName} onChange={(displayName) => setDraft({ ...draft, displayName })} /></Field><Field label="Vendor"><Input value={draft.vendor} onChange={(vendor) => setDraft({ ...draft, vendor })} /></Field><Field label="Minimum Neo Version"><Input value={draft.compatibility.minNeoVersion} onChange={(minNeoVersion) => setDraft({ ...draft, compatibility: { minNeoVersion } })} /></Field><Field label="Bus Type"><select value={draft.defaults.busType} onChange={(event) => setDraft({ ...draft, defaults: { ...draft.defaults, busType: event.target.value } })}><option value="system">system</option><option value="session">session</option></select></Field><Field label="Destination"><Input value={draft.defaults.destination} onChange={(destination) => setDraft({ ...draft, defaults: { ...draft.defaults, destination } })} /></Field></div><span className="neo-actions"><button className="neo-button neo-button--primary" onClick={save}>Create Profile</button><button className="neo-button" onClick={app.closeCreateModal}>Cancel</button></span></section></Modal>;
+}
+
+function DbServerCreateModal() {
+  const app = useApp();
+  const [draft, setDraft] = useState({ name: "", host: "127.0.0.1", port: 5656, user: "", password: "", database: "" });
+  const [error, setError] = useState(null);
+  const save = async () => {
+    try {
+      await api.db.servers.create(draft);
+      app.resourceChanged();
+      app.closeCreateModal();
+    } catch (failure) { setError(failure); }
+  };
+  return <Modal title="New DB Server" onClose={app.closeCreateModal}><Notice error={error} /><section className="neo-panel"><div className="neo-form-grid">{Object.entries(draft).map(([key, value]) => <Field label={key.toUpperCase()} key={key}><Input type={key === "password" ? "password" : key === "port" ? "number" : "text"} value={value} onChange={(next) => setDraft({ ...draft, [key]: key === "port" ? Number(next) : next })} /></Field>)}</div><span className="neo-actions"><button className="neo-button neo-button--primary" onClick={save}>Create</button><button className="neo-button" onClick={app.closeCreateModal}>Cancel</button></span></section></Modal>;
 }
 
 function VirtualRows({ rows }) {
@@ -697,6 +752,6 @@ export function MainRoutes() {
 
 export { MemoryRouter };
 
-export function CombinedApp() { return <AppProvider surface="index"><div className="neo-index"><ConnectedSide /><MainRoutes /></div></AppProvider>; }
-export function MainApp() { return <AppProvider surface="main"><MainRoutes /></AppProvider>; }
+export function CombinedApp() { return <AppProvider surface="index"><div className="neo-index"><ConnectedSide /><MainRoutes /></div><CreateModalLayer /></AppProvider>; }
+export function MainApp() { return <AppProvider surface="main"><MainRoutes /><CreateModalLayer /></AppProvider>; }
 export function SideApp() { return <AppProvider surface="side"><ConnectedSide /></AppProvider>; }

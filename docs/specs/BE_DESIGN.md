@@ -2,7 +2,7 @@
 
 ## 1. 목적과 변하지 않는 계약
 
-Backend는 Machbase Neo JSH CommonJS 환경에서 Job별 DBus 수집 service, 설정 파일, CGI API를 제공한다. 최소 Neo 버전은 `8.5.6`이고 모든 새 설정의 `schemaVersion`은 `1`이다. 패키지 구현 범위는 Side/Main용 jobs 모델이며, 기존 카운터 예제의 설정·결과·service 이름·API 계약은 호환하지 않는다. 기존 `/jobs/*`, counter JSON, worker를 읽거나 변환하지 않는 이유와 운영자 전환 방법은 `DBUS_SDD.md`의 **1.1 기존 카운터 계약의 비호환 변경과 이유**를 따른다. 구현 중 확정한 추가 계약은 **1.2**를 따르며, **1.3은 JSH 호환성 수정 설계**다.
+Backend는 Machbase Neo JSH CommonJS 환경에서 Job별 DBus 수집 service, 설정 파일, CGI API를 제공한다. 최소 Neo 버전은 `8.5.6`이고 모든 새 설정의 `schemaVersion`은 `1`이다. 패키지 구현 범위는 Side/Main용 jobs 모델이며, 기존 카운터 예제의 설정·결과·service 이름·API 계약은 호환하지 않는다. 기존 `/jobs/*`, counter JSON, worker를 읽거나 변환하지 않는 이유와 운영자 전환 방법은 `DBUS_SDD.md`의 **1.1 기존 카운터 계약의 비호환 변경과 이유**를 따른다. 구현 중 확정한 추가 계약은 **1.2**를 따르며, **1.3은 JSH 호환성 수정 설계**다. CCR-007의 `open-create-modal`과 CCR-008의 첫 Main 화면·Back 화살표·모달 배경은 Frontend 전용이므로 Backend API·CGI 동작은 바꾸지 않는다.
 
 Job 하나는 service 하나다. service 이름은 반드시 `_dbu_<jobName>`이다. 서로 다른 Job service는 같은 DBus Destination을 사용해도 동시에 실행할 수 있다. 한 Job 안의 Method Call은 config 배열 순서대로 실행한다.
 

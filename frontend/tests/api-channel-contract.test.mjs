@@ -77,6 +77,9 @@ await assert.rejects(api.jobs.update("job-a", { revision: 1, schedule: { interva
 
 assert.equal(isPackageMessage({ type: "select-job", name: "a" }), true);
 assert.equal(isPackageMessage({ type: "new-job" }), true);
+assert.equal(isPackageMessage({ type: "open-create-modal", target: "profile" }), true);
+assert.equal(isPackageMessage({ type: "open-create-modal", target: "db-server" }), true);
+assert.equal(isPackageMessage({ type: "open-create-modal", target: "job" }), false);
 assert.equal(isPackageMessage({ type: "navigate", path: "/profiles" }), true);
 assert.equal(isPackageMessage({ type: "refresh" }), true);
 assert.equal(isPackageMessage({ type: "navigate", path: "" }), false);
@@ -89,8 +92,8 @@ globalThis.BroadcastChannel = class {
   close() { closed = true; }
 };
 const channel = createPackageChannel({ enabled: true, name: "app:neo-pkg-dbus", onMessage() {} });
-channel.selectJob("a"); channel.newJob(); channel.navigate("/profiles"); channel.refresh(); channel.close();
-assert.deepEqual(sent, [{ type: "select-job", name: "a" }, { type: "new-job" }, { type: "navigate", path: "/profiles" }, { type: "refresh" }]);
+channel.selectJob("a"); channel.newJob(); channel.openCreateModal("profile"); channel.navigate("/profiles"); channel.refresh(); channel.close();
+assert.deepEqual(sent, [{ type: "select-job", name: "a" }, { type: "new-job" }, { type: "open-create-modal", target: "profile" }, { type: "navigate", path: "/profiles" }, { type: "refresh" }]);
 assert.equal(closed, true);
 
 console.log("api and channel contract tests passed");

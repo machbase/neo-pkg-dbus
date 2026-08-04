@@ -28,6 +28,8 @@ DBus Collector
 - Main의 상세·생성 헤더, 카드, 입력, 상태 메시지, 버튼, 포커스, 접근성은 `DESIGN.md`의 공용 컴포넌트 규칙을 그대로 따른다.
 - Side에서는 switch만 시작/정지를 담당한다. Side가 있는 Main 상세에는 Start/Stop 버튼을 중복해 표시하지 않는다.
 - 긴 이름은 말줄임표 또는 `overflow-wrap: anywhere`를 사용하고 모든 grid 자식에는 `min-width: 0`을 둔다.
+- Side 헤더의 New Profile과 New DB Server는 현재 route를 바꾸지 않는다. Side는 각각 `{type:"open-create-modal",target:"profile"}` 또는 `{type:"open-create-modal",target:"db-server"}`를 BroadcastChannel로 보내고, Main은 현재 화면 위에 생성 모달을 연다. 모달은 취소, 닫기, 바깥 영역 클릭, Esc로 닫으며 생성 성공 뒤에도 원래 화면을 유지한다. 이 변경의 이전 계약·이유·승인 기록은 `DBUS_SDD.md`의 CCR-007을 따른다.
+- Main의 첫 `/` 화면은 Job을 자동으로 열지 않고 제목·상단 메뉴·카드 없이 중앙 안내만 표시한다. Job이 없으면 `inbox`, `No jobs yet`, `Click "New" to get started`를, Job이 있으면 `inbox`, `Select a job from the sidebar`를 표시한다. Job 생성·수정 헤더는 이전 화면으로 가는 32px Back 화살표를 제공한다. 생성 모달의 dim 배경은 기존 surface를 70%로 사용해 뒤 화면을 보이게 하면서도 어둡게 구분한다. 이전 계약·이유·승인은 `DBUS_SDD.md`의 CCR-008을 따른다.
 
 ## 3. 공통 상태 모델
 

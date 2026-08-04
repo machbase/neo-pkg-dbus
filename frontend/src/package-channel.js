@@ -2,6 +2,8 @@ export function isPackageMessage(value) {
   return Boolean(value) && (
     value.type === "refresh"
     || value.type === "new-job"
+    || (value.type === "open-create-modal"
+      && (value.target === "profile" || value.target === "db-server"))
     || (value.type === "navigate"
       && typeof value.path === "string"
       && value.path.length > 0)
@@ -18,6 +20,7 @@ export function createPackageChannel({ enabled, name, onMessage }) {
       refresh() {},
       selectJob() {},
       newJob() {},
+      openCreateModal() {},
       navigate() {},
       close() {},
     };
@@ -36,6 +39,7 @@ export function createPackageChannel({ enabled, name, onMessage }) {
     refresh() { send({ type: "refresh" }); },
     selectJob(name) { send({ type: "select-job", name }); },
     newJob() { send({ type: "new-job" }); },
+    openCreateModal(target) { send({ type: "open-create-modal", target }); },
     navigate(path) { send({ type: "navigate", path }); },
     close() { channel.onmessage = null; channel.close(); },
   };

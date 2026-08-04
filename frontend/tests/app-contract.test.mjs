@@ -20,19 +20,41 @@ try {
     { name: "running", profileId: "ls", configState: "installed", executionState: "running", controllerState: "RUNNING", statusKnown: true },
     { name: "unknown", profileId: "ls", configState: null, executionState: null, controllerState: "UNKNOWN", statusKnown: false },
   ];
+  const sideModalTargets = [];
+  let newJobCalls = 0;
   let side;
-  await act(async () => { side = create(React.createElement(JobSide, { jobs, selected: "running", onSelect() {}, onNew() {}, onRefresh() {}, onToggle() {} })); });
+  await act(async () => { side = create(React.createElement(JobSide, { jobs, selected: "running", onSelect() {}, onNew() { newJobCalls += 1; }, onOpenModal: (target) => sideModalTargets.push(target), onRefresh() {}, onToggle() {} })); });
   assert.equal(side.root.findByType("aside").props["aria-label"], "DBus Collector jobs");
   assert.equal(side.root.findAllByProps({ "aria-label": "config Install required" }).length, 1);
   assert.equal(side.root.findByProps({ "aria-label": "running Stop" }).props.disabled, false);
   assert.equal(side.root.findByProps({ "aria-label": "unknown Start" }).props.disabled, true);
-  assert.equal(side.root.findByProps({ "aria-label": "New Job" }).props.title, "New Job");
+  const sideHeaderButtons = side.root.findByType("header").findAllByType("button");
+  assert.deepEqual(sideHeaderButtons.map((button) => button.props["aria-label"]), ["New Job", "New DB Server", "New Profile"]);
+  assert.deepEqual(sideHeaderButtons.map((button) => button.props.title), ["New Job", "New DB Server", "New Profile"]);
+  assert.equal(textOf(sideHeaderButtons[0]), "add");
+  assert.equal(side.root.findAllByProps({ "aria-label": "New Job" }).length, 1);
+  sideHeaderButtons[0].props.onClick();
+  sideHeaderButtons[1].props.onClick();
+  sideHeaderButtons[2].props.onClick();
+  assert.equal(newJobCalls, 1);
+  assert.deepEqual(sideModalTargets, ["db-server", "profile"]);
 
   let main;
   await act(async () => { main = create(React.createElement(MemoryRouter, { initialEntries: ["/profiles"] }, React.createElement(MainRoutes, { embedded: true }))); });
   assert.equal(main.root.findByType("main").props["aria-label"], "DBus Collector main");
   assert.match(JSON.stringify(main.toJSON()), /Profiles/);
+  assert.deepEqual(main.root.findByProps({ "aria-label": "Package sections" }).findAllByType("a").map((link) => textOf(link)), ["Logs"]);
   await act(async () => { main.unmount(); });
+
+  let home;
+  await act(async () => { home = create(React.createElement(MemoryRouter, { initialEntries: ["/"] }, React.createElement(MainRoutes, { embedded: true }))); });
+  assert.match(textOf(home.toJSON()), /No jobs yet/);
+  assert.match(textOf(home.toJSON()), /Click "New" to get started/);
+  assert.match(JSON.stringify(home.toJSON()), /inbox/);
+  assert.equal(home.root.findAllByType("h1").length, 0);
+  assert.equal(home.root.findAllByType("h2").length, 0);
+  assert.equal(home.root.findAllByProps({ "aria-label": "Package sections" }).length, 0);
+  await act(async () => { home.unmount(); });
 
   const requests = [];
   const jobConfig = {
@@ -245,7 +267,7 @@ try {
   let routeSave;
   await act(() => { routeSave = routeEdit.root.findByProps({ id: "job-form" }).props.onSubmit({ preventDefault() {} }); });
   await act(async () => { await Promise.resolve(); });
-  await act(async () => { routeEdit.root.findAllByType("button").find((button) => textOf(button) === "Cancel").props.onClick(); });
+  await act(async () => { routeEdit.root.findByProps({ "aria-label": "Back" }).props.onClick(); });
   assert.equal(pendingA.signal.aborted, true, "route change aborts Job A's active conflict reload");
   pendingA.resolve(response(latestA));
   await routeSave;
@@ -279,7 +301,7 @@ try {
   let lateConflictSave;
   await act(() => { lateConflictSave = lateConflictRoute.root.findByProps({ id: "job-form" }).props.onSubmit({ preventDefault() {} }); });
   await act(async () => { await Promise.resolve(); });
-  await act(async () => { lateConflictRoute.root.findAllByType("button").find((button) => textOf(button) === "Cancel").props.onClick(); });
+  await act(async () => { lateConflictRoute.root.findByProps({ "aria-label": "Back" }).props.onClick(); });
   assert.equal(pendingBLoad.signal.aborted, false);
   deferredPut(failureResponse("JOB_CONFLICT", "revision changed", { name: "a", expectedRevision: 1, currentRevision: 2 }));
   await act(async () => { await lateConflictSave; });
@@ -436,7 +458,7 @@ try {
   await act(() => { saveAOperation = formSuccessRoute.root.findByProps({ id: "job-form" }).props.onSubmit({ preventDefault() {} }); });
   await act(async () => { await Promise.resolve(); });
   assert.ok(pendingPutA.signal, "Job save receives an AbortSignal");
-  await act(async () => { formSuccessRoute.root.findAllByType("button").find((button) => textOf(button) === "Cancel").props.onClick(); });
+  await act(async () => { formSuccessRoute.root.findByProps({ "aria-label": "Back" }).props.onClick(); });
   const formRouteInterval = () => formSuccessRoute.root.findAllByType("input").find((input) => String(input.props.min) === "1000");
   await act(async () => { formRouteInterval().props.onChange({ target: { value: "4500" } }); });
   pendingPutA.resolve(response({ ...initialA, revision: 2 }));
@@ -456,7 +478,7 @@ try {
   await act(() => { failedValidationOperation = formFailureRoute.root.findByProps({ id: "job-form" }).props.onSubmit({ preventDefault() {} }); });
   await act(async () => { await Promise.resolve(); });
   assert.ok(pendingValidationA.signal, "Job validation receives an AbortSignal");
-  await act(async () => { formFailureRoute.root.findAllByType("button").find((button) => textOf(button) === "Cancel").props.onClick(); });
+  await act(async () => { formFailureRoute.root.findByProps({ "aria-label": "Back" }).props.onClick(); });
   pendingValidationA.resolve(failureResponse("JOB_VALIDATE_FAILED", "Job A validation failed."));
   await act(async () => { await failedValidationOperation; });
   assert.match(textOf(formFailureRoute.toJSON()), /Edit b/);
@@ -497,7 +519,7 @@ try {
   await act(async () => { staleTagName.props.onChange({ target: { value: "" } }); });
   await act(async () => { await slowBEdit.root.findByProps({ id: "job-form" }).props.onSubmit({ preventDefault() {} }); });
   assert.match(textOf(slowBEdit.toJSON()), /Tag name is required/i);
-  await act(async () => { slowBEdit.root.findAllByType("button").find((button) => textOf(button) === "Cancel").props.onClick(); });
+  await act(async () => { slowBEdit.root.findByProps({ "aria-label": "Back" }).props.onClick(); });
   const routedJobName = () => slowBEdit.root.findAllByType("input").find((input) => input.props.readOnly && input.props.disabled);
   assert.equal(routedJobName().props.value, "", "Job A name is cleared while Job B is loading");
   assert.doesNotMatch(textOf(slowBEdit.toJSON()), /Tag name is required/i, "Job A errors are cleared on the Job B route");
@@ -526,7 +548,7 @@ try {
     await act(() => { operation = view.root.findAllByType("button").find((button) => textOf(button) === "Test Call").props.onClick(); });
     await act(async () => { await Promise.resolve(); });
     assert.ok(pendingCall.signal, "Test Call receives an AbortSignal");
-    await act(async () => { view.root.findAllByType("button").find((button) => textOf(button) === "Cancel").props.onClick(); });
+    await act(async () => { view.root.findByProps({ "aria-label": "Back" }).props.onClick(); });
     assert.equal(pendingCall.signal.aborted, true, "route change aborts Job A's Test Call");
     pendingCall.resolve(lateResponse);
     await act(async () => { await operation; });
@@ -743,6 +765,7 @@ try {
   };
   let newJob;
   await act(async () => { newJob = create(React.createElement(MemoryRouter, { initialEntries: ["/jobs/new"] }, React.createElement(MainRoutes))); });
+  assert.equal(newJob.root.findByProps({ "aria-label": "Back" }).props.title, "Back");
   const methodSelect = () => newJob.root.findAllByType("select").find((select) => String(select.props["aria-label"] || "").endsWith(" Method"));
   assert.equal(methodSelect().props.value, "read-value", "default custom Profile uses its real Method");
   await act(async () => { newJob.root.findAllByType("button").find((button) => textOf(button) === "Add Call").props.onClick(); });
@@ -820,6 +843,8 @@ try {
   assert.match(css, /grid-template-columns:\s*var\(--neo-side-width\)\s+minmax\(0,\s*1fr\)/);
   assert.match(css, /@media\s*\(max-width:\s*640px\)/);
   assert.match(css, /outline:\s*2px\s+solid\s+var\(--neo-interactive-hover\)/);
+  assert.match(css, /\.neo-modal\s*\{[^}]*color-mix\(in srgb, var\(--neo-surface\) 70%, transparent\)/);
+  assert.match(css, /\.neo-back-button\s*\{[^}]*width:\s*32px/);
   assert.doesNotMatch(css, /border-radius:\s*8px|box-shadow:\s*0\s+[2-9]\d/);
   assert.doesNotMatch(css, /height:\s*480px|minmax\(120px|100px/);
 } finally {
