@@ -1,17 +1,21 @@
 {
-  "name": "neo-pkg-template-frontend",
+  "name": "neo-pkg-dbus-frontend",
   "private": true,
   "version": "1.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite --host",
-    "test:layout": "node tests/layout.test.mjs && node tests/async-contract.test.mjs && node tests/react-contract.test.mjs",
+    "test": "npm run test:layout",
+    "test:layout": "node tests/model-contract.test.mjs && node tests/api-channel-contract.test.mjs && node tests/app-contract.test.mjs",
     "build:root": "vite build --mode index && vite build --mode main && vite build --mode side"
   },
   "dependencies": {
     "@tailwindcss/vite": "4.0.8",
+    "@tanstack/react-virtual": "3.13.12",
+    "echarts": "6.0.0",
     "react": "19.1.0",
     "react-dom": "19.1.0",
+    "react-router": "7.8.0",
     "tailwindcss": "4.0.8",
     "vite": "6.4.3",
     "vite-plugin-singlefile": "2.2.0"

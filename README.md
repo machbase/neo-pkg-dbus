@@ -1,130 +1,88 @@
 # neo-pkg-dbus
 
-Machbase Neo용 작업별 서비스 패키지입니다. 생성만으로는 카운터 예제가
-실행되지 않습니다. 패키지의 install/start 뒤 Neo Controller가 오래 실행되는
-worker/service를 시작하면 카운터를 1씩 올리고, CGI API와 화면은 그 결과를 읽어
-보여 줍니다.
+Machbase Neo에서 Linux DBus 값을 읽어 TAG table에 저장하는 Job 패키지입니다. 기본 Profile은 LS ELECTRIC PLC의 `ls.plc`이며, Job마다 `_dbu_<jobName>` service 하나를 사용합니다.
 
-이 프로젝트는 패키지 개발을 시작하기 위한 예제입니다. 운영 환경에 필요한 동시성, 고가용성, 장애 복구, 보안 정책은 실제 패키지의 목적에 맞게 구현하세요.
+최소 Machbase Neo 버전은 `8.5.6`입니다. 설정 schema는 `schemaVersion: 1`입니다.
 
-## 화면 profile
+## 주요 기능
 
-Side Job 목록과 Main의 선택 Job 상세를 보여 줍니다. Job 행은 28px이고, Job 스위치는 클릭 영역 28×28px 안에 28×13px 트랙과 9px 손잡이를 둡니다.
-`jobs` 설정을 바꿀 때는 먼저 Job을 중지한 뒤 Main의 `Edit`을 사용합니다.
-`side=yes`에서는 시작·중지를 Side 스위치가 맡으므로 Main에는 `Edit`과 `Delete`만
-표시합니다. 실행 중인 Job은 설정 변경과 삭제를 할 수 없습니다.
+- Job 생성, 검증, 설치, 시작, 정지, 수정, 삭제
+- Built-in `ls-electric-plc` Profile과 Custom Profile/Method 관리
+- typed DBus 입력, `raw`/`json` 응답 해석, LS 주소 기반 Tag 생성
+- `bm`/`mb` Transform, `perMethod`/`afterAllMethods` 저장 정책
+- 실패 backoff, 마지막 cycle 결과, Job 로그
+- Job 전용 DataViewer Grid/Chart
+- 256px Side와 HashRouter 기반 Main 화면
 
-Job을 고른 값은 React 화면이 잠깐 기억하는 선택일 뿐입니다. 다음에 어떤 Job을 만들지 정하는 기준은 `cgi-bin/conf.d/jobs/`, 실제 실행 여부의 기준은 Neo Controller, 카운터 결과의 기준은 `cgi-bin/data/`입니다. 화면을 새로 열거나 새로고침하면 API가 이 기준 값을 다시 읽어 표시합니다.
+실행 중이거나 상태를 알 수 없는 Job은 수정·삭제할 수 없습니다. 먼저 Job을 안전하게 정지해야 합니다.
 
-기본 화면은 기존 Neo 패키지와 같은 UI 규칙을 사용합니다. Side는 256px이고,
-일반 문구는 영어, 기술 값과 결과 JSON은 고정폭 글꼴로 표시합니다. Pretendard와
-D2Coding은 jsDelivr에서, Material Symbols는 Google Fonts에서 불러옵니다. 따라서
-정확한 글꼴과 아이콘을 처음 표시할 때는 인터넷 연결이 필요합니다. CDN을 사용할 수
-없으면 문자는 시스템의 `sans-serif`와 `monospace`로 대체됩니다.
+## 설정 위치
 
-## 로컬 프런트 빌드
+| 위치 | 내용 |
+|---|---|
+| `cgi-bin/profiles.d/` | 읽기 전용 Built-in Profile |
+| `cgi-bin/conf.d/settings.json` | 전역 설정 |
+| `cgi-bin/conf.d/profiles/` | Custom Profile |
+| `cgi-bin/conf.d/jobs/` | Job 설정 |
+| `cgi-bin/conf.d/db-servers/` | 등록 DB server 접속 정보 |
+| `cgi-bin/logs/` | Job별 회전 로그 |
 
-아래 명령은 패키지를 만든 뒤 개발자가 필요할 때 직접 실행합니다. neo-pkg 초기화는
-파일과 profile별 기본 구조를 만들고 manifest만 확인하며, `npm install`, 테스트,
-빌드를 자동으로 실행하지 않습니다.
+DB 비밀번호는 등록 DB server 파일에만 저장하며 Job 설정, API 조회, 로그에 다시 표시하지 않습니다.
+
+## 프런트엔드 개발과 빌드
 
 ```bash
 cd frontend
 npm ci
+npm run test:layout
 npm run build:root
 ```
 
-빌드가 끝나면 루트에 `index.html`, `main.html`, `side.html`이 만들어집니다. 각 파일은 JS와 CSS를 안에 포함한 단일 HTML입니다.
+빌드는 루트의 `index.html`, `main.html`, `side.html`을 각각 JS/CSS가 포함된 단일 HTML로 만듭니다.
 
-## 로컬 프런트 개발
-
-Machbase Neo를 `http://localhost:5654`에서 먼저 실행합니다.
-
-그다음 프런트 개발 서버를 실행합니다.
+로컬 개발 서버는 다음과 같이 실행합니다.
 
 ```bash
 cd frontend
-npm ci
 npm run dev
 ```
 
-브라우저에서 `http://localhost:5173`을 엽니다. Vite 개발 서버는 `/public/neo-pkg-dbus`, `/api`, `/web` 요청을 `http://localhost:5654`의 Neo 서버로 전달합니다. `/web`의 WebSocket 연결도 같은 주소로 전달합니다.
+Machbase Neo가 `http://localhost:5654`에서 실행 중이면 Vite proxy가 `/public/neo-pkg-dbus`, `/api`, `/web` 요청을 전달합니다.
 
-`npm run dev`는 frontend 개발 서버만 실행합니다. Neo 서버는 HTTP 요청마다 CGI를
-실행하고, Neo Controller는 오래 실행할 worker/service를 관리합니다. 패키지
-service의 등록·시작은 package lifecycle 또는 CGI 제어 API가 Controller에 요청합니다.
-브라우저 화면은 API에서 받아 온 값을 표시할 뿐이며, browser/localStorage를
-카운터·서비스 상태의 진짜 저장소로 쓰지 않습니다.
-
-## CGI와 서비스 확인
-
-작업 API는 목록, 등록, 시작, 중지, 삭제를 제공합니다. 등록하면 서비스가 바로 실행되고 Neo Controller 재시작 때도 다시 실행됩니다. 등록은 `{"name":"example","config":{}}`를 받고 나머지 작업은 `?name=example`을 사용합니다. 설정은 `cgi-bin/conf.d/jobs/`에 저장됩니다.
-
-CGI와 서비스의 실제 실행 환경은 Machbase Neo JSH입니다. 루트 `package.json`의
-script는 Neo의 JSH shell에서 `pkg run <script>`로 실행합니다. Node에서는 JSH
-의존성을 격리한 생명주기, CGI 경계, CounterStore 단위 테스트만 실행합니다.
-
-CGI는 HTTP 요청 하나를 처리하고 JSON을 돌려준 뒤 끝납니다. 반대로 worker/service는
-Neo Controller가 시작한 뒤 오래 실행되며 카운터 값을 계속 올립니다. 즉, “API를
-부른 것”과 “계속 일하는 서비스”는 다른 역할입니다.
-
-## 예제에서 값이 흐르는 길
-
-1. React 화면이 `/public/neo-pkg-dbus/cgi-bin/api/...`로 상태·시작·중지 요청을 보냅니다.
-2. Neo 서버가 HTTP 요청마다 해당 CGI를 실행합니다. CGI는 manager를 한 번 호출하고
-   JSON으로 답한 뒤 끝납니다.
-3. `JobManager`가 `cgi-bin/conf.d/jobs/`에서 작업 이름과 `intervalMs` 설정을 읽고, 작업마다 Neo 서비스의 등록·시작·중지를 Controller에 요청합니다.
-4. Controller가 시작한 작업별 `worker.js`가 오래 실행하며 `cgi-bin/data/jobs/<job-name>.counter.json` 카운터 결과를 갱신합니다.
-5. 화면은 API를 다시 불러 Controller 상태와 카운터 결과를 React 표시 상태로 보여 줍니다.
-
-| 위치 | 무엇을 뜻하나요? |
-|---|---|
-| `cgi-bin/conf.d/jobs/` | jobs에서 만들 작업의 이름과 실행 간격 설정 |
-| Neo Controller | 작업마다 서비스가 등록·실행·중지되었는지, PID와 종료 코드를 알려 줍니다. |
-| `cgi-bin/data/jobs/<job-name>.counter.json` | 작업별 `worker.js`가 만든 카운터 결과 (`count`, 시작·갱신 시각) |
-| React 표시 상태 | 화면의 로딩·오류·버튼 대기와 API에서 방금 받은 사본 |
-
-설정 파일이 있어도 지금 서비스가 실행 중이라는 뜻은 아니므로, 실행 상태는 항상 Neo Controller API로 확인합니다.
-
-## `jobs`와 `single` 중 고르기
-
-- `jobs`: 여러 일을 따로 만들고 각각 시작·중지·삭제해야 할 때 고릅니다. 작업마다
-  Neo 서비스 하나와 설정 파일 하나가 생깁니다.
-- `single`: 패키지 전체가 하나의 일을 오래 할 때 고릅니다. 패키지 이름의 Neo 서비스
-  하나만 관리합니다.
+## Backend 테스트
 
 ```bash
-node cgi-bin/tests/http.test.cjs
-node cgi-bin/tests/controller-state.test.cjs
-node cgi-bin/tests/job-manager.test.cjs
-node cgi-bin/tests/counter-store.test.cjs
+node --test cgi-bin/tests/*.test.cjs
 ```
 
-예제 결과는 `cgi-bin/data/`에 저장됩니다. 실행 상태는 Neo Controller에서, 로그는
-현재 Neo 서비스 환경에서 확인합니다.
+Node 테스트는 JSH 모듈을 주입 가능한 대역으로 검사합니다. 실제 배포 전에는 Neo 8.5.6에서 System Bus, `ls.plc`, `machcli` TAG append, service details, shutdown 정리를 추가로 확인해야 합니다.
 
-## 버전과 GitHub Release
+## API 규칙
 
-1. 루트 `package.json`과 `cgi-bin/package.json`의 `version`을 같은 SemVer로 올립니다.
-2. 프런트 빌드, CGI HTTP 테스트, 서비스 단위 테스트와 실제 JSH 동작을 다시 확인합니다.
-3. 기존 저장소의 태그 관례를 따릅니다. package 버전 `1.1.0`에는 `1.1.0` 또는 `v1.1.0`을 사용할 수 있으며, 앞의 `v`를 제외한 값은 package 버전과 같아야 합니다.
-4. 최신 공개 Release를 만든 뒤 tag 시점의 루트 `package.json`에 올바른 `version`과 `minServerVersion`이 있는지 확인합니다.
-5. Release가 공개된 뒤 Hub가 읽을 수 있는지 확인합니다. 별도로 첨부한 Release artifact는 필수 조건으로 가정하지 않습니다.
+base path는 `/public/neo-pkg-dbus/cgi-bin/api`입니다.
 
-## neo-pkg-hub 등록 예시
+성공 응답:
 
-`neo-pkg-hub/packages.yaml`에는 저장소와 패키지 정보를 다음과 같은 형태로 등록합니다.
-
-```yaml
-packages:
-  - name: neo-pkg-dbus
-    organization: <owner>
-    repo: neo-pkg-dbus
-    docs: neo-pkg-dbus/docs/index.en.md # 선택
+```json
+{"ok":true,"data":{}}
 ```
 
-이 프로젝트는 hub 저장소를 자동으로 수정하거나 PR을 만들지 않습니다.
+실패 응답:
 
-## 최소 서버 버전
+```json
+{"ok":false,"code":"JOB_INVALID","reason":"설명","details":{}}
+```
 
-이 패키지의 `minServerVersion`은 `8.5.6`입니다.
+주요 API는 `/settings`, `/profile`, `/method`, `/job`, `/job/validate`, `/job/install`, `/job/start`, `/job/stop`, `/job/last-run`, `/dbus/call`, `/db/*`, `/log/*`입니다. Job 생성은 `POST /job`에 `{ "name": "line-a", "config": { ... } }`를 보내며, 수정은 `PUT /job?name=line-a`에 이름을 뺀 부분 config를 보냅니다.
+
+## 문서 우선순위
+
+1. `docs/specs/DBUS_SDD.md`
+2. `docs/specs/FE_DESIGN.md`, `docs/specs/BE_DESIGN.md`
+3. 화면 시각 값은 루트 `DESIGN.md`
+
+`DESIGN.md`는 색, 글꼴, 간격, 4px 모서리와 256px Side의 고정 기준입니다.
+
+## 버전과 Release
+
+루트 `package.json`과 `cgi-bin/package.json`의 `version`을 같은 SemVer로 유지합니다. 프런트 빌드, Backend 테스트, 실제 JSH 통합 검증 뒤 같은 버전의 Git tag와 공개 GitHub Release를 만듭니다.

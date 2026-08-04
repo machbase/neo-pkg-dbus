@@ -1,18 +1,27 @@
-"use strict";
+'use strict';
 
-const path = require('path');
-const process = require('process');
-const root = process.argv[1].slice(0, process.argv[1].indexOf('/cgi-bin/') + '/cgi-bin'.length);
-const { JobManager } = require(path.join(root, 'src', 'jobs', 'manager.js'));
-const { reply } = require(path.join(root, 'src', 'cgi', 'http.js'));
+const api = require('../src/cgi/job-api.js');
+const factory = api.manager();
 
-new JobManager({ cgiRoot: root }).summary((_error, serviceSummary) => {
-  reply(200, {
+if (!factory.ok) api.http.fail(factory.error);
+else factory.value.list((listError, jobs) => {
+  if (listError) { api.http.fail(listError); return; }
+  const errors = [];
+  jobs.forEach((job) => {
+    if (job.error) errors.push({ name: job.name, kind: 'config', ...job.error });
+    if (job.controllerError) errors.push({ name: job.name, kind: 'controller', ...job.controllerError });
+  });
+  api.http.reply(200, {
     ok: true,
     data: {
-      healthy: serviceSummary.errors.length === 0,
-      status: serviceSummary.errors.length === 0 ? 'running' : 'degraded',
-      service_summary: serviceSummary,
+      healthy: errors.length === 0,
+      status: errors.length === 0 ? 'running' : 'degraded',
+      service_summary: {
+        scope: 'neo-pkg-dbus',
+        total: jobs.length,
+        running: jobs.filter((job) => job.controllerState === 'RUNNING').length,
+        errors,
+      },
     },
   });
 });
