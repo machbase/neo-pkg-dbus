@@ -4,48 +4,32 @@
 
 이 문서는 `neo-pkg-dbus` 구현의 단일 기능 기준이다. 기능이 `FE_DESIGN.md` 또는 `BE_DESIGN.md`와 다르게 읽히면 이 문서의 결정이 우선한다. 시각 규칙은 저장소 루트 `DESIGN.md`가 우선하며 이 문서는 화면의 기능과 상태만 정한다.
 
-1. Side/Main jobs 패키지만 구현한다. single과 기존 counter 기능은 이 제품 범위에 없다.
-2. 최소 Neo는 `8.5.6`, 모든 새 JSON schemaVersion은 `1`, 기본 Profile은 `ls-electric-plc`다.
+1. Side/Main jobs 패키지만 구현한다.
+2. 최소 Neo는 `8.5.6`, 모든 새 JSON schemaVersion은 `1`이다. LS PLC 기본 DBus Interface는 `npm run build:root -- --with-ls-interface` 빌드에만 포함한다. 옵션 없는 기본 빌드는 빈 Interface 목록으로 시작한다.
 3. Job service 이름은 `_dbu_<jobName>`이다.
 4. 실행 중 Job은 Edit, Delete, Backend update를 할 수 없다. stop-save-start 갱신은 금지다.
 5. DBus와 브라우저 API 요청에 요청 timeout을 만들지 않는다.
 6. config-only, installed, running, Controller 원본 상태는 서로 다른 값으로 전송한다.
 7. API envelope는 성공 `{ok,data}`, 실패 `{ok:false,code,reason,details}`다.
 8. 여러 관리자의 장기 화면 잠금은 제공하지 않는다. 대신 같은 Job의 POST create/install/start/stop, PUT update, DELETE와 package stop/uninstall을 하나의 mutation operation으로 직렬화한다. Backend는 상태 조회부터 Controller side effect와 설정 파일 변경 완료까지 Job별 `operation lock`을 유지하고, 다른 mutation이 lock을 보유하면 HTTP 409 `JOB_CONFLICT`를 반환한다. GET/list/last-run/validate와 DataViewer/Log 조회는 mutation lock을 잡지 않는다. Job GET 응답의 정수 `revision`은 PUT에 반드시 보내며, 저장 직전 revision이 달라져도 HTTP 409 `JOB_CONFLICT`로 거부한다. 화면은 최신 설정을 다시 읽어 사용자가 다시 수정하게 한다.
-9. 기존 counter JSON, counter store, `_np_neo_pkg_dbus_` service 이름, `/jobs/*` API, legacy config 병합은 호환하지 않는다.
-
-### 1.1 기존 카운터 계약의 비호환 변경과 이유
-
-이 패키지는 카운터 예제를 확장하는 것이 아니라 DBus Collector로 교체한다. 따라서 아래 변경은 의도적으로 하위 호환을 제공하지 않는다. 기존 설정을 자동으로 변환하면 Profile, DBus Method, Tag, DB Server를 추측해야 하며 잘못된 설비 호출이나 저장을 만들 수 있다. 사용자는 새 Job을 명시적으로 만들고 검증·설치·시작해야 한다.
-
-| 기존 계약 | 새 계약 | 변경 이유 |
-|---|---|---|
-| `POST /jobs/create`, `POST /jobs/update`, `/jobs/list`, `/jobs/start`, `/jobs/stop`, `/jobs/delete` | REST 형태의 `/job`, `/job/list`, `/job/install`, `/job/start`, `/job/stop`, `/job/validate`, `/job/last-run` | 카운터 설정만 다루던 API를 Profile·Method·DBus·DB·실행 상태까지 검증하는 API로 교체한다. |
-| 생성 요청 `{name, config:{intervalMs}}`가 service를 바로 등록 | `POST /job`은 config-only JSON만 원자 저장하고, `POST /job/install`과 `POST /job/start`을 별도로 호출 | 설정 저장, service 등록, 실제 실행을 분리해 사용자가 위험한 실행 전 검증할 수 있게 한다. |
-| `_np_neo_pkg_dbus_<name>` service와 `worker.js` | `_dbu_<jobName>` service와 `neo-collector.js` | Job별 DBus collector를 식별하고 counter worker와 혼동하지 않게 한다. |
-| `counter.json`의 count·시각 | typed DBus 결과를 TAG table에 append하고 service details에는 마지막 cycle 요약만 저장 | 실제 설비 값을 저장하며 원본 body·Tag 값·민감한 결과를 service details에 남기지 않는다. |
-| 이름과 `intervalMs` 정도의 schema 없는 config | `schemaVersion: 1`, Profile/Method, DBus, retry, 저장 정책, Tag, DB mapping을 가진 Job document | 재현 가능한 수집 설정과 Backend 최종 검증을 제공한다. |
-| `error`, `kind` 중심 오류와 Controller 상태의 단순 표시 | `{ok:false,code,reason,details}`와 config/execution/controller 분리 상태 | FE가 오류를 안전하게 표시하고 `UNKNOWN`일 때 수정·삭제를 막기 위해서다. |
-| 카운터 화면과 legacy `/jobs/*` 호출 | Side/Main의 Job, Profile/Method, DataViewer, Log 화면과 새 `/job/*` 호출 | 구현 범위를 승인된 DBus Collector 화면으로 한정한다. |
-
-이 비호환 정책은 데이터 migration을 제공하지 않는다는 뜻이다. legacy JSON과 counter 결과 파일은 새 Collector가 읽거나 병합하지 않는다. 필요한 경우 운영자는 기존 파일을 별도로 보관한 뒤 새 Job을 만들어야 한다.
-
-### 1.2 구현 중 확정한 계약 보완 기록
+### 1.1 구현 중 확정한 계약 보완 기록
 
 아래 항목은 구현·검토 중 발견해 **현재 계약으로 확정한 변경**이다. 각 항목은 이전 약속, 새 약속, 바꾼 이유와 확인 근거를 함께 남긴다. 앞으로 계약을 바꿀 때도 이 형식으로 승인 상태와 근거를 기록한다.
 
 | ID | 이전 계약 | 확정한 새 계약 | 이유와 확인 근거 | 승인 상태 |
 |---|---|---|---|---|
 | CCR-001 | 장기 화면 잠금이 없다는 원칙만 있었고, 같은 Job의 Start·수정·삭제 요청이 겹칠 때의 순서가 충분히 정해지지 않았다. | 장기 화면 잠금은 계속 제공하지 않는다. 대신 짧은 서버 `operation lock`과 `revision`으로 같은 Job의 mutation을 직렬화하고, 충돌은 `409 JOB_CONFLICT`로 돌려준다. | 요청이 겹치면 Controller side effect와 설정 저장의 순서가 뒤섞일 수 있었다. 사용자는 최신 설정을 다시 읽어 다시 수정한다. 자세한 순서는 3.1이다. | 기존 확정 |
-| CCR-002 | 실행 중 참조만 막는 규칙이어서, Profile/Method 저장과 Job의 Profile 검증이 동시에 일어날 때의 경계가 분명하지 않았다. | Profile mutation fence, Job의 Profile reader, 정렬된 Job lock 순서로 참조와 Controller 상태를 다시 확인한다. | Job이 오래된 Profile/Method를 보고 시작하거나, 참조 중인 Method가 바뀌는 경합을 막기 위해서다. 자세한 순서는 3.2다. | 기존 확정 |
+| CCR-002 | 실행 중 참조만 막는 규칙이어서, Interface/Method 저장과 Job의 Interface 검증이 동시에 일어날 때의 경계가 분명하지 않았다. | Interface mutation fence, Job의 Interface reader, 정렬된 Job lock 순서로 참조를 다시 확인한다. | Job이 오래된 Interface/Method를 보고 시작하거나, 참조 중인 Method가 바뀌는 경합을 막기 위해서다. 자세한 순서는 3.1이다. | CCR-009로 용어·대상 갱신 |
 | CCR-003 | DataViewer가 `NAME`, `TIME`이라는 열 이름을 기본으로 가정할 수 있었다. | TAG metadata FLAG의 유일한 primary key와 basetime 열을 찾아 쓴다. 역할 열이 없거나 둘 이상이면 실패한다. | 정상 TAG table도 실제 열 이름이 다를 수 있다. 잘못된 열을 조용히 읽는 것보다 안전하게 오류를 내는 편이 맞다. | 기존 확정 |
 | CCR-004 | 페이지를 넘겨도 행이 중복·누락되지 않는다고만 읽힐 수 있었다. | 한 응답 안에서는 basetime과 내부 `_RID` 정렬로 중복·누락을 막는다. 하지만 pagination은 snapshot이 아니므로 수집 중 새 행이 append되면 다음·이전 페이지의 구성은 달라질 수 있다. | 계속 수집되는 table에서는 offset 기준 행이 밀리는 것이 정상이다. 사용자가 이를 알맞은 동작으로 승인했으며, 고정 분석은 `to` 시간으로 범위를 고정한다. | 기존 확정 |
-| CCR-005 | Job/Profile ID 길이와 lock 파일 키의 상한이 충분히 정해지지 않았다. | Job name과 Profile ID는 최대 100자이며, Profile reader lock에는 raw ID 대신 고정 64자 SHA-256 key를 쓴다. | 검증 전의 긴 입력도 경로 이탈이나 파일 이름 길이 초과를 만들지 않게 한다. | 기존 확정 |
+| CCR-005 | Job/Interface ID 길이와 lock 파일 키의 상한이 충분히 정해지지 않았다. | Job name과 Interface ID는 최대 100자이며, Interface reader lock에는 raw ID 대신 고정 64자 SHA-256 key를 쓴다. | 검증 전의 긴 입력도 경로 이탈이나 파일 이름 길이 초과를 만들지 않게 한다. | CCR-009로 용어·대상 갱신 |
 | CCR-006 | DataViewer의 기본 시간대와 IANA 지역 시간대 지원 범위가 확정되지 않았다. | DB 저장값, API timestamp, DataViewer의 기본 표시와 `from`/`to` 조회 범위는 모두 UTC(`Z`)다. v1은 timezone 선택기와 지역 시간대 변환을 제공하지 않는다. | 수집 데이터의 기준 시간은 지역이 아닌 UTC여야 한다. 서울 고정 `+09:00`은 문제를 해결하지 못하며, IANA 처리에는 최소 JSH에 없는 `Intl`이 필요하다. 영향은 timezone 파라미터·입력칸 삭제와 UTC `Z` 범위 검증이다. | 승인됨 — 사용자 “승인 구현 시작” |
-| CCR-007 | Side의 New Profile/New DB Server는 `{type:"navigate",path}`로 Main route를 바꾸고 생성 화면을 열었다. | Side는 `{type:"open-create-modal",target:"profile"|"db-server"}`를 BroadcastChannel로 보낸다. Main과 통합 화면은 현재 route를 유지한 채 생성 모달만 연다. 기존 `select-job`, `new-job`, `navigate`, `refresh` 메시지는 그대로 유지한다. | 이 패키지는 Single Page App이며 Side의 생성 동작이 현재 상세 화면을 바꾸면 안 된다. 사용자가 “페이지 이동하면 안돼. side에서 눌렸을 때, 채널로 알려줘야해”라고 승인했다. API·Backend에는 영향이 없다. | 승인됨 — 사용자 “페이지 이동하면 안돼. side에서 눌렸을 때, 채널로 알려줘야해” |
-| CCR-008 | Main의 `/` 경로는 Job이 하나라도 있으면 첫 Job 상세로 자동 이동했고, Job 생성·수정 화면에는 텍스트 Cancel만 있었다. 생성 모달의 배경은 불투명해서 뒤 화면을 볼 수 없었다. | Main의 `/` 경로는 자동 선택하지 않고 제목·상단 메뉴·카드 없이 중앙 안내만 보인다. Job이 없으면 `inbox`, `No jobs yet`, `Click "New" to get started`를, Job이 있으면 `inbox`, `Select a job from the sidebar`를 보인다. Job 생성·수정 화면에는 이전 화면으로 돌아가는 32px Back 화살표를 둔다. 생성 모달 배경은 기존 surface를 70%로 섞어 뒤 화면을 보이게 하면서도 어둡게 구분한다. | 참고 화면의 빈 상태 구조와 Side에서 Job을 고르는 흐름을 명확히 맞추고, 처음 열거나 새 Job 화면에서 안전하게 돌아갈 길을 제공하며, 모달을 열어도 현재 화면의 맥락을 보존하기 위해서다. 사용자가 직접 요청했다. API·Backend에는 영향이 없다. | 승인됨 — 사용자 “현재 모달이 나올때, 뒷배경이 가려지고 있어… Select a job from the sidebar…”, “메인 첫 진입시 위에 쓸데 없는 메뉴, 타이틀 다 지워.”, “주소 다시 참고해서 메인 화면 제대로 변경해” |
+| CCR-007 | Side의 New Profile/New DB Server는 `{type:"navigate",path}`로 Main route를 바꾸고 생성 화면을 열었다. | Side는 `{type:"open-create-modal",target:"dbus-interface"|"db-server"}`를 BroadcastChannel로 보낸다. `db-server`는 `Database Servers` 목록 모달을 열고, 목록 안의 `Add Server`와 Edit가 각각 입력 모달을 연다. Main과 통합 화면은 현재 route를 유지한다. 기존 `select-job`, `new-job`, `navigate`, `refresh` 메시지는 그대로 유지한다. | 이 패키지는 Single Page App이며 Side의 생성 동작이 현재 상세 화면을 바꾸면 안 된다. DBus Interface와 Database Server 관리를 참고 패키지와 같은 목록→입력 모달 흐름으로 통일한다. CCR-009로 New Profile의 대상은 DBus Interface로 바뀌었다. | 승인됨 — 사용자 요청과 CCR-009 |
+| CCR-008 | Main의 `/` 경로는 Job이 하나라도 있으면 첫 Job 상세로 자동 이동했고, Job 생성·수정 화면에는 텍스트 Cancel만 있었다. 생성 모달의 배경은 불투명해서 뒤 화면을 볼 수 없었다. | Main의 `/` 경로는 자동 선택하지 않고 제목·상단 메뉴·카드 없이 중앙 안내만 보인다. Job이 없으면 `inbox`, `No jobs yet`, `Click "New" to get started`를, Job이 있으면 `inbox`, `Select a job from the sidebar`를 보인다. Job 생성·수정 화면에는 이전 화면으로 돌아가는 32px Back 화살표를 둔다. 생성 모달 배경은 검정 50% overlay로 뒤 화면을 보이게 하면서도 어둡게 구분한다. | 참고 화면의 빈 상태와 모달 overlay 구조, Side에서 Job을 고르는 흐름을 명확히 맞추고, 처음 열거나 새 Job 화면에서 안전하게 돌아갈 길을 제공하며, 모달을 열어도 현재 화면의 맥락을 보존하기 위해서다. 사용자가 직접 요청했다. API·Backend에는 영향이 없다. | 승인됨 — 사용자 “현재 모달이 나올때, 뒷배경이 가려지고 있어… Select a job from the sidebar…”, “메인 첫 진입시 위에 쓸데 없는 메뉴, 타이틀 다 지워.”, “주소 다시 참고해서 메인 화면 제대로 변경해”, “스타일 정확히 따라해” |
+| CCR-009 | Profile이 Bus Type, Destination, Object Path, Interface와 Method를 한데 묶었다. Job도 Profile 하나와 공통 DBus 주소만 고를 수 있었다. | Profile 계약을 삭제하고 DBus Interface → DBus Method → Job Method Call로 나눈다. Job의 각 Call이 `interfaceId`와 `methodId`를 가리키므로 서로 다른 Interface의 Method를 한 Job에서 순서대로 호출할 수 있다. | Profile은 사용자가 왜 만들어야 하는지 알기 어려웠고, DBus의 실제 책임 경계인 Interface와 맞지 않았다. Introspection으로 Interface·Method·파라미터를 읽고, 실패 시 직접 입력할 수 있게 하려는 목적이다. 이 기능은 신규 개발이므로 Profile API·파일·Job 필드는 변환하거나 호환하지 않는다. 상세 설계 기록은 `docs/superpowers/specs/2026-08-05-dbus-interface-method-design.md`를 따른다. | 승인됨 — 사용자 “프로필도 사용자가 추가는 할 수 있게… 다시 설계”, “1번으로 상세 설계”, “신규 개발이라 변환 안해도돼” |
+| CCR-010 | LS PLC 기본 Interface는 모든 빌드에 고정 포함되는 것으로 읽혔다. | `frontend`에서 `npm run build:root`는 기본 Interface 없이 빌드하고, `npm run build:root -- --with-ls-interface`만 `cgi-bin/interfaces.d/ls-plc-device.json`을 포함한다. | LS 장비가 없는 사용자는 불필요한 기본 자산 없이 빈 목록에서 Discover 또는 직접 입력으로 시작해야 한다. 이 선택은 빌드 산출물만 바꾸며 사용자 Interface·Method·Job은 바꾸지 않는다. | 승인됨 — 사용자 “빌드 명령이 맞는거 같다”, “맞아” |
 
-### 1.3 JSH 호환성 검토와 수정 설계
+### 1.2 JSH 호환성 검토와 수정 설계
 
 이 절은 공개 API나 시간 모델을 바꾸는 계약이 아니라, 최소 Neo 지원 약속을 지키기 위한 구현 검토 기록이다. 아래 수정은 JSH 통합 검증이 끝나기 전까지 완료로 선언하지 않는다.
 
@@ -62,7 +46,6 @@
 ```json
 {
   "schemaVersion": 1,
-  "defaultProfileId": "ls-electric-plc",
   "limits": {
     "maxGeneratedTagsPerCall": 1000,
     "maxBufferedRowsPerCycle": 10000
@@ -70,11 +53,15 @@
 }
 ```
 
-### 2.2 Profile과 Method
+### 2.2 DBus Interface와 Method
 
-Profile은 `schemaVersion`, `id`, `profileVersion`, `displayName`, `vendor`, `builtIn`, `compatibility`, `defaults`, `methods`를 가진다. Built-in Profile은 `ls-electric-plc` 하나로 시작한다. compatibility의 최소 Neo는 `8.5.6`이다.
+DBus Interface는 `schemaVersion`, `id`, `builtIn`, `busType`, `destination`, `objectPath`, `interface`, `methods`를 가진다. `--with-ls-interface` 빌드의 읽기 전용 LS Interface는 `system → ls.plc → /ls/plc/device → ls.plc.device`다. 이 Interface의 `GetDeviceData` Method는 `dataCount:uint16`, `memoryAddress:string` 입력을 가지며, 기존 LS output 검증(`rtn === 1`, `data-count`, data array, Tag count 일치)을 그대로 사용한다. 옵션 없는 빌드는 기본 Interface가 없으며, 목록·Job 화면은 빈 목록을 정상 처리해야 한다.
 
-Method는 `id`, `displayName`, `objectPath`, `interface`, `methodName`, `inputs`, `output`, 선택 `tagGeneration`을 가진다. LS Method ID는 `get-device-data`, 이름은 `GetDeviceData`다. 입력은 `dataCount:uint16`, `memoryAddress:string`이고 output JSON의 `rtn === 1`, `data-count`, data array, Tag count가 일치해야 한다.
+DBus Method는 부모 Interface 안에 저장하며 `id`, `source`, `member`, `inputs`, `outputs`를 가진다. `source`는 Introspection으로 찾은 `discovered` 또는 사용자가 넣은 `manual`이다. 사용자는 Bus Type, Destination, Object Path를 넣고 Discover를 실행한다. Backend는 `org.freedesktop.DBus.Introspectable.Introspect` XML에서 모든 Interface, Method, 입력·출력 파라미터를 읽는다. `org.freedesktop.*`는 숨기지 않고 `Standard`로 표시한다. Introspection을 지원하지 않거나 권한이 없으면 Interface와 Method·모든 파라미터를 직접 입력한다.
+
+LS 원본은 `build-assets/interfaces/ls-plc-device.json`에 둔다. `--with-ls-interface` 빌드만 이를 `cgi-bin/interfaces.d/ls-plc-device.json`으로 복사하고, 기본 빌드는 `cgi-bin/interfaces.d`를 비운다. 빌드는 사용자 데이터인 `cgi-bin/conf.d/interfaces`와 `cgi-bin/conf.d/jobs`를 바꾸지 않는다. Method API는 부모 Interface JSON 한 개를 완성한 임시 파일로 만든 뒤 원자 교체한다.
+
+다시 Discover할 때는 `discovered` Method만 갱신한다. `manual` Method는 자동 수정·삭제하지 않는다. Job이 참조하는 `discovered` Method가 바뀌거나 사라지면 덮어쓰거나 삭제하지 않고 `review-required`로 표시한다. Built-in Interface/Method는 수정·삭제할 수 없고, 사용자 Interface 또는 Method는 어떤 Job이 참조하면 수정·삭제할 수 없다.
 
 ### 2.3 저장 Job document
 
@@ -83,8 +70,6 @@ Method는 `id`, `displayName`, `objectPath`, `interface`, `methodName`, `inputs`
   "schemaVersion": 1,
   "name": "production-line",
   "revision": 1,
-  "profileId": "ls-electric-plc",
-  "dbus": { "busType": "system", "destination": "ls.plc" },
   "schedule": { "intervalMs": 1000 },
   "retry": { "initialDelayMs": 5000, "maximumDelayMs": 30000, "multiplier": 2 },
   "execution": { "savePolicy": "perMethod", "onMethodError": "stop" },
@@ -92,6 +77,7 @@ Method는 `id`, `displayName`, `objectPath`, `interface`, `methodName`, `inputs`
     {
       "id": "read-plc-data-1",
       "name": "Read PLC Data - Call 1",
+      "interfaceId": "ls-plc-device",
       "methodId": "get-device-data",
       "inputs": { "dataCount": 1, "memoryAddress": "%MB3" },
       "tags": [
@@ -111,7 +97,7 @@ Method는 `id`, `displayName`, `objectPath`, `interface`, `methodName`, `inputs`
 }
 ```
 
-위 예시는 `conf.d/jobs/production-line.json`에 저장되는 document다. document top-level `name`은 파일명 `production-line`과 반드시 같아야 한다. `methodCalls`는 한 개 이상이다. 각 Call은 고정 ID, 표시 이름, methodId, raw inputs, outputIndex가 연속된 tags를 가진다. Tag는 `outputIndex`, `sourceAddress`, `name`, `bias`, `multiplier`, `calcOrder`를 가진다. Tag name은 TAG table의 `NAME VARCHAR(100)`에 맞춰 최대 100자다. `calcOrder`는 `bm` 또는 `mb`만 가능하다.
+위 예시는 `conf.d/jobs/production-line.json`에 저장되는 document다. document top-level `name`은 파일명 `production-line`과 반드시 같아야 한다. `methodCalls`는 한 개 이상이다. 각 Call은 고정 ID, 표시 이름, `interfaceId`, `methodId`, raw inputs, outputIndex가 연속된 tags를 가진다. Tag는 `outputIndex`, `sourceAddress`, `name`, `bias`, `multiplier`, `calcOrder`를 가진다. Tag name은 TAG table의 `NAME VARCHAR(100)`에 맞춰 최대 100자다. `calcOrder`는 `bm` 또는 `mb`만 가능하다.
 
 `database.valueColumn`은 필수 숫자 column이고 `database.stringValueColumn`은 선택 문자열 column이다. 문자열 column을 쓰지 않을 때는 `""`로 저장한다. 숫자 output만 bias/multiplier Transform을 적용해 `valueColumn`에 저장한다. 문자열 output은 Transform 없이 그대로 `stringValueColumn`에 저장한다. object output도 Transform하지 않고 `JSON.stringify` 결과를 `stringValueColumn`에 저장한다. 문자열 column이 없는 Job에서 문자열 또는 object output을 저장하려 하면 cycle은 `DB_APPEND_FAILED`로 실패한다. DataViewer Chart는 숫자 column만 사용하고 Grid는 선택 문자열 column이 있을 때 문자열 값을 함께 보여 준다.
 
@@ -154,7 +140,7 @@ DELETE /job (정지 상태만)  → 설정과 service 제거
 | installed + running/starting/stopping | 불가 | 불가 | 가능 또는 전환 대기 | 불가 | 불가 |
 | UNKNOWN | 불가 | 불가 | 불가 | 불가 | 불가 |
 
-start는 이미 설치된 Job만 허용한다. `STARTING`과 `STOPPING`은 완료될 때까지 새 lifecycle 요청을 받지 않는다. update/delete가 실행 중이면 HTTP 409과 `JOB_RUNNING`을 반환한다. Custom Profile/Method update도 running 참조 Job이 있으면 HTTP 409이다.
+start는 이미 설치된 Job만 허용한다. `STARTING`과 `STOPPING`은 완료될 때까지 새 lifecycle 요청을 받지 않는다. update/delete가 실행 중이면 HTTP 409과 `JOB_RUNNING`을 반환한다. 사용자 DBus Interface/Method는 어떤 Job이 참조하면 수정·삭제할 수 없다.
 
 ### 3.1 Job mutation operation lock과 lease
 
@@ -164,9 +150,9 @@ Package stop은 목록에서 상태를 아는 모든 configured Job을 `stopForP
 
 lock은 `owner token`과 `heartbeat` 시각을 가진다. owner는 CGI 요청이 끝날 때 heartbeat를 중지하고 자기 token의 lock만 해제한다. lease가 지났고 `owner PID`가 종료되었다고 확인된 lock만 고유 quarantine 이름으로 원자 이동한 뒤 회수한다. PID 생존 여부를 확인할 수 없으면 안전하게 회수하지 않고 `JOB_CONFLICT`를 반환한다. 이전 owner는 Controller 호출이나 설정 파일 변경 같은 side effect 직전에 token을 다시 확인하며, 소유권을 잃었으면 `JOB_CONFLICT`로 중단한다. 이전 owner는 새 owner의 lock을 갱신하거나 해제할 수 없다.
 
-Custom Profile/Method의 POST/PUT는 Profile mutation fence를 먼저 잡고 참조 Job lock을 이름순으로 모두 잡은 뒤 참조와 Controller 상태를 다시 읽고 저장한다. DELETE는 Profile mutation fence와 기존 Profile reader 확인 뒤 참조를 다시 읽고, 참조 Job이 하나라도 있으면 Controller 상태나 Job lock을 확인하지 않고 거부한다. Job create/update/start는 package lifecycle probe 뒤 Job lock을 먼저 잡고, 최신 Job config의 Profile reader lock을 잡은 뒤 Profile을 다시 검증한다. 전역 순서는 package lifecycle probe → Job lock → Profile reader이며, 배타 Profile 변경은 Profile fence → reader 확인 → 정렬된 Job lock이다.
+사용자 DBus Interface/Method의 POST/PUT/DELETE는 Interface mutation fence를 먼저 잡고 참조를 다시 읽는다. 참조 Job이 하나라도 있으면 Controller 상태와 관계없이 `DBUS_INTERFACE_IN_USE` 또는 `DBUS_METHOD_IN_USE`로 거부한다. Job create/update/start는 package lifecycle probe 뒤 Job lock을 잡고, 참조 Interface reader lock을 잡은 뒤 Interface와 Method를 다시 검증한다. 전역 순서는 package lifecycle probe → Job lock → Interface reader이며, 배타 Interface 변경은 Interface fence → reader 확인 → 정렬된 Job lock이다.
 
-Profile ID와 Job name은 각각 ASCII 영문 소문자·숫자·`-`(Job은 `_`도 허용)만 사용하고 최대 100자다. Profile reader lock은 raw ID 대신 고정 64자의 SHA-256 Profile key를 써서 `<sha256ProfileKey>--<jobName>`으로 만들므로, 검증 전의 긴 잘못된 ID도 경로 밖 접근이나 파일 이름 초과를 만들지 않는다.
+Interface ID와 Job name은 각각 ASCII 영문 소문자·숫자·`-`(Job은 `_`도 허용)만 사용하고 최대 100자다. Interface reader lock은 raw ID 대신 고정 64자의 SHA-256 Interface key를 써서 `<sha256InterfaceKey>--<jobName>`으로 만든다.
 
 canonical Job lock owner 문서도 initial acquire와 stale replacement에서 임시 파일을 완성한 뒤 원자 publish한다. fresh empty/temp-only/malformed owner와 여러 final 또는 final+temp처럼 모호한 owner는 `JOB_CONFLICT`로 보호한다. lease가 지난 empty/temp-only/malformed canonical lock만 orphan으로 고유 quarantine 이름에 원자 이동해 회수한다.
 
@@ -210,12 +196,12 @@ install은 config-only Job의 JSON을 그대로 사용해 아래 descriptor를 C
 | Method | 경로 | 입력 | 성공 data |
 |---|---|---|---|
 | GET | `/settings` | 없음 | Settings |
-| PUT | `/settings` | defaultProfileId, limits | Settings |
-| GET | `/profile/list` | 없음 | Profile 요약 배열 |
-| GET | `/profile?id=` | profile ID | Profile와 호환·참조 정보 |
-| POST/PUT/DELETE | `/profile` | Profile body 또는 id | Custom Profile 결과 |
-| GET | `/method/list?profileId=` | Profile ID | Method 요약 배열 |
-| GET/POST/PUT/DELETE | `/method` | profileId, id, Method | Method 결과 |
+| PUT | `/settings` | limits | Settings |
+| GET | `/dbus-interface/list` | 없음 | DBus Interface 요약 배열 |
+| GET | `/dbus-interface?id=` | Interface ID | Interface와 Method·참조 정보 |
+| POST | `/dbus-interface/discover` | Bus Type, Destination, Object Path | 저장 없는 Introspection 결과 |
+| POST/PUT/DELETE | `/dbus-interface` | 사용자 Interface body 또는 id | 사용자 Interface 결과 |
+| POST/PUT/DELETE | `/dbus-method` | interfaceId, methodId, Method | 부모 Interface 안의 Method 결과 |
 | GET | `/job/list` | 없음 | Job 요약 배열 |
 | GET | `/job?name=` | Job 이름 | `{name, config, 상태}` |
 | POST | `/job` | `{name, config}`; `config.name` 금지 | 생성된 config-only Job |
@@ -226,7 +212,7 @@ install은 config-only Job의 JSON을 그대로 사용해 아래 descriptor를 C
 | POST | `/job/start?name=` | 없음 | 시작 상태 |
 | POST | `/job/stop?name=` | 없음 | 정지 상태 |
 | GET | `/job/last-run?name=` | Job 이름 | `{lastRun}` |
-| POST | `/dbus/call` | Profile, Method, DBus, inputs | Test Call 결과 |
+| POST | `/dbus/call` | interfaceId, methodId, inputs | Test Call 결과 |
 | POST/GET/PUT/DELETE | `/db/server` | DB Server CRUD | 등록 DB Server |
 | GET | `/db/server/list` | 없음 | DB Server 목록 |
 | GET | `/db/connect?server=` | 등록 이름 | 연결 확인 결과 |
@@ -282,23 +268,22 @@ DB Server 관리 화면은 등록 목록을 읽고, Create/Edit/Delete와 Test C
 
 ## 5. 구현 순서
 
-### 단계 1: 기존 예제 경계 제거와 공통 기반
+### 단계 1: 공통 기반
 
-1. 기존 CounterStore, counter 결과 파일, worker 카운터 동작, `_np_neo_pkg_dbus_` 접두사와 `/jobs/*` API를 제거한다.
-2. 공통 HTTP helper를 새 envelope와 HTTP 400/404/409/503 매핑으로 바꾼다.
-3. 설정·Profile·Job schemaVersion 1 loader, validator, atomic writer를 만든다.
-4. 새 service name helper `_dbu_<jobName>`와 Controller 상태 adapter를 만든다.
+1. 공통 HTTP helper를 새 envelope와 HTTP 400/404/409/503 매핑으로 만든다.
+2. 설정·DBus Interface·Job schemaVersion 1 loader, validator, atomic writer를 만든다.
+3. 새 service name helper `_dbu_<jobName>`와 Controller 상태 adapter를 만든다.
 
-완료 기준: 제품 소스와 테스트에서 CounterStore·counter 결과·`_np_neo_pkg_dbus_`가 사라지고, 새 envelope 단위 테스트가 통과한다.
+완료 기준: 새 envelope 단위 테스트가 통과한다.
 
-### 단계 2: Profile·Job·lifecycle API
+### 단계 2: DBus Interface·Job·lifecycle API
 
-1. Built-in LS Profile asset과 Custom Profile 저장소를 만든다.
-2. Profile/Method validation, 참조 분석, 실행 중 변경 차단을 만든다.
+1. Built-in LS DBus Interface asset과 사용자 Interface 저장소를 만든다.
+2. Introspection XML parser, Interface/Method validation, 참조 분석, 수정·삭제 차단을 만든다.
 3. Job CRUD, config-only install, installed start/stop, 정지 상태 delete를 만든다.
 4. 목록·상세에 분리된 상태 모델과 Controller 원본 상태를 넣는다.
 
-완료 기준: 실행 중 PUT/DELETE가 `JOB_RUNNING`, running 참조 Profile/Method 변경이 409, config-only/installed/running의 분리가 API 테스트로 확인된다.
+완료 기준: 실행 중 PUT/DELETE가 `JOB_RUNNING`, 참조 Interface/Method 변경이 409, config-only/installed/running의 분리가 API 테스트로 확인된다.
 
 ### 단계 3: Collector와 DBus 실행
 
@@ -311,9 +296,9 @@ DB Server 관리 화면은 등록 목록을 읽고, Create/Edit/Delete와 Test C
 
 ### 단계 4: Side/Main 프런트엔드
 
-1. API client에서 timeout AbortController와 legacy `/jobs/*` 호출을 제거하고 새 envelope를 해석한다.
+1. API client에서 timeout AbortController 없이 새 envelope를 해석한다.
 2. Side 목록과 Main 상세가 분리 상태·전환 상태·차단 사유를 표시하게 만든다.
-3. Job/Profile/Method forms, Tag 생성·일괄 편집·Test Call을 구현한다.
+3. Job/DBus Interface/Method forms, Tag 생성·일괄 편집·Test Call을 구현한다.
 4. Job → Method Call → Tag DataViewer와 로그 화면을 연결한다.
 
 완료 기준: `DESIGN.md` 토큰만 사용하고, Side/Main이 같은 선택 상태를 공유하며, 실행 중 Edit/Delete가 UI와 API에서 모두 차단된다.
@@ -332,7 +317,8 @@ Node 단위 테스트는 schema validation, path decoder, typed args, LS address
 
 - config-only 생성 후 install, start, stop, delete 전이
 - running/starting/stopping Job의 update/delete 거부
-- running 참조 Custom Profile/Method update/delete 거부
+- 참조 중인 사용자 DBus Interface/Method update/delete 거부
+- Introspection의 전체 Interface/Method/입력·출력 파싱, Standard 뱃지, manual Method 보존, `review-required`
 - `GetDeviceData` 성공·`rtn` 실패·JSON 실패·count 불일치
 - perMethod partial 저장과 afterAllMethods 무저장
 - `UNKNOWN` Controller 상태의 위험 동작 차단
@@ -343,10 +329,9 @@ JSH 통합 테스트는 `require("dbus")`, System Bus 연결, `ls.plc` owner와 
 완료 게이트:
 
 1. 최소 Neo `8.5.6`에서 Side/Main 기능이 동작한다.
-2. 새 설정·Profile·Job은 모두 schemaVersion `1`이고 defaultProfileId는 `ls-electric-plc`다.
+2. 새 설정·DBus Interface·Job은 모두 schemaVersion `1`이고, 기본 LS DBus Interface와 `GetDeviceData` Method는 읽기 전용이다.
 3. service는 `_dbu_<jobName>`만 사용한다.
-4. running Job과 running 참조 Custom 설정은 변경·삭제되지 않는다.
+4. running Job은 변경·삭제되지 않고, 참조 중인 사용자 DBus Interface/Method는 변경·삭제되지 않는다.
 5. config-only/installed/running/Controller 상태가 API와 화면에서 분리된다.
 6. API는 새 envelope만 사용하고 timeout 로직이 없다.
-7. counter 호환 코드와 legacy `/jobs/*` 계약이 없다.
-8. `DESIGN.md`를 바꾸지 않고 지정된 디자인 토큰과 접근성 규칙을 지킨다.
+7. `DESIGN.md`를 바꾸지 않고 지정된 디자인 토큰과 접근성 규칙을 지킨다.

@@ -29,8 +29,8 @@ try {
   assert.equal(side.root.findByProps({ "aria-label": "running Stop" }).props.disabled, false);
   assert.equal(side.root.findByProps({ "aria-label": "unknown Start" }).props.disabled, true);
   const sideHeaderButtons = side.root.findByType("header").findAllByType("button");
-  assert.deepEqual(sideHeaderButtons.map((button) => button.props["aria-label"]), ["New Job", "New DB Server", "New Profile"]);
-  assert.deepEqual(sideHeaderButtons.map((button) => button.props.title), ["New Job", "New DB Server", "New Profile"]);
+  assert.deepEqual(sideHeaderButtons.map((button) => button.props["aria-label"]), ["New Job", "New Database Server", "New Profile"]);
+  assert.deepEqual(sideHeaderButtons.map((button) => button.props.title), ["New Job", "New Database Server", "New Profile"]);
   assert.equal(textOf(sideHeaderButtons[0]), "add");
   assert.equal(side.root.findAllByProps({ "aria-label": "New Job" }).length, 1);
   sideHeaderButtons[0].props.onClick();
@@ -843,8 +843,18 @@ try {
   assert.match(css, /grid-template-columns:\s*var\(--neo-side-width\)\s+minmax\(0,\s*1fr\)/);
   assert.match(css, /@media\s*\(max-width:\s*640px\)/);
   assert.match(css, /outline:\s*2px\s+solid\s+var\(--neo-interactive-hover\)/);
-  assert.match(css, /\.neo-modal\s*\{[^}]*color-mix\(in srgb, var\(--neo-surface\) 70%, transparent\)/);
+  assert.match(css, /\.neo-modal\s*\{[^}]*background:\s*rgba\(0, 0, 0, \.5\)/);
   assert.match(css, /\.neo-back-button\s*\{[^}]*width:\s*32px/);
+  assert.match(css, /\.neo-modal__dialog--database\s*\{[^}]*720px/);
+  assert.match(css, /\.neo-modal__dialog--database-form\s*\{[^}]*480px/);
+  assert.match(css, /\.neo-modal__dialog--profile-form\s*\{[^}]*480px/);
+  assert.match(css, /\.neo-db-server-card\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\) auto/);
+  assert.match(css, /\.neo-modal__dialog--database \.neo-modal__close[^}]*width:\s*26px[^}]*height:\s*26px[^}]*padding:\s*4px/);
+  assert.match(css, /\.neo-icon-button\.neo-db-server-card__action\s*\{[^}]*display:\s*flex[^}]*width:\s*32px[^}]*height:\s*32px[^}]*justify-content:\s*center/);
+  assert.match(css, /\.neo-db-server-status--healthy\s*\{[^}]*color:\s*var\(--neo-success\)/);
+  assert.match(css, /\.neo-modal__dialog--database \.neo-modal__footer \.neo-button[^}]*height:\s*32px[^}]*padding:\s*0 16px/);
+  assert.match(css, /\.neo-modal__dialog--database-confirm\s*\{[^}]*400px/);
+  assert.match(fs.readFileSync(path.join(root, "src/App.jsx"), "utf8"), /DatabaseServerDeleteConfirmModal[\s\S]*aria-label="Delete Server"[\s\S]*setPendingDelete\(server\.name\)/);
   assert.doesNotMatch(css, /border-radius:\s*8px|box-shadow:\s*0\s+[2-9]\d/);
   assert.doesNotMatch(css, /height:\s*480px|minmax\(120px|100px/);
 } finally {

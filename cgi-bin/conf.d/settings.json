@@ -1,8 +1,0 @@
-{
-  "schemaVersion": 1,
-  "defaultProfileId": "ls-electric-plc",
-  "limits": {
-    "maxGeneratedTagsPerCall": 1000,
-    "maxBufferedRowsPerCycle": 10000
-  }
-}

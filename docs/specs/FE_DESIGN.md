@@ -2,14 +2,14 @@
 
 ## 1. 목적과 고정 범위
 
-이 문서는 `neo-pkg-dbus`의 화면과 사용자 동작을 정의한다. 구현 범위는 **Side**와 **Main**이다. 시각 규칙은 저장소 루트 `DESIGN.md`를 유일한 기준으로 사용하며, 이 문서는 색·글꼴·간격·모서리 값을 새로 정하지 않는다. 기존 카운터 화면과 `/jobs/*` 호출은 표시·호출·설정 마이그레이션 대상이 아니며, 그 기존 계약과 변경 이유는 `DBUS_SDD.md`의 **1.1 기존 카운터 계약의 비호환 변경과 이유**를 따른다. 구현 중 확정한 추가 계약은 같은 문서의 **1.2**를 따르며, **1.3은 JSH 호환성 수정 설계**다.
+이 문서는 `neo-pkg-dbus`의 화면과 사용자 동작을 정의한다. 구현 범위는 **Side**와 **Main**이다. 시각 규칙은 저장소 루트 `DESIGN.md`를 유일한 기준으로 사용하며, 이 문서는 색·글꼴·간격·모서리 값을 새로 정하지 않는다. 구현 중 확정한 추가 계약은 `DBUS_SDD.md`의 **1.1**을 따르며, **1.2는 JSH 호환성 수정 설계**다.
 
-수집 대상은 Linux System Bus의 LS ELECTRIC PLC다. 기본 Profile은 `ls-electric-plc`이고 기본 Method는 `GetDeviceData`다. 사용자는 Custom Profile과 Custom Method도 만들 수 있다. 패키지 최소 Neo 버전은 `8.5.6`이다.
+수집 대상은 Linux System Bus의 LS ELECTRIC PLC다. 기본 제공 항목은 읽기 전용 LS PLC DBus Interface와 `GetDeviceData` Method다. 사용자는 DBus Interface와 그 안의 Method를 추가할 수 있다. 패키지 최소 Neo 버전은 `8.5.6`이다.
 
 화면은 다음을 제공한다.
 
 - Job 생성, 조회, 정지된 Job 수정, 삭제, 설치, 시작, 정지
-- Built-in Profile 조회와 Custom Profile/Method 관리
+- Built-in DBus Interface 조회와 사용자 DBus Interface/Method 관리
 - Method Call을 순서대로 구성하고 입력값에 따라 Tag를 자동 생성·일괄 편집
 - Test Call, 직전 cycle 결과, Job 기준 DataViewer, 로그 조회
 
@@ -20,7 +20,7 @@ Write 전용 화면과 Built-in Write Method는 제공하지 않는다. Custom M
 ```text
 DBus Collector
 ├─ Side: Job 목록, 선택, 시작/정지, 새 Job
-└─ Main: Job 상세·편집, Profile 관리, DataViewer, Log Viewer
+└─ Main: Job 상세·편집, DBus Interface 관리, DataViewer, Log Viewer
 ```
 
 - Side는 `DESIGN.md`의 256px Side panel, 40px 헤더, 22px 목록 헤더, 28px Job 행을 사용한다.
@@ -28,8 +28,8 @@ DBus Collector
 - Main의 상세·생성 헤더, 카드, 입력, 상태 메시지, 버튼, 포커스, 접근성은 `DESIGN.md`의 공용 컴포넌트 규칙을 그대로 따른다.
 - Side에서는 switch만 시작/정지를 담당한다. Side가 있는 Main 상세에는 Start/Stop 버튼을 중복해 표시하지 않는다.
 - 긴 이름은 말줄임표 또는 `overflow-wrap: anywhere`를 사용하고 모든 grid 자식에는 `min-width: 0`을 둔다.
-- Side 헤더의 New Profile과 New DB Server는 현재 route를 바꾸지 않는다. Side는 각각 `{type:"open-create-modal",target:"profile"}` 또는 `{type:"open-create-modal",target:"db-server"}`를 BroadcastChannel로 보내고, Main은 현재 화면 위에 생성 모달을 연다. 모달은 취소, 닫기, 바깥 영역 클릭, Esc로 닫으며 생성 성공 뒤에도 원래 화면을 유지한다. 이 변경의 이전 계약·이유·승인 기록은 `DBUS_SDD.md`의 CCR-007을 따른다.
-- Main의 첫 `/` 화면은 Job을 자동으로 열지 않고 제목·상단 메뉴·카드 없이 중앙 안내만 표시한다. Job이 없으면 `inbox`, `No jobs yet`, `Click "New" to get started`를, Job이 있으면 `inbox`, `Select a job from the sidebar`를 표시한다. Job 생성·수정 헤더는 이전 화면으로 가는 32px Back 화살표를 제공한다. 생성 모달의 dim 배경은 기존 surface를 70%로 사용해 뒤 화면을 보이게 하면서도 어둡게 구분한다. 이전 계약·이유·승인은 `DBUS_SDD.md`의 CCR-008을 따른다.
+- Side 헤더의 New DBus Interface와 New Database Server는 현재 route를 바꾸지 않는다. Side는 각각 `{type:"open-create-modal",target:"dbus-interface"}` 또는 `{type:"open-create-modal",target:"db-server"}`를 BroadcastChannel로 보낸다. `db-server`는 먼저 `Database Servers` 목록 모달을 열고, `Add Server`와 Edit는 입력 모달을 연다. Main은 현재 화면 위에서만 모달을 열며, 취소·닫기·바깥 영역 클릭·Esc 뒤에도 원래 화면을 유지한다. 이 변경의 이전 계약·이유·승인 기록은 `DBUS_SDD.md`의 CCR-007을 따른다.
+- Main의 첫 `/` 화면은 Job을 자동으로 열지 않고 제목·상단 메뉴·카드 없이 중앙 안내만 표시한다. Job이 없으면 `inbox`, `No jobs yet`, `Click "New" to get started`를, Job이 있으면 `inbox`, `Select a job from the sidebar`를 표시한다. Job 생성·수정 헤더는 이전 화면으로 가는 32px Back 화살표를 제공한다. 생성 모달의 dim 배경은 검정 50% overlay로 뒤 화면을 보이게 하면서도 어둡게 구분한다. 이전 계약·이유·승인은 `DBUS_SDD.md`의 CCR-008을 따른다.
 
 ## 3. 공통 상태 모델
 
@@ -69,9 +69,9 @@ Package stop/uninstall은 lifecycle fence를 먼저 잡고 대상 Job lock을 �
 
 lock은 `owner token`과 `heartbeat` 시각을 가진다. owner는 CGI 요청이 끝날 때 heartbeat를 중지하고 자기 token의 lock만 해제한다. lease가 지났고 `owner PID`가 종료되었다고 확인된 lock만 고유 quarantine 이름으로 원자 이동한 뒤 회수한다. PID 생존 여부를 확인할 수 없으면 안전하게 회수하지 않고 `JOB_CONFLICT`를 반환한다. 이전 owner는 Controller 호출이나 설정 파일 변경 같은 side effect 직전에 token을 다시 확인하며, 소유권을 잃었으면 `JOB_CONFLICT`로 중단한다. 이전 owner는 새 owner의 lock을 갱신하거나 해제할 수 없다. FE는 요청 단위 lock이나 package lifecycle fence를 직접 보유하지 않는다. 어느 쪽 충돌이든 `JOB_CONFLICT` 안내를 보여 주고 최신 목록 또는 상세를 다시 읽는다.
 
-Custom Profile/Method의 POST/PUT는 Profile mutation fence를 먼저 잡고 참조 Job lock을 이름순으로 모두 잡은 뒤 참조와 Controller 상태를 다시 읽고 저장한다. DELETE는 Profile mutation fence와 기존 Profile reader 확인 뒤 참조를 다시 읽고, 참조 Job이 하나라도 있으면 Controller 상태나 Job lock을 확인하지 않고 거부한다. Job create/update/start는 package lifecycle probe 뒤 Job lock을 먼저 잡고, 최신 Job config의 Profile reader lock을 잡은 뒤 Profile을 다시 검증한다. 전역 순서는 package lifecycle probe → Job lock → Profile reader이며, 배타 Profile 변경은 Profile fence → reader 확인 → 정렬된 Job lock이다.
+사용자 DBus Interface/Method의 변경은 Interface mutation fence와 참조 확인으로 보호한다. 참조 Job이 하나라도 있으면 수정·삭제는 거부된다. Job create/update/start는 Job lock 뒤 참조 Interface reader lock을 잡고 Interface와 Method를 다시 검증한다. 전역 순서는 package lifecycle probe → Job lock → Interface reader다.
 
-Profile ID와 Job name은 각각 ASCII 영문 소문자·숫자·`-`(Job은 `_`도 허용)만 사용하고 최대 100자다. Profile reader lock은 raw ID 대신 고정 64자의 SHA-256 Profile key를 써서 `<sha256ProfileKey>--<jobName>`으로 만들므로, 검증 전의 긴 잘못된 ID도 경로 밖 접근이나 파일 이름 초과를 만들지 않는다.
+Interface ID와 Job name은 각각 ASCII 영문 소문자·숫자·`-`(Job은 `_`도 허용)만 사용하고 최대 100자다. Interface reader lock은 raw ID 대신 고정 64자의 SHA-256 Interface key를 사용한다.
 
 canonical Job lock owner 문서도 initial acquire와 stale replacement에서 임시 파일을 완성한 뒤 원자 publish한다. fresh empty/temp-only/malformed owner와 여러 final 또는 final+temp처럼 모호한 owner는 `JOB_CONFLICT`로 보호한다. lease가 지난 empty/temp-only/malformed canonical lock만 orphan으로 고유 quarantine 이름에 원자 이동해 회수한다.
 
@@ -87,9 +87,9 @@ initial canonical owner publish가 실패한 요청은 canonical 경로를 무�
 
 ## 4. Job 목록과 상세
 
-목록에는 Job Name, Profile, DBus Destination, Method Call 수, `configState`, `executionState`, Controller 상태, 마지막 저장 시각을 표시한다. 같은 Destination을 쓰는 여러 Job은 동시에 실행할 수 있으며, 순서 보장은 한 Job의 Method Call 안에서만 적용된다.
+목록에는 Job Name, 사용 DBus Interface 수, Destination 수, Method Call 수, `configState`, `executionState`, Controller 상태, 마지막 저장 시각을 표시한다. 같은 Destination을 쓰는 여러 Job은 동시에 실행할 수 있으며, 순서 보장은 한 Job의 Method Call 안에서만 적용된다.
 
-상세에는 Job 이름, Profile, 실행 상태, Run Interval, Retry Backoff, Method Call 수, DB server/table/column mapping, 직전 실행 결과, Edit/Delete/DataViewer/Log 동작을 표시한다. `config-only` 상세에는 전용 **Install** 버튼을 Main에 표시한다. Side switch는 설치를 수행하지 않고, `installed` Job의 Start/Stop에만 쓴다. DBus 호출 timeout은 제공하지 않으므로 입력·표시·API 옵션에 넣지 않는다.
+상세에는 Job 이름, 사용 DBus Interface와 Method Call, 실행 상태, Run Interval, Retry Backoff, DB server/table/column mapping, 직전 실행 결과, Edit/Delete/DataViewer/Log 동작을 표시한다. `config-only` 상세에는 전용 **Install** 버튼을 Main에 표시한다. Side switch는 설치를 수행하지 않고, `installed` Job의 Start/Stop에만 쓴다. DBus 호출 timeout은 제공하지 않으므로 입력·표시·API 옵션에 넣지 않는다.
 
 직전 실행 결과는 누적 이력이 아니다. 마지막 cycle 한 건과 그 안의 Method별 결과만 표시한다. 실행 전에는 `No run result yet`를 표시한다. 원본 DBus body와 추출된 값은 이 화면에서 보관하지 않는다.
 
@@ -100,11 +100,9 @@ initial canonical owner publish가 실패한 요청은 canonical 경로를 무�
 | 필드 | 필수 | 규칙 |
 |---|---|---|
 | Job Name | 예 | 영문 소문자·숫자·`_`·`-`; 생성 뒤 변경 불가 |
-| PLC Profile | 예 | 새 Job의 기본값은 settings의 `defaultProfileId` |
-| Bus Type | 예 | Profile 기본값을 시작값으로 사용 |
 | Service Name | 표시 전용 | `_dbu_<jobName>`으로 Backend가 결정 |
 
-기본 Profile 변경은 새 Job의 초기 선택만 바꾸며 기존 Job은 바꾸지 않는다. 실행 중 Job은 편집 화면으로 들어갈 수 없고 API도 변경을 거부한다.
+Job은 공통 Profile이나 공통 DBus 주소를 고르지 않는다. Method Call마다 DBus Interface와 Method를 고르고, 실제 입력값을 넣는다. 실행 중 Job은 편집 화면으로 들어갈 수 없고 API도 변경을 거부한다.
 
 ### 실행·저장·DB 설정
 
@@ -121,11 +119,11 @@ Job form은 먼저 `GET /db/server/list`로 등록 서버를 고른다. 선택 �
 
 ### Method Call과 Tag
 
-Job에는 Method Call이 하나 이상 필요하고 화면 순서가 실행 순서다. drag-and-drop과 키보드로 쓸 수 있는 위/아래 이동 버튼을 모두 제공한다. 각 Call은 이름, Method, 입력 요약, Tag 수, 수정·삭제 동작을 표시한다.
+Job에는 Method Call이 하나 이상 필요하고 화면 순서가 실행 순서다. 각 Call draft는 `interfaceId`, `methodId`, raw `inputs`, Tag 목록을 가진다. 화면은 DBus Interface별로 접고 펼치는 구조로 Call을 묶되, 호출 순서는 전체 Job 순서다. drag-and-drop과 키보드로 쓸 수 있는 위/아래 이동 버튼을 모두 제공한다. 각 Call은 Interface, Method, 입력 요약, Tag 수, 수정·삭제 동작을 표시한다.
 
 입력 editor는 `inputs[].editor` 또는 `dbusType`으로 고른다. FE는 `type:value` 문자열을 만들지 않고 원시값만 전송한다. Backend가 Method 정의 순서에 맞춰 type hint를 만든다.
 
-LS `GetDeviceData`에서 `dataCount: 3`, `memoryAddress: "%MB3"`이면 `%MB3`, `%MB4`, `%MB5` Tag를 준비한다. `incrementTrailingNumber` 전략만 1차 지원한다. 알 수 없는 전략은 Profile 비호환으로 표시하고 저장·시작을 막는다.
+LS `GetDeviceData`에서 `dataCount: 3`, `memoryAddress: "%MB3"`이면 `%MB3`, `%MB4`, `%MB5` Tag를 준비한다. `incrementTrailingNumber` 전략만 1차 지원한다. 알 수 없는 전략은 Method 비호환으로 표시하고 저장·시작을 막는다.
 
 자동 생성 Tag에서 이름이나 Transform을 사용자가 바꾼 경우 입력 변경으로 덮어쓰지 않는다. `Add Missing Only`, `Regenerate All`, `Cancel`을 제공하고, 수가 줄어 삭제될 행은 확인한다. Tag name은 최대 100자다. 저장 전과 일괄 편집 preview 적용 전에는 빈 이름, Job 안의 중복 이름, 100자 초과, 연속 outputIndex, 유한하지 않은 bias/multiplier, 기대 반환 수 불일치를 전체 Job 기준으로 검사한다.
 
@@ -138,19 +136,21 @@ mb: value × multiplier + bias
 
 일괄 편집은 선택 행의 prefix/suffix, 찾기/바꾸기, 줄 단위 이름 붙여넣기, bias, multiplier, 계산 순서, Transform 초기화를 preview와 함께 제공한다. 다른 Job과 같은 DB/Table에 같은 Tag 이름이 있으면 경고하지만 저장을 막지 않는다.
 
-## 6. Profile과 Method 관리
+## 6. DBus Interface와 Method 관리
 
-Profile 목록은 display name, vendor, Built-in/Custom, profileVersion, 최소 Neo 버전, Method 수, 호환 상태, 기본 여부를 표시한다.
+DBus Interface 목록은 Bus Type, Destination, Object Path, Interface 이름, Built-in/User, Method 수와 참조 상태를 표시한다. 생성 모달은 Bus Type, Destination, Object Path를 받고 **Discover**를 제공한다. Discover 결과는 모든 Interface와 Method, 입력·출력 파라미터를 처음부터 펼쳐 보이며, 장비 Interface를 먼저 정렬하고 `org.freedesktop.*`에는 `Standard` 뱃지를 붙인다.
 
-- Built-in Profile은 읽기 전용이다. 수정·삭제 버튼을 표시하지 않는다.
-- Custom Profile은 생성·수정·삭제할 수 있다.
-- Custom Profile 또는 Method를 참조하는 Job이 `running`, `STARTING`, `STOPPING`이면 수정·삭제를 차단한다.
-- Custom Profile을 참조하는 Job이 하나라도 있으면 Profile 삭제를 차단한다. Method도 참조 중이면 삭제를 차단한다.
-- Custom Method 화면은 반복 호출 안전성을 사용자가 확인해야 한다는 안내만 보이며, method 이름으로 호출을 차단하지 않는다.
+기본 빌드는 DBus Interface 목록이 비어 있을 수 있다. 이 경우 목록의 빈 상태와 New DBus Interface 동작을 표시하며, Job 화면은 Interface 선택 전 Method Call 추가를 허용하지 않는다. `--with-ls-interface` 빌드에서만 읽기 전용 LS PLC Interface와 `GetDeviceData`가 목록에 처음부터 보인다.
+
+- Discover는 저장하지 않는다. 사용자가 Save All을 누르면 발견한 모든 Interface와 Method를 저장한다.
+- Introspection을 지원하지 않거나 권한이 없으면 사용자는 Interface 이름, Method 이름, 모든 입력·출력 파라미터 이름과 DBus type을 직접 입력한다.
+- Built-in LS PLC Interface와 `GetDeviceData` Method는 읽기 전용이다.
+- 사용자 Interface 또는 Method를 참조하는 Job이 하나라도 있으면 수정·삭제 버튼을 비활성화하고 참조 Job을 안내한다.
+- 다시 Discover한 결과에서 참조 중인 `discovered` Method의 시그니처가 바뀌거나 사라지면 `review-required`를 표시한다. 화면은 이를 자동 저장하지 않으며, 사용자가 Job을 고쳐 참조를 해제하거나 새 Method를 고르게 한다.
 
 ## 7. Test Call, DataViewer, 접근성
 
-Test Call은 저장되지 않은 현재 Profile/Method, Bus/Destination, 원시 Inputs로 호출한다. 결과에는 호출 시각, 소요 시간, 성공 여부, 추출 값 수, 반환 count, Tag preview를 표시한다. 원본 body는 접을 수 있는 진단 영역에서만 보여 주고 저장하지 않는다.
+Test Call은 저장되지 않은 현재 DBus Interface/Method와 원시 Inputs로 호출한다. 결과에는 호출 시각, 소요 시간, 성공 여부, 추출 값 수, 반환 count, Tag preview를 표시한다. 원본 body는 접을 수 있는 진단 영역에서만 보여 주고 저장하지 않는다.
 
 DataViewer는 Job → Method Call → Tag tree를 사용한다. 현재 Job 설정의 Tag만 기본으로 보이며, 같은 table의 다른 Job Tag나 이름 변경 전 과거 Tag를 자동으로 넣지 않는다. `GET /db/table/tags`로 선택 table의 Tag 후보를 읽되, Job config에 없는 Tag는 tree에 자동 추가하지 않는다. `GET /db/table/data`는 Grid의 cursor pagination, UTC 시간 범위, rows per tag를 지원한다. Grid pagination은 snapshot이 아니므로 조회 사이 새 행이 append되면 다음·이전 페이지의 행 구성이 달라질 수 있다. 고정 분석에는 UTC `to` 시간을 지정한다. `GET /db/table/chart`는 선택 Tag와 UTC 시간 범위의 차트 series를 반환한다. Grid는 문자열 값도 보여 주고 Chart는 숫자 Value Column Tag만 선택할 수 있다. Raw/Grid와 Chart, Forward/Backward, ECharts option/model을 제공한다.
 
@@ -170,4 +170,4 @@ FE는 `JOB_INVALID`이면 create form의 잘못된 config를 표시하고, `JOB_
 
 브라우저 요청에는 인위적인 timeout을 두지 않는다. 사용자가 취소하거나 화면이 닫힐 때만 AbortSignal을 전달한다. `Request timed out` UI와 timeout 상수는 없다.
 
-사용 API는 settings, profile, method, job, job/validate, job/install, job/start, job/stop, job/last-run, dbus/call, `db/server`, `db/server/list`, `db/connect`, `db/table/create`, `db/table/list`, `db/table/columns`, `db/table/tags`, `db/table/data`, `db/table/chart`, `log/all`, `log/list`, `log/content`, `log/content/all`, `log/tail`이며, 각 요청·응답 필드는 `BE_DESIGN.md`와 `DBUS_SDD.md`를 따른다.
+사용 API는 settings, `dbus-interface/list`, `dbus-interface`, `dbus-interface/discover`, `dbus-method`, job, job/validate, job/install, job/start, job/stop, job/last-run, dbus/call, `db/server`, `db/server/list`, `db/connect`, `db/table/create`, `db/table/list`, `db/table/columns`, `db/table/tags`, `db/table/data`, `db/table/chart`, `log/all`, `log/list`, `log/content`, `log/content/all`, `log/tail`이며, 각 요청·응답 필드는 `BE_DESIGN.md`와 `DBUS_SDD.md`를 따른다.
