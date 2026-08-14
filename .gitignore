@@ -1,7 +1,7 @@
 frontend/node_modules/
-cgi-bin/conf.d/jobs/*
-!cgi-bin/conf.d/jobs/.gitkeep
-!cgi-bin/conf.d/jobs/example.json
+cgi-bin/provider.json
+cgi-bin/interfaces.d/
+cgi-bin/conf.d/
 cgi-bin/data/*
 !cgi-bin/data/.gitkeep
 .DS_Store

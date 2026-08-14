@@ -1,949 +1,913 @@
 'use strict';
 
-const fs = require('fs');
 const path = require('path');
-const process = require('process');
+const { error } = require('../config/errors.js');
+const { loadSettings } = require('../config/settings-loader.js');
+const { loadProductPolicy } = require('../config/product-policy.js');
+const { createDatabaseValidationAdapter } = require('../db/validation-adapter.js');
+const { jobNeedsStringValueColumn } = require('../output/storage-policy.js');
+const { InterfaceStore } = require('../interfaces/store.js');
+const { profileLockKey: interfaceLockKey } = require('../config/profile-lock-key.js');
+const { classifyControllerState } = require('../service/controller-state.js');
+const { createControllerAdapter, isNotInstalled } = require('../service/controller-adapter.js');
+const { jobDefaults } = require('./defaults.js');
+const { createJobOperationLock } = require('./operation-lock.js');
+const { JobRepository, revisionOf } = require('./repository.js');
+const { deepMerge, validateJobConfig, validateJobName } = require('./validator.js');
 
-function loadCounterStore() {
-  const generatedPath = path.resolve(__dirname, '..', 'example', 'counter.js');
-  if (fs.existsSync(generatedPath)) return require(generatedPath).CounterStore;
-  return require(path.resolve(
-    __dirname,
-    '..', '..', '..', '..', '..', 'template-common', 'cgi-bin', 'src', 'example', 'counter.js',
-  )).CounterStore;
+const SERVICE_PREFIX = '_dbu_';
+
+function serviceName(name) {
+  return `${SERVICE_PREFIX}${validateJobName(name)}`;
 }
 
-const CounterStore = loadCounterStore();
-
-function loadControllerState() {
-  const generatedPath = path.resolve(__dirname, '..', 'service', 'controller-state.js');
-  if (fs.existsSync(generatedPath)) return require(generatedPath).classifyControllerState;
-  return require(path.resolve(
-    __dirname,
-    '..', '..', '..', '..', '..', 'template-common', 'cgi-bin', 'src', 'service', 'controller-state.js',
-  )).classifyControllerState;
+function publicError(source) {
+  return {
+    code: (source && source.code) || 'INTERNAL_ERROR',
+    reason: source && source.message ? source.message : String(source || 'unknown error'),
+    details: (source && source.details) || {},
+  };
 }
 
-const classifyControllerState = loadControllerState();
-
-let nativeService = null;
-try {
-  nativeService = require('service');
-} catch (_) {}
-
-const PACKAGE_NAME = 'neo-pkg-dbus';
-const SERVICE_MODE = 'jobs';
-const SERVICE_PREFIX = '_np_neo_pkg_dbus_';
-const JOB_NAME_PATTERN = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
-const DEFAULT_INTERVAL_MS = 1000;
-const MIN_INTERVAL_MS = 1000;
-const MAX_INTERVAL_MS = 60000;
-
-function findCgiRoot() {
-  const script = String((process.argv && process.argv[1]) || '').replace(/\\/g, '/');
-  const marker = '/cgi-bin/';
-  const markerIndex = script.indexOf(marker);
-  if (markerIndex >= 0) return script.slice(0, markerIndex + '/cgi-bin'.length);
-  return path.resolve(process.cwd(), 'cgi-bin');
+function controllerFailure(code, reason, name, state, detail) {
+  return error(code, reason, {
+    name,
+    controllerState: state || 'UNKNOWN',
+    controllerDetail: detail || null,
+  });
 }
 
-function messageOf(error) {
-  return error && error.message ? String(error.message) : String(error || '');
+function stripName(document) {
+  const config = { ...document };
+  delete config.name;
+  delete config.revision;
+  return config;
 }
 
-function controllerError(error) {
-  const normalized = error instanceof Error ? error : new Error(messageOf(error));
-  normalized.kind = 'controller';
-  return normalized;
-}
-
-function jobNotFound(name, cause) {
-  const error = new Error(`등록되지 않은 작업입니다: ${name}`);
-  error.kind = 'not_found';
-  if (cause) error.cause = cause;
-  return error;
-}
-
-function conflictError(message) {
-  const error = new Error(message);
-  error.kind = 'conflict';
-  return error;
-}
-
-function validationError(error) {
-  const normalized = error instanceof Error ? error : new Error(messageOf(error));
-  normalized.kind = 'validation';
-  return normalized;
-}
-
-function appendCleanupError(target, error) {
-  const message = messageOf(error);
-  target.cleanupError = target.cleanupError
-    ? `${target.cleanupError}; ${message}`
-    : message;
-}
-
-function attachCleanupError(error, cleanupError) {
-  appendCleanupError(error, cleanupError);
-  error.message = `${messageOf(error)}; 보상 정리 실패로 설정을 보존했습니다. 기존 start 또는 delete API로 상태를 확인하고 복구하세요: ${error.cleanupError}`;
-}
-
-function statusOf(info) {
-  const reported = String((info && (info.status || info.state)) || '').toUpperCase();
-  return reported || classifyControllerState(info).state;
-}
-
-function running(info) {
-  return classifyControllerState(info).running;
-}
-
-function startComplete(info) {
-  return classifyControllerState(info).startComplete;
-}
-
-function stopped(info) {
-  return classifyControllerState(info).state === 'STOPPED';
-}
-
-function installFailure(info, options) {
-  if (!info && !(options && options.unknownIsFailure)) return null;
-  const classified = classifyControllerState(info);
-  if (classified.known && classified.state !== 'FAILED') return null;
-  const status = classified.state === 'UNKNOWN' ? statusOf(info) : classified.state;
-  return controllerError(new Error(
-    classified.detail || `서비스 등록 결과가 ${status}입니다.`,
-  ));
-}
-
-function isNotInstalled(error) {
-  if (error && error.rpcCode !== undefined) return error.rpcCode === -32004;
-  return /service\b.*\b(?:not found|not installed|does not exist)\b/i.test(messageOf(error))
-    || /\b(?:no such|unknown) service\b/i.test(messageOf(error));
-}
-
-function isAlreadyInstalled(error) {
-  return /service\b.*\b(?:already exists|already installed)\b/i.test(messageOf(error));
-}
-
-function normalizeConfig(config) {
-  const value = config && typeof config === 'object' ? { ...config } : {};
-  const intervalMs = value.intervalMs === undefined ? DEFAULT_INTERVAL_MS : value.intervalMs;
-  if (!Number.isInteger(intervalMs) || intervalMs < MIN_INTERVAL_MS || intervalMs > MAX_INTERVAL_MS) {
-    throw new Error(`intervalMs는 ${MIN_INTERVAL_MS}~${MAX_INTERVAL_MS} 사이의 정수여야 합니다.`);
+function tagsForCall(call) {
+  if (Array.isArray(call && call.outputSelections)) {
+    return call.outputSelections.flatMap((selection) => Array.isArray(selection.tags) ? selection.tags : []);
   }
-  return { ...value, intervalMs };
+  return Array.isArray(call && call.tags) ? call.tags : [];
+}
+
+function pick(source, fields) {
+  const result = {};
+  fields.forEach((field) => {
+    if (source && Object.prototype.hasOwnProperty.call(source, field)) result[field] = source[field];
+  });
+  return result;
+}
+
+function projectLastRun(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const result = pick(value, [
+    'startedAt', 'completedAt', 'status',
+    'lastRunAt', 'lastSuccessfulRunAt', 'lastStoredAt', 'lastError',
+  ]);
+  if (Array.isArray(value.methodCalls)) {
+    result.methodCalls = value.methodCalls.map((method) => pick(method, [
+      'id', 'name', 'interfaceId', 'methodId', 'requestedAt', 'completedAt', 'status', 'storedCount', 'error',
+    ]));
+  }
+  return result;
 }
 
 class JobManager {
   constructor(options) {
     const settings = options || {};
-    this.service = settings.service || nativeService;
-    this.cgiRoot = settings.cgiRoot || findCgiRoot();
-    this.jobDir = settings.jobDir || path.join(this.cgiRoot, 'conf.d', 'jobs');
-    this.dataDir = settings.dataDir || path.join(this.cgiRoot, 'data');
-    this.workerPath = settings.workerPath || path.join(this.cgiRoot, 'worker.js');
-    fs.mkdirSync(this.jobDir, { recursive: true });
-    fs.mkdirSync(this.dataDir, { recursive: true });
-    this.counter = settings.counter || new CounterStore(this.dataDir);
+    this.cgiRoot = settings.cgiRoot;
+    this.controller = settings.controller || createControllerAdapter(settings.serviceModule);
+    this.database = settings.databaseAdapter || createDatabaseValidationAdapter({ cgiRoot: this.cgiRoot });
+    this.repository = settings.repository || new JobRepository({
+      cgiRoot: this.cgiRoot,
+      jobDir: settings.jobDir,
+    });
+    this.interfaceStore = settings.interfaceStore || new InterfaceStore({ cgiRoot: this.cgiRoot });
+    this.productPolicy = settings.productPolicy || loadProductPolicy(this.cgiRoot);
+    this.operationLock = settings.operationLock || createJobOperationLock({
+      directory: path.join(this.cgiRoot, 'conf.d', '.job-operation-locks'),
+    });
+    this.packageLifecycleLock = settings.packageLifecycleLock || createJobOperationLock({
+      directory: path.join(this.cgiRoot, 'conf.d', '.package-lifecycle-locks'),
+    });
+    this.interfaceMutationLock = settings.interfaceMutationLock || createJobOperationLock({
+      directory: path.join(this.cgiRoot, 'conf.d', '.interface-mutation-locks'),
+    });
+    this.interfaceReaderLock = settings.interfaceReaderLock || createJobOperationLock({
+      directory: path.join(this.cgiRoot, 'conf.d', '.interface-mutation-readers'),
+    });
+    this.settingsFile = settings.settingsFile || path.join(this.cgiRoot, 'conf.d', 'settings.json');
+    this.collectorPath = settings.collectorPath || path.join(this.cgiRoot, 'neo-collector.js');
   }
 
-  validateName(name) {
-    const value = String(name || '');
-    if (!JOB_NAME_PATTERN.test(value)) {
-      throw new Error('작업 이름은 소문자, 숫자, 하이픈만 사용하고 처음과 끝은 문자 또는 숫자여야 합니다.');
-    }
-    return value;
+  get jobDir() { return this.repository.directory; }
+
+  validateName(name) { return validateJobName(name); }
+
+  serviceName(name) { return serviceName(name); }
+
+  configPath(name) { return this.repository.file(name); }
+
+  settings() { return loadSettings(this.settingsFile); }
+
+  validateConfig(config) {
+    const validated = validateJobConfig(config, {
+      interfaceStore: this.interfaceStore,
+      limits: this.settings().limits,
+    });
+    return this.productPolicy.validateProductConfig(validated);
   }
 
-  serviceName(name) {
-    return `${SERVICE_PREFIX}${this.validateName(name)}`;
+  validateDatabase(config, callback) {
+    this.database.validate(config.database, callback);
   }
 
-  configPath(name) {
-    return path.join(this.jobDir, `${this.validateName(name)}.json`);
-  }
-
-  requireConfigFile(name) {
-    const value = this.validateName(name);
-    const configPath = this.configPath(value);
-    try {
-      fs.statSync(configPath);
-    } catch (error) {
-      if (error && error.code === 'ENOENT') throw jobNotFound(value, error);
-      throw error;
-    }
-    return configPath;
-  }
-
-  readConfig(name) {
-    const value = this.validateName(name);
-    let document;
-    try {
-      document = JSON.parse(fs.readFileSync(this.configPath(value), 'utf8'));
-    } catch (error) {
-      if (error && error.code === 'ENOENT') throw jobNotFound(value, error);
-      throw error;
-    }
-    if (!document || typeof document !== 'object' || Array.isArray(document)) {
-      throw new Error(`작업 설정은 JSON 객체여야 합니다: ${value}`);
-    }
-    if (document.name !== value) {
-      throw new Error(`작업 설정 파일 이름 ${value}과 JSON name ${String(document.name)}이 다릅니다.`);
-    }
+  databaseOptions(config) {
     return {
-      ...document,
-      name: value,
-      config: normalizeConfig(document.config),
+      needsStringValueColumn: jobNeedsStringValueColumn(config, this.interfaceStore),
     };
   }
 
-  configNames() {
-    const entries = fs.readdirSync(this.jobDir);
-    const invalid = entries
-      .filter((entry) => entry.endsWith('.json'))
-      .map((entry) => entry.slice(0, -5))
-      .filter((name) => !JOB_NAME_PATTERN.test(name));
-    if (invalid.length > 0) {
-      throw new Error(`잘못된 작업 설정 파일 이름입니다: ${invalid.join(', ')}`);
-    }
-    return entries
-      .filter((entry) => entry.endsWith('.json'))
-      .map((entry) => entry.slice(0, -5))
-      .sort();
+  callback(callback, operation) {
+    try { operation(); } catch (operationError) { callback(operationError); }
   }
 
-  callService(method, args, callback) {
-    let completed = false;
-    const done = (error, ...result) => {
-      if (completed) return;
-      completed = true;
-      callback(error ? controllerError(error) : null, ...result);
-    };
+  assertPackageLifecycleAvailable(name) {
     try {
-      if (!this.service || typeof this.service[method] !== 'function') {
-        throw new Error(`service.${method}()을 사용할 수 없습니다.`);
+      this.packageLifecycleLock.assertAvailable('package-lifecycle');
+    } catch (failure) {
+      if (failure && failure.code === 'JOB_CONFLICT') {
+        throw error('JOB_CONFLICT', 'package lifecycle이 Job 변경을 진행하고 있습니다.', { name });
       }
-      this.service[method](...args, done);
-    } catch (error) {
-      if (completed) throw error;
-      done(controllerError(error));
+      throw failure;
     }
   }
 
-  withCallback(callback, operation) {
-    let completed = false;
-    const done = (...result) => {
-      if (completed) return;
-      completed = true;
-      callback(...result);
-    };
+  assertInterfaceMutationAvailable(interfaceId, name) {
     try {
-      operation(done);
-    } catch (error) {
-      if (completed) throw error;
-      done(error);
+      this.interfaceMutationLock.assertAvailable(interfaceLockKey(interfaceId));
+    } catch (failure) {
+      if (failure && failure.code === 'JOB_CONFLICT') {
+        throw error('JOB_CONFLICT', 'DBus Interface 변경이 Job 시작 또는 저장을 진행하고 있습니다.', { name, interfaceId });
+      }
+      throw failure;
     }
   }
 
-  create(payload, callback) {
+  withMutation(name, callback, operation) {
+    let handle;
+    let holdInterfaces;
+    const readers = [];
+    const heldInterfaceIds = new Set();
     try {
-      this.validateName(payload && payload.name);
-    } catch (error) {
-      callback(validationError(error));
+      this.assertPackageLifecycleAvailable(name);
+      handle = this.operationLock.acquire(name);
+      this.assertPackageLifecycleAvailable(name);
+      holdInterfaces = (config) => {
+        const ids = [...new Set(((config && config.methodCalls) || []).map((call) => call && call.interfaceId)
+          .filter((id) => typeof id === 'string'))].sort();
+        ids.forEach((interfaceId) => {
+          if (heldInterfaceIds.has(interfaceId)) return;
+          this.assertInterfaceMutationAvailable(interfaceId, name);
+          const reader = this.interfaceReaderLock.acquire(`${interfaceLockKey(interfaceId)}--${name}`);
+          readers.push(reader);
+          heldInterfaceIds.add(interfaceId);
+          this.assertInterfaceMutationAvailable(interfaceId, name);
+        });
+      };
+    } catch (failure) {
+      readers.reverse().forEach((reader) => { try { reader.release(); } catch (_) {} });
+      if (handle) {
+        try { handle.release(); } catch (cleanupError) {
+          if (failure && (typeof failure === 'object' || typeof failure === 'function')) {
+            failure.cleanupError = cleanupError;
+          }
+        }
+      }
+      callback(failure);
       return;
     }
-    this.createUnlocked(payload, callback);
+    let finished = false;
+    const done = (failure, value) => {
+      if (finished) return;
+      finished = true;
+      let releaseFailure = null;
+      readers.reverse().forEach((reader) => { try { reader.release(); } catch (cleanupError) { if (!releaseFailure) releaseFailure = cleanupError; } });
+      try { handle.release(); } catch (cleanupError) { releaseFailure = cleanupError; }
+      if (failure && releaseFailure && (typeof failure === 'object' || typeof failure === 'function')) {
+        failure.cleanupError = releaseFailure;
+      }
+      callback(failure || releaseFailure, value);
+    };
+    try { operation(handle, done, holdInterfaces); } catch (failure) { done(failure); }
   }
 
-  update(payload, callback) {
+  withLifecycleHandle(name, handles, callback, operation) {
+    let finished = false;
+    const done = (failure, value) => {
+      if (finished) return;
+      finished = true;
+      callback(failure, value);
+    };
     try {
-      this.validateName(payload && payload.name);
-      normalizeConfig(payload && payload.config);
-    } catch (error) {
-      callback(error);
-      return;
-    }
-    this.updateUnlocked(payload, callback);
-  }
-
-  createUnlocked(payload, callback) {
-    this.withCallback(callback, (done) => {
-      const name = this.validateName(payload && payload.name);
-      const configPath = this.configPath(name);
-      if (fs.existsSync(configPath)) {
-        throw conflictError(`이미 등록된 작업입니다: ${name}`);
-      }
-      let config;
-      try {
-        config = normalizeConfig(payload && payload.config);
-      } catch (error) {
-        throw validationError(error);
-      }
-      this.status(name, (statusError, info) => {
-        if (statusError && !isNotInstalled(statusError)) {
-          done(statusError);
-          return;
-        }
-        if (!statusError) {
-          const classified = classifyControllerState(info);
-          if (classified.known) {
-            done(conflictError(
-              `이미 Controller에 등록된 작업입니다: ${name} (현재 상태: ${classified.state})`,
-            ));
-            return;
-          }
-          done(controllerError(new Error(
-            `알 수 없는 Controller 상태에서는 생성할 수 없습니다: ${name} (현재 상태: ${statusOf(info) || 'UNKNOWN'})`,
-          )));
-          return;
-        }
-
-        try {
-          this.counter.remove(name);
-        } catch (error) {
-          done(error);
-          return;
-        }
-
-        const document = { name, config };
-        let ownsConfig = false;
-        let descriptor = null;
-        try {
-          descriptor = fs.openSync(configPath, 'wx');
-          ownsConfig = true;
-          fs.writeSync(descriptor, `${JSON.stringify(document, null, 2)}\n`);
-          fs.closeSync(descriptor);
-          descriptor = null;
-        } catch (error) {
-          if (descriptor !== null) {
-            try { fs.closeSync(descriptor); } catch (_) {}
-          }
-          let cleanupError = null;
-          if (ownsConfig) {
-            try { fs.unlinkSync(configPath); } catch (unlinkError) {
-              if (!unlinkError || unlinkError.code !== 'ENOENT') cleanupError = unlinkError;
-            }
-          }
-          if (!ownsConfig && fs.existsSync(configPath)) {
-            done(conflictError(`이미 등록된 작업입니다: ${name}`));
-            return;
-          }
-          if (cleanupError) attachCleanupError(error, cleanupError);
-          done(error);
-          return;
-        }
-
-        this.register(name, { allowExisting: false }, (error, _registration, installedByRequest) => {
-          if (!error) {
-            done(null, document);
-            return;
-          }
-          const removeConfig = (cleanupError) => {
-            let configCleanupError = null;
-            if (!cleanupError && ownsConfig) {
-              try { fs.unlinkSync(configPath); } catch (unlinkError) {
-                if (!unlinkError || unlinkError.code !== 'ENOENT') {
-                  configCleanupError = unlinkError;
-                }
-              }
-            }
-            if (cleanupError || configCleanupError) {
-              attachCleanupError(error, cleanupError || configCleanupError);
-            }
-            done(error);
-          };
-          if (!installedByRequest) {
-            removeConfig(null);
-            return;
-          }
-          this.cleanupRegistration(name, removeConfig);
-        });
-      });
-    });
-  }
-
-  replaceConfig(name, document) {
-    const targetPath = this.configPath(name);
-    const temporaryPath = `${targetPath}.${Date.now()}-${process.pid || 0}-${Math.random().toString(16).slice(2)}.tmp`;
-    let descriptor = null;
-    try {
-      descriptor = fs.openSync(temporaryPath, 'wx');
-      fs.writeSync(descriptor, `${JSON.stringify(document, null, 2)}\n`);
-      if (typeof fs.fsyncSync === 'function') fs.fsyncSync(descriptor);
-      fs.closeSync(descriptor);
-      descriptor = null;
-      fs.renameSync(temporaryPath, targetPath);
-    } catch (error) {
-      if (descriptor !== null) {
-        try { fs.closeSync(descriptor); } catch (_) {}
-      }
-      try { fs.unlinkSync(temporaryPath); } catch (_) {}
-      throw error;
+      const validatedName = this.validateName(name);
+      const handle = handles.get(validatedName);
+      if (!handle) throw error('JOB_CONFLICT', 'package lifecycle 대상 Job lock이 없습니다.', { name: validatedName });
+      handle.assertOwned();
+      operation(validatedName, handle, done);
+    } catch (failure) {
+      done(failure);
     }
   }
 
-  updateUnlocked(payload, callback) {
-    this.withCallback(callback, (done) => {
-      const name = this.validateName(payload && payload.name);
-      this.readConfig(name);
-      const document = {
-        name,
-        config: normalizeConfig(payload && payload.config),
-      };
-      const save = () => {
+  acquirePackageLifecycle(names) {
+    const handles = new Map();
+    let fence = null;
+    const releaseAll = () => {
+      let releaseFailure = null;
+      [...handles.entries()].reverse().forEach(([name, handle]) => {
         try {
-          this.replaceConfig(name, document);
-          done(null, document);
-        } catch (error) {
-          done(error);
-        }
-      };
-      this.status(name, (error, info) => {
-        if (error && isNotInstalled(error)) {
-          save();
-          return;
-        }
-        if (error) {
-          done(error);
-          return;
-        }
-        if (!stopped(info)) {
-          const status = statusOf(info) || 'UNKNOWN';
-          done(conflictError(`작업을 중지한 뒤 수정하세요: ${name} (현재 상태: ${status})`));
-          return;
-        }
-        save();
-      });
-    });
-  }
-
-  register(name, options, callback) {
-    const settings = options || {};
-    this.withCallback(callback, (done) => {
-      const value = this.validateName(name);
-      const configPath = this.configPath(value);
-      this.readConfig(value);
-      this.callService('install', [{
-        name: this.serviceName(value),
-        enable: true,
-        working_dir: this.cgiRoot,
-        executable: this.workerPath,
-        args: [configPath],
-      }], (error, info) => {
-        if (error && isAlreadyInstalled(error)) {
-          if (!settings.allowExisting) {
-            done(conflictError(`이미 Controller에 등록된 작업입니다: ${value}`), null, false);
-            return;
-          }
-          this.ensureRegisteredRunning(value, (ensureError, result) => {
-            done(ensureError, result, false);
-          });
-          return;
-        }
-        if (error) {
-          done(error, null, false);
-          return;
-        }
-        const failure = installFailure(info);
-        if (failure) {
-          done(failure, null, true);
-          return;
-        }
-        if (info && startComplete(info)) {
-          done(null, { name: value, status: 'RUNNING' }, true);
-          return;
-        }
-        this.verifyRunning(value, (verifyError, result) => {
-          done(verifyError, result, true);
-        });
-      });
-    });
-  }
-
-  verifyRunning(name, callback) {
-    this.status(name, (error, info) => {
-      if (error) {
-        callback(error);
-        return;
-      }
-      if (startComplete(info)) {
-        callback(null, { name, status: 'RUNNING' });
-        return;
-      }
-      const classified = classifyControllerState(info);
-      callback(controllerError(new Error(
-        classified.detail || `서비스가 시작되지 않았습니다: ${classified.state}`,
-      )));
-    });
-  }
-
-  ensureRegisteredRunning(name, callback) {
-    this.status(name, (error, info) => {
-      if (error) {
-        callback(error);
-        return;
-      }
-      const classified = classifyControllerState(info);
-      if (classified.startComplete) {
-        callback(null, { name, status: 'RUNNING' });
-        return;
-      }
-      if (
-        classified.state === 'STARTING'
-        || classified.state === 'STOPPING'
-        || classified.state === 'UNKNOWN'
-      ) {
-        callback(controllerError(new Error(
-          `서비스 시작 전환이 완료되지 않았습니다: ${classified.state}`,
-        )));
-        return;
-      }
-      this.callService('start', [this.serviceName(name)], (startError, result) => {
-        const failure = startError || installFailure(result);
-        if (failure) callback(failure);
-        else if (result && startComplete(result)) {
-          callback(null, { name, status: 'RUNNING' });
-        } else {
-          this.verifyRunning(name, callback);
+          handle.release();
+          handles.delete(name);
+        } catch (failure) {
+          if (!releaseFailure) releaseFailure = failure;
         }
       });
-    });
-  }
+      if (handles.size === 0 && fence) {
+        try {
+          fence.release();
+          fence = null;
+        } catch (failure) {
+          if (!releaseFailure) releaseFailure = failure;
+        }
+      }
+      if (releaseFailure) throw releaseFailure;
+    };
 
-  cleanupRegistration(name, callback) {
-    const serviceName = this.serviceName(name);
-    const removeResult = () => {
+    fence = this.packageLifecycleLock.acquire('package-lifecycle');
+    const releaseSession = () => {
+      if (handles.size === 0 && !fence) return;
+      releaseAll();
+    };
+    const acquireNames = (requestedNames) => {
+      if (!fence) throw error('JOB_CONFLICT', 'package lifecycle lock이 이미 해제되었습니다.');
       try {
-        this.counter.remove(name);
-        callback(null);
-      } catch (resultError) {
-        callback(resultError);
+        const orderedNames = [...new Set(
+          (requestedNames || []).map((name) => this.validateName(name)),
+        )].sort();
+        orderedNames.forEach((name) => {
+          if (!handles.has(name)) handles.set(name, this.operationLock.acquire(name));
+        });
+      } catch (failure) {
+        try { releaseSession(); } catch (cleanupError) {
+          if (failure && (typeof failure === 'object' || typeof failure === 'function')) {
+            failure.cleanupError = cleanupError;
+          }
+        }
+        throw failure;
       }
     };
-    const uninstall = () => {
-      this.callService('uninstall', [serviceName], (error) => {
-        if (error && !isNotInstalled(error)) {
-          callback(error);
-          return;
-        }
-        if (error && isNotInstalled(error)) {
-          removeResult();
-          return;
-        }
-        this.verifyUninstalled(name, (verifyError) => {
-          if (verifyError) callback(verifyError);
-          else removeResult();
-        });
-      });
+
+    acquireNames(names);
+
+    return {
+      acquire: acquireNames,
+      stopForPackage: (name, callback) => this.withLifecycleHandle(
+        name, handles, callback,
+        (validatedName, handle, done) => this.stopForPackageWithHandle(validatedName, handle, done),
+      ),
+      delete: (name, callback) => this.withLifecycleHandle(
+        name, handles, callback,
+        (validatedName, handle, done) => this.deleteWithHandle(validatedName, handle, done),
+      ),
+      release: () => {
+        releaseSession();
+      },
     };
-    this.status(name, (statusError, info) => {
+  }
+
+  callController(method, args, callback) {
+    let finished = false;
+    const done = (callError, value) => {
+      if (finished) return;
+      finished = true;
+      callback(callError, value);
+    };
+    try {
+      if (!this.controller || typeof this.controller[method] !== 'function') {
+        done(new Error(`Controller service.${method}()을 사용할 수 없습니다.`));
+        return;
+      }
+      this.controller[method](...args, done);
+    } catch (callError) {
+      done(callError);
+    }
+  }
+
+  inspect(name, callback) {
+    const target = this.serviceName(name);
+    this.callController('status', [target], (statusError, info) => {
       if (statusError && isNotInstalled(statusError)) {
-        removeResult();
+        callback(null, {
+          controllerState: 'NOT_INSTALLED', controllerDetail: null, info: null, statusError: null,
+        });
         return;
       }
       if (statusError) {
-        callback(statusError);
+        const failure = controllerFailure(
+          'CONTROLLER_UNAVAILABLE', 'Controller 상태를 읽을 수 없습니다.', name, 'UNKNOWN', statusError.message,
+        );
+        callback(null, {
+          controllerState: 'UNKNOWN', controllerDetail: statusError.message || null, info: null, statusError: failure,
+        });
         return;
       }
       const classified = classifyControllerState(info);
-      if (classified.knownInactive) {
-        uninstall();
-      } else if (classified.activeForStop) {
-        this.ensureStopped(name, (stopError) => {
-          if (stopError) callback(stopError);
-          else uninstall();
-        });
-      } else {
-        callback(controllerError(new Error(
-          `알 수 없는 Controller 상태에서는 정리할 수 없습니다: ${name} (현재 상태: ${classified.state})`,
-        )));
-      }
-    });
-  }
-
-  status(name, callback) {
-    this.withCallback(callback, (done) => {
-      this.callService('status', [this.serviceName(name)], done);
-    });
-  }
-
-  list(callback) {
-    let names;
-    try {
-      names = this.configNames();
-    } catch (error) {
-      callback(error);
-      return;
-    }
-    if (names.length === 0) {
-      callback(null, []);
-      return;
-    }
-    const result = new Array(names.length);
-    let remaining = names.length;
-    names.forEach((name, index) => {
-      let config = {};
-      let configError = '';
-      try {
-        config = this.readConfig(name).config || {};
-      } catch (error) {
-        configError = messageOf(error);
-      }
-      this.status(name, (error, info) => {
-        const notInstalled = Boolean(error && isNotInstalled(error));
-        const classified = classifyControllerState(info, { notInstalled });
-        const serviceFailure = error ? null : installFailure(info, { unknownIsFailure: true });
-        const controllerFailure = notInstalled
-          ? null
-          : (error || serviceFailure);
-        const controllerErrorMessage = controllerFailure
-          ? messageOf(controllerFailure)
-          : classified.detail;
-        const statusKnown = notInstalled || (!error && classified.known);
-        const registered = notInstalled
-          ? false
-          : error
-            ? null
-            : statusKnown
-              ? true
-              : null;
-        const status = error && !notInstalled ? 'ERROR' : classified.state;
-        let counterResult = null;
-        let resultError = '';
-        try {
-          counterResult = this.counter.read(name);
-        } catch (counterError) {
-          resultError = messageOf(counterError);
-        }
-        const representativeError = controllerErrorMessage || configError;
-        result[index] = {
-          name,
-          config,
-          result: counterResult,
-          service: this.serviceName(name),
-          status,
-          statusKnown,
-          registered,
-          running: statusKnown && registered === true && classified.running,
-          error: representativeError,
-          errorKind: controllerErrorMessage ? 'controller' : configError ? 'config' : '',
-          configError,
-          controllerError: controllerErrorMessage,
-          resultError,
-        };
-        remaining -= 1;
-        if (remaining === 0) callback(null, result);
+      const stateError = classified.known ? null : controllerFailure(
+        'CONTROLLER_UNKNOWN', 'Controller 상태를 알 수 없어 안전하게 작업할 수 없습니다.',
+        name, 'UNKNOWN', classified.detail || '지원하지 않거나 비어 있는 Controller 응답입니다.',
+      );
+      callback(null, {
+        controllerState: classified.state,
+        controllerDetail: classified.detail || null,
+        info,
+        statusError: stateError,
       });
     });
   }
 
-  runningNames(callback) {
-    this.list((error, jobs) => {
-      if (error) {
-        callback(error);
+  view(name, config, state, configError, revision) {
+    const statusKnown = !state.statusError && state.controllerState !== 'UNKNOWN';
+    const installed = statusKnown ? state.controllerState !== 'NOT_INSTALLED' : null;
+    const running = statusKnown
+      ? ['RUNNING', 'STARTING', 'STOPPING'].includes(state.controllerState)
+      : null;
+    return {
+      name,
+      config,
+      configState: statusKnown ? (installed ? 'installed' : 'config-only') : null,
+      executionState: statusKnown ? (running ? 'running' : 'stopped') : null,
+      controllerState: state.controllerState,
+      controllerDetail: state.controllerDetail,
+      statusKnown,
+      installed,
+      running,
+      ...(Number.isInteger(revision) ? { revision } : {}),
+      ...(configError ? { error: publicError(configError) } : {}),
+      ...(state.statusError ? { controllerError: publicError(state.statusError) } : {}),
+    };
+  }
+
+  readValidated(name) {
+    const document = this.repository.read(name);
+    const revision = revisionOf(document);
+    try {
+      return { document, config: this.validateConfig(stripName(document)), revision };
+    } catch (validationError) {
+      if (validationError && validationError.code === 'JOB_INVALID_CONFIG') throw validationError;
+      throw error('JOB_INVALID_CONFIG', '저장된 Job 설정이 schemaVersion 1 계약과 맞지 않습니다.', {
+        name,
+        cause: validationError.message,
+        revision,
+      });
+    }
+  }
+
+  diagnostic(name, callback) {
+    let value;
+    try {
+      value = this.readValidated(name);
+    } catch (configError) {
+      if (configError.code !== 'JOB_INVALID_CONFIG') {
+        callback(configError);
         return;
       }
-      const statusErrors = jobs
-        .filter((job) => job.statusKnown === false)
-        .map((job) => `${job.name}: ${job.controllerError || job.error}`);
-      if (statusErrors.length > 0) {
-        callback(new Error(statusErrors.join('; ')));
+      callback(null, this.view(name, null, {
+        controllerState: 'UNKNOWN', controllerDetail: configError.message, statusError: null,
+      }, configError, configError.details && configError.details.revision));
+      return;
+    }
+    this.inspect(name, (_unused, state) => callback(null, this.view(name, value.config, state, null, value.revision)));
+  }
+
+  get(name, callback) {
+    this.callback(callback, () => {
+      this.validateName(name);
+      this.diagnostic(name, callback);
+    });
+  }
+
+  summary(detail, lastRun) {
+    const config = detail.config;
+    return {
+      name: detail.name,
+      interfaceIds: config ? [...new Set((config.methodCalls || []).map((call) => call.interfaceId))].sort() : [],
+      methodCallCount: config && Array.isArray(config.methodCalls) ? config.methodCalls.length : 0,
+      configState: detail.configState,
+      executionState: detail.executionState,
+      controllerState: detail.controllerState,
+      controllerDetail: detail.controllerDetail,
+      statusKnown: detail.statusKnown,
+      installed: detail.installed,
+      running: detail.running,
+      lastStoredAt: lastRun && lastRun.lastStoredAt || null,
+      ...(detail.error ? { error: detail.error } : {}),
+      ...(detail.controllerError ? { controllerError: detail.controllerError } : {}),
+    };
+  }
+
+  readLastRun(name, state, callback) {
+    if (state.installed === false) { callback(null, null); return; }
+    if (state.installed === null) { callback(state.statusError || controllerFailure(
+      'CONTROLLER_UNKNOWN', 'Controller 상태를 알 수 없어 service details를 읽을 수 없습니다.',
+      name, state.controllerState, state.controllerDetail,
+    )); return; }
+    this.callController('details', [this.serviceName(name), 'lastRun'], callback);
+  }
+
+  list(callback) {
+    let records;
+    try { records = this.repository.list(); } catch (listError) { callback(listError); return; }
+    if (!records.length) { callback(null, []); return; }
+    const values = new Array(records.length);
+    let pending = records.length;
+    records.forEach((record, index) => {
+      this.diagnostic(record.name, (detailError, detail) => {
+        const resolved = detailError
+          ? this.view(record.name, null, {
+            controllerState: 'UNKNOWN', controllerDetail: detailError.message, statusError: null,
+          }, detailError)
+          : detail;
+        if (resolved.installed !== true) {
+          values[index] = this.summary(resolved, null);
+          pending -= 1;
+          if (pending === 0) callback(null, values);
+          return;
+        }
+        this.readLastRun(record.name, resolved, (lastRunError, lastRun) => {
+          if (lastRunError && !resolved.controllerError) {
+            resolved.controllerError = publicError(controllerFailure(
+              'CONTROLLER_UNAVAILABLE', 'service details를 읽지 못했습니다.',
+              record.name, resolved.controllerState, lastRunError.message,
+            ));
+          }
+          values[index] = this.summary(resolved, projectLastRun(lastRun));
+          pending -= 1;
+          if (pending === 0) callback(null, values);
+        });
+      });
+    });
+  }
+
+  create(payload, callback) {
+    this.callback(callback, () => {
+      if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+        throw error('JOB_INVALID', 'Job create body는 객체여야 합니다.');
+      }
+      const unknown = Object.keys(payload).filter((key) => !['name', 'config'].includes(key));
+      if (unknown.length || !Object.prototype.hasOwnProperty.call(payload, 'config')) {
+        throw error('JOB_INVALID', 'Job create body는 name과 config만 포함해야 합니다.', { fields: unknown });
+      }
+      const name = this.validateName(payload.name);
+      this.withMutation(name, callback, (handle, done, holdInterfaces) => {
+        let config;
+        try {
+          holdInterfaces(payload.config);
+          config = this.validateConfig(payload.config);
+        } catch (validationError) { done(validationError); return; }
+        this.inspect(name, (_unused, state) => {
+          if (state.statusError) { done(state.statusError); return; }
+          if (state.controllerState !== 'NOT_INSTALLED') {
+            done(error('SERVICE_ALREADY_INSTALLED', '같은 이름의 Controller service가 이미 있습니다.', {
+              name, controllerState: state.controllerState,
+            }));
+            return;
+          }
+          this.database.ensure(config.database, this.databaseOptions(config), (databaseError) => {
+            if (databaseError) { done(databaseError); return; }
+            let document;
+            const discardConfig = (failure) => {
+              try {
+                handle.assertOwned();
+                this.repository.remove(name);
+              } catch (cleanupError) {
+                failure.details = { ...(failure.details || {}), cleanupError: cleanupError.message };
+              }
+              done(failure);
+            };
+            try {
+              handle.assertOwned();
+              document = this.repository.create(name, config);
+            } catch (createError) {
+              done(createError);
+              return;
+            }
+            const descriptor = {
+              name: this.serviceName(name),
+              enable: false,
+              working_dir: this.cgiRoot,
+              executable: this.collectorPath,
+              args: [`${name}.json`],
+            };
+            try { handle.assertOwned(); } catch (ownershipError) { discardConfig(ownershipError); return; }
+            this.callController('install', [descriptor], (installError) => {
+              if (installError) {
+                discardConfig(controllerFailure(
+                  'CONTROLLER_UNAVAILABLE', 'Job service를 자동 설치하지 못했습니다.',
+                  name, 'NOT_INSTALLED', installError.message,
+                ));
+                return;
+              }
+              this.inspect(name, (_inspectError, after) => {
+                if (!after.statusError && after.controllerState === 'STOPPED') {
+                  done(null, this.view(name, config, after, null, revisionOf(document)));
+                  return;
+                }
+                const failure = after.statusError || controllerFailure(
+                  'CONTROLLER_OPERATION_FAILED', '자동 설치한 service가 STOPPED 상태가 아닙니다.',
+                  name, after.controllerState, after.controllerDetail,
+                );
+                try { handle.assertOwned(); } catch (ownershipError) { discardConfig(ownershipError); return; }
+                this.callController('uninstall', [this.serviceName(name)], (cleanupError) => {
+                  if (cleanupError) failure.details = { ...(failure.details || {}), cleanupError: cleanupError.message };
+                  discardConfig(failure);
+                });
+              });
+            });
+          });
+        });
+      });
+    });
+  }
+
+  warnings(name, config) {
+    const currentTags = new Set();
+    config.methodCalls.forEach((call) => tagsForCall(call).forEach((tag) => currentTags.add(tag.name)));
+    const jobs = [];
+    const tags = new Set();
+    this.repository.list().forEach((record) => {
+      if (!record.document || record.name === name) return;
+      const other = stripName(record.document);
+      if (!other.database || other.database.server !== config.database.server
+        || other.database.table !== config.database.table || !Array.isArray(other.methodCalls)) return;
+      let matched = false;
+      other.methodCalls.forEach((call) => {
+        tagsForCall(call).forEach((tag) => {
+          if (currentTags.has(tag.name)) { matched = true; tags.add(tag.name); }
+        });
+      });
+      if (matched) jobs.push(record.name);
+    });
+    if (!jobs.length) return [];
+    return [{
+      code: 'TAG_NAME_USED_BY_ANOTHER_JOB',
+      reason: '같은 DB table의 Tag name을 다른 Job도 사용합니다.',
+      path: '/methodCalls',
+      details: { jobs: jobs.sort(), tags: [...tags].sort() },
+    }];
+  }
+
+  validate(payload, callback) {
+    this.callback(callback, () => {
+      const source = payload && Object.prototype.hasOwnProperty.call(payload, 'config')
+        ? payload.config : payload;
+      const name = payload && Object.prototype.hasOwnProperty.call(payload, 'name')
+        ? this.validateName(payload.name) : null;
+      const config = this.validateConfig(source);
+      this.validateDatabase(config, (databaseError) => {
+        if (databaseError) { callback(databaseError); return; }
+        try { callback(null, { valid: true, warnings: this.warnings(name, config) }); }
+        catch (warningError) { callback(warningError); }
+      });
+    });
+  }
+
+  guardMutable(name, callback) {
+    let value;
+    try { value = this.readValidated(name); } catch (readError) { callback(readError); return; }
+    this.inspect(name, (_unused, state) => {
+      if (state.statusError) { callback(state.statusError); return; }
+      if (['RUNNING', 'STARTING', 'STOPPING'].includes(state.controllerState)) {
+        callback(error('JOB_RUNNING', '실행 중이거나 전환 중인 Job은 바꾸거나 지울 수 없습니다.', {
+          name, controllerState: state.controllerState,
+        }));
         return;
       }
-      callback(null, jobs.filter((job) => job.running).map((job) => job.name));
+      callback(null, value, state);
+    });
+  }
+
+  update(name, patch, callback) {
+    if (patch && Object.prototype.hasOwnProperty.call(patch, 'name')) {
+      callback(error('JOB_NAME_IMMUTABLE', 'Job name은 바꿀 수 없습니다.', { name }));
+      return;
+    }
+    if (!patch || typeof patch !== 'object' || Array.isArray(patch)) {
+      callback(error('JOB_INVALID', 'Job patch는 JSON 객체여야 합니다.'));
+      return;
+    }
+    this.callback(callback, () => {
+      this.validateName(name);
+      this.withMutation(name, callback, (handle, done, holdInterfaces) => {
+        this.guardMutable(name, (guardError, current) => {
+          if (guardError) { done(guardError); return; }
+          if (!Number.isSafeInteger(patch.revision) || patch.revision < 1) {
+            done(error('JOB_REVISION_REQUIRED', 'Job 수정에는 GET으로 받은 revision이 필요합니다.', { name }));
+            return;
+          }
+          try {
+            const { revision, ...configPatch } = patch;
+            const existing = current.config;
+            holdInterfaces(existing);
+            const merged = deepMerge(deepMerge(jobDefaults(), existing), configPatch);
+            holdInterfaces(merged);
+            const config = this.validateConfig(merged);
+            this.database.ensure(config.database, this.databaseOptions(config), (databaseError) => {
+              if (databaseError) { done(databaseError); return; }
+              try {
+                handle.assertOwned();
+                const document = this.repository.save(name, { ...config, name, revision: revision + 1 }, revision);
+                this.inspect(name, (_unused, state) => done(null, this.view(
+                  name, stripName(document), state, null, revisionOf(document),
+                )));
+              } catch (saveError) {
+                done(saveError);
+              }
+            });
+          } catch (updateError) {
+            done(updateError);
+          }
+        });
+      });
+    });
+  }
+
+  install(name, callback) {
+    this.callback(callback, () => {
+      this.validateName(name);
+      this.withMutation(name, callback, (handle, done, holdInterfaces) => {
+        const current = this.readValidated(name);
+        try { holdInterfaces(current.config); } catch (interfaceConflict) { done(interfaceConflict); return; }
+        this.inspect(name, (_unused, before) => {
+          if (before.statusError) { done(before.statusError); return; }
+          if (before.controllerState !== 'NOT_INSTALLED') {
+            done(error('SERVICE_ALREADY_INSTALLED', 'Job service가 이미 설치되어 있습니다.', {
+              name, controllerState: before.controllerState,
+            }));
+            return;
+          }
+          const descriptor = {
+            name: this.serviceName(name),
+            enable: false,
+            working_dir: this.cgiRoot,
+            executable: this.collectorPath,
+            args: [`${name}.json`],
+          };
+          try { handle.assertOwned(); } catch (ownershipError) { done(ownershipError); return; }
+          this.callController('install', [descriptor], (installError) => {
+            if (installError) {
+              done(controllerFailure(
+                'CONTROLLER_UNAVAILABLE', 'Job service를 설치하지 못했습니다.',
+                name, 'NOT_INSTALLED', installError.message,
+              ));
+              return;
+            }
+            this.inspect(name, (_inspectError, after) => {
+              if (!after.statusError && after.controllerState === 'STOPPED') {
+                done(null, this.view(name, current.config, after));
+                return;
+              }
+              const failure = after.statusError || controllerFailure(
+                'CONTROLLER_OPERATION_FAILED', '설치한 service가 STOPPED 상태가 아닙니다.',
+                name, after.controllerState, after.controllerDetail,
+              );
+              try { handle.assertOwned(); } catch (ownershipError) { done(ownershipError); return; }
+              this.callController('uninstall', [this.serviceName(name)], (cleanupError) => {
+                if (cleanupError) failure.details.cleanupError = cleanupError.message;
+                done(failure);
+              });
+            });
+          });
+        });
+      });
     });
   }
 
   start(name, callback) {
-    this.ensureRunning(name, callback);
-  }
-
-  ensureRunning(name, callback) {
-    let value;
-    try {
-      value = this.validateName(name);
-    } catch (error) {
-      callback(error);
-      return;
-    }
-    this.ensureRunningUnlocked(value, callback);
-  }
-
-  ensureRunningUnlocked(name, callback) {
-    this.withCallback(callback, (done) => {
-      this.readConfig(name);
-      this.status(name, (statusError, info) => {
-        if (statusError) {
-          if (isNotInstalled(statusError)) this.register(name, { allowExisting: true }, done);
-          else done(statusError);
-          return;
-        }
-        const classified = classifyControllerState(info);
-        if (classified.startComplete) {
-          done(null, { name, status: 'RUNNING' });
-          return;
-        }
-        if (
-          classified.state === 'STARTING'
-          || classified.state === 'STOPPING'
-          || classified.state === 'UNKNOWN'
-        ) {
-          done(controllerError(new Error(
-            `서비스 시작 전환이 완료되지 않았습니다: ${classified.state}`,
-          )));
-          return;
-        }
-        this.callService('start', [this.serviceName(name)], (startError, result) => {
-          const failure = startError || installFailure(result);
-          if (failure) done(failure);
-          else if (result && startComplete(result)) {
-            done(null, { name, status: 'RUNNING' });
-          } else {
-            this.verifyRunning(name, done);
+    this.callback(callback, () => {
+      this.validateName(name);
+      this.withMutation(name, callback, (handle, done, holdInterfaces) => {
+        const current = this.readValidated(name);
+        try { holdInterfaces(current.config); }
+        catch (interfaceConflict) { done(interfaceConflict); return; }
+        this.inspect(name, (_unused, before) => {
+          if (before.statusError) { done(before.statusError); return; }
+          if (['RUNNING', 'STARTING', 'STOPPING'].includes(before.controllerState)) {
+            done(error('JOB_RUNNING', '실행 중이거나 전환 중인 Job은 시작할 수 없습니다.', {
+              name, controllerState: before.controllerState,
+            }));
+            return;
           }
+          const startInstalled = (installedState) => this.validateDatabase(current.config, (databaseError) => {
+            if (databaseError) { done(databaseError); return; }
+            try { handle.assertOwned(); } catch (ownershipError) { done(ownershipError); return; }
+            this.callController('start', [this.serviceName(name)], (startError) => {
+              if (startError) {
+                done(controllerFailure(
+                  'CONTROLLER_UNAVAILABLE', 'Job service를 시작하지 못했습니다.',
+                  name, installedState.controllerState, startError.message,
+                ));
+                return;
+              }
+              this.inspect(name, (_inspectError, after) => {
+                if (after.statusError) done(after.statusError);
+                else if (!['RUNNING', 'STARTING'].includes(after.controllerState)) done(controllerFailure(
+                  'CONTROLLER_OPERATION_FAILED', '시작 요청 뒤 service가 시작 상태가 아닙니다.',
+                  name, after.controllerState, after.controllerDetail,
+                ));
+                else done(null, this.view(name, current.config, after));
+              });
+            });
+          });
+          if (before.controllerState !== 'NOT_INSTALLED') { startInstalled(before); return; }
+          const descriptor = {
+            name: this.serviceName(name),
+            enable: false,
+            working_dir: this.cgiRoot,
+            executable: this.collectorPath,
+            args: [`${name}.json`],
+          };
+          try { handle.assertOwned(); } catch (ownershipError) { done(ownershipError); return; }
+          this.callController('install', [descriptor], (installError) => {
+            if (installError) {
+              done(controllerFailure(
+                'CONTROLLER_UNAVAILABLE', 'Job service를 자동 설치하지 못했습니다.',
+                name, 'NOT_INSTALLED', installError.message,
+              ));
+              return;
+            }
+            this.inspect(name, (_inspectError, installedState) => {
+              if (installedState.statusError) { done(installedState.statusError); return; }
+              if (installedState.controllerState !== 'STOPPED') {
+                done(controllerFailure(
+                  'CONTROLLER_OPERATION_FAILED', '자동 설치한 service가 STOPPED 상태가 아닙니다.',
+                  name, installedState.controllerState, installedState.controllerDetail,
+                ));
+                return;
+              }
+              startInstalled(installedState);
+            });
+          });
         });
       });
     });
-  }
-
-  installConfigured(callback) {
-    let names;
-    try {
-      names = this.configNames();
-    } catch (error) {
-      callback(error, []);
-      return;
-    }
-    let index = 0;
-    const next = (error) => {
-      if (error || index >= names.length) {
-        callback(error || null, names);
-        return;
-      }
-      const name = names[index];
-      index += 1;
-      this.ensureRunning(name, next);
-    };
-    next(null);
   }
 
   stop(name, callback) {
-    let value;
-    try {
-      value = this.validateName(name);
-    } catch (error) {
-      callback(error);
-      return;
-    }
-    this.stopUnlocked(value, callback);
-  }
-
-  stopUnlocked(name, callback) {
-    try {
-      this.requireConfigFile(name);
-    } catch (error) {
-      callback(error);
-      return;
-    }
-    this.ensureStopped(name, callback);
-  }
-
-  ensureStopped(name, callback) {
-    this.withCallback(callback, (done) => {
-      const serviceName = this.serviceName(name);
-      this.status(name, (statusError, info) => {
-        if (statusError && isNotInstalled(statusError)) {
-          done(null, { name, status: 'STOPPED' });
-          return;
-        }
-        if (statusError) {
-          done(statusError);
-          return;
-        }
-        if (stopped(info)) {
-          done(null, { name, status: 'STOPPED' });
-          return;
-        }
-        this.callService('stop', [serviceName], (stopError, result) => {
-          if (stopError && isNotInstalled(stopError)) {
-            done(null, { name, status: 'STOPPED' });
+    this.callback(callback, () => {
+      this.validateName(name);
+      this.withMutation(name, callback, (handle, done) => {
+        const current = this.readValidated(name);
+        this.inspect(name, (_unused, before) => {
+          if (before.statusError) { done(before.statusError); return; }
+          if (before.controllerState === 'NOT_INSTALLED') {
+            done(error('SERVICE_NOT_INSTALLED', 'Job service가 설치되어 있지 않습니다.', { name }));
             return;
           }
-          if (stopError) {
-            done(stopError);
+          if (['STARTING', 'STOPPING'].includes(before.controllerState)) {
+            done(error('JOB_RUNNING', '전환 중인 Job은 새 lifecycle 요청을 받을 수 없습니다.', {
+              name, controllerState: before.controllerState,
+            }));
             return;
           }
-          const failure = installFailure(result);
-          if (failure) {
-            done(failure);
+          if (before.controllerState !== 'RUNNING') {
+            done(error('SERVICE_NOT_RUNNING', '실행 중인 Job service만 멈출 수 있습니다.', {
+              name, controllerState: before.controllerState,
+            }));
             return;
           }
-          this.verifyStopped(name, done);
+          try { handle.assertOwned(); } catch (ownershipError) { done(ownershipError); return; }
+          this.callController('stop', [this.serviceName(name)], (stopError) => {
+            if (stopError) {
+              done(controllerFailure(
+                'CONTROLLER_UNAVAILABLE', 'Job service를 멈추지 못했습니다.',
+                name, before.controllerState, stopError.message,
+              ));
+              return;
+            }
+            this.inspect(name, (_inspectError, after) => {
+              if (after.statusError) done(after.statusError);
+              else if (!['STOPPING', 'STOPPED'].includes(after.controllerState)) done(controllerFailure(
+                'CONTROLLER_OPERATION_FAILED', '중지 요청 뒤 service가 중지 상태가 아닙니다.',
+                name, after.controllerState, after.controllerDetail,
+              ));
+              else done(null, this.view(name, current.config, after));
+            });
+          });
         });
       });
     });
   }
 
-  verifyStopped(name, callback) {
-    this.status(name, (error, info) => {
-      if (error && isNotInstalled(error)) {
-        callback(null, { name, status: 'STOPPED' });
-        return;
-      }
-      if (error) {
-        callback(error);
-        return;
-      }
-      if (stopped(info)) {
-        callback(null, { name, status: 'STOPPED' });
-        return;
-      }
-      const classified = classifyControllerState(info);
-      callback(controllerError(new Error(
-        classified.detail || `서비스가 멈추지 않았습니다: ${classified.state}`,
-      )));
+  stopForPackage(name, callback) {
+    this.callback(callback, () => {
+      this.validateName(name);
+      this.withMutation(name, callback, (handle, done) => {
+        this.stopForPackageWithHandle(name, handle, done);
+      });
     });
   }
 
-  verifyUninstalled(name, callback) {
-    this.status(name, (error) => {
-      if (error && isNotInstalled(error)) {
-        callback(null);
+  stopForPackageWithHandle(name, handle, done) {
+    const current = this.readValidated(name);
+    this.inspect(name, (_unused, before) => {
+      if (before.statusError) { done(before.statusError); return; }
+      if (['NOT_INSTALLED', 'STOPPED', 'FAILED'].includes(before.controllerState)) {
+        done(null, this.view(name, current.config, before));
         return;
       }
-      if (error) {
-        callback(error);
+      if (!['RUNNING', 'STARTING', 'STOPPING'].includes(before.controllerState)) {
+        done(controllerFailure(
+          'CONTROLLER_UNKNOWN', 'Controller 상태를 알 수 없어 package stop을 진행할 수 없습니다.',
+          name, before.controllerState, before.controllerDetail,
+        ));
         return;
       }
-      callback(controllerError(new Error(`서비스가 제거되지 않았습니다: ${name}`)));
+      try { handle.assertOwned(); } catch (ownershipError) { done(ownershipError); return; }
+      this.callController('stop', [this.serviceName(name)], (stopError) => {
+        if (stopError) {
+          done(controllerFailure(
+            'CONTROLLER_UNAVAILABLE', 'package stop 중 Job service를 멈추지 못했습니다.',
+            name, before.controllerState, stopError.message,
+          ));
+          return;
+        }
+        this.inspect(name, (_inspectError, after) => {
+          if (after.statusError) { done(after.statusError); return; }
+          if (!['NOT_INSTALLED', 'STOPPED', 'FAILED'].includes(after.controllerState)) {
+            done(controllerFailure(
+              'CONTROLLER_OPERATION_FAILED', 'package stop 뒤 service가 안전한 정지 상태가 아닙니다.',
+              name, after.controllerState, after.controllerDetail,
+            ));
+            return;
+          }
+          done(null, this.view(name, current.config, after));
+        });
+      });
     });
   }
 
   delete(name, callback) {
-    let value;
-    try {
-      value = this.validateName(name);
-    } catch (error) {
-      callback(error);
-      return;
-    }
-    this.deleteUnlocked(value, callback);
-  }
-
-  deleteUnlocked(name, callback) {
-    this.withCallback(callback, (done) => {
-      const serviceName = this.serviceName(name);
-      const configPath = this.configPath(name);
-      try {
-        if (!fs.lstatSync(configPath).isFile()) {
-          throw new Error(`작업 설정 경로는 일반 파일이어야 합니다: ${name}`);
-        }
-      } catch (error) {
-        if (error && error.code === 'ENOENT') throw jobNotFound(name, error);
-        throw error;
-      }
-      const removeFiles = () => {
-        try { fs.unlinkSync(configPath); } catch (unlinkError) {
-          if (!unlinkError || unlinkError.code !== 'ENOENT') {
-            done(unlinkError);
-            return;
-          }
-        }
-        try { this.counter.remove(name); } catch (resultError) {
-          done(null, { name, cleanupError: messageOf(resultError) });
-          return;
-        }
-        done(null, { name });
-      };
-      const uninstall = () => {
-        this.callService('uninstall', [serviceName], (error) => {
-          if (error && !isNotInstalled(error)) {
-            done(error);
-            return;
-          }
-          if (error && isNotInstalled(error)) {
-            removeFiles();
-            return;
-          }
-          this.verifyUninstalled(name, (verifyError) => {
-            if (verifyError) done(verifyError);
-            else removeFiles();
-          });
-        });
-      };
-      this.status(name, (statusError, info) => {
-        if (statusError && isNotInstalled(statusError)) {
-          uninstall();
-          return;
-        }
-        if (statusError) {
-          done(statusError);
-          return;
-        }
-        const status = statusOf(info);
-        if (status === 'STOPPED' || status === 'FAILED') {
-          uninstall();
-          return;
-        }
-        if (status === 'RUNNING' || status === 'STARTING' || status === 'STOPPING') {
-          this.ensureStopped(name, (stopError) => {
-            if (stopError) done(stopError);
-            else uninstall();
-          });
-          return;
-        }
-        done(controllerError(new Error(
-          `알 수 없는 Controller 상태에서는 삭제할 수 없습니다: ${name} (현재 상태: ${status || 'UNKNOWN'})`,
-        )));
+    this.callback(callback, () => {
+      this.validateName(name);
+      this.withMutation(name, callback, (handle, done) => {
+        this.deleteWithHandle(name, handle, done);
       });
     });
   }
 
-  summary(callback) {
-    this.list((error, jobs) => {
-      if (error) {
-        callback(null, {
-          scope: PACKAGE_NAME,
-          total: 0,
-          running: 0,
-          errors: [messageOf(error)],
-          error_details: [{ name: '', kind: error.kind || 'config', message: messageOf(error) }],
-        });
-        return;
-      }
-      const details = [];
-      jobs.forEach((job) => {
-        if (job.configError) {
-          details.push({ name: job.name, kind: 'config', message: job.configError });
+  deleteWithHandle(name, handle, done) {
+    this.guardMutable(name, (guardError, _current, state) => {
+      if (guardError) { done(guardError); return; }
+      const removeConfig = () => {
+        try {
+          handle.assertOwned();
+          done(null, this.repository.remove(name));
+        } catch (removeError) {
+          done(removeError);
         }
-        if (job.controllerError) {
-          details.push({ name: job.name, kind: 'controller', message: job.controllerError });
+      };
+      if (state.controllerState === 'NOT_INSTALLED') { removeConfig(); return; }
+      try { handle.assertOwned(); } catch (ownershipError) { done(ownershipError); return; }
+      this.callController('uninstall', [this.serviceName(name)], (uninstallError) => {
+        if (uninstallError && !isNotInstalled(uninstallError)) {
+          done(controllerFailure(
+            'CONTROLLER_UNAVAILABLE', 'Job service를 정리하지 못했습니다.',
+            name, state.controllerState, uninstallError.message,
+          ));
+          return;
         }
-        if (job.resultError) {
-          details.push({ name: job.name, kind: 'result', message: job.resultError });
-        }
+        removeConfig();
       });
-      callback(null, {
-        scope: PACKAGE_NAME,
-        total: jobs.length,
-        running: jobs.filter((job) => job.running).length,
-        errors: details.map((detail) => `${detail.name}: ${detail.kind === 'result' ? '결과 오류: ' : ''}${detail.message}`),
-        error_details: details,
+    });
+  }
+
+  lastRun(name, callback) {
+    let current;
+    try { current = this.readValidated(name); } catch (readError) { callback(readError); return; }
+    this.inspect(name, (_unused, state) => {
+      if (state.statusError) { callback(state.statusError); return; }
+      if (state.controllerState === 'NOT_INSTALLED') { callback(null, { lastRun: null }); return; }
+      this.readLastRun(name, this.view(name, current.config, state), (detailsError, lastRun) => {
+        if (detailsError) {
+          callback(controllerFailure('CONTROLLER_UNAVAILABLE', 'service details를 읽지 못했습니다.', name, state.controllerState, detailsError.message));
+          return;
+        }
+        callback(null, { lastRun: projectLastRun(lastRun) });
       });
     });
   }
 }
 
-module.exports = {
-  JobManager,
-  PACKAGE_NAME,
-  SERVICE_MODE,
-  SERVICE_PREFIX,
-  JOB_NAME_PATTERN,
-  DEFAULT_INTERVAL_MS,
-  MIN_INTERVAL_MS,
-  MAX_INTERVAL_MS,
-  isNotInstalled,
-  isAlreadyInstalled,
-  normalizeConfig,
-};
+module.exports = { JobManager, SERVICE_PREFIX, serviceName };

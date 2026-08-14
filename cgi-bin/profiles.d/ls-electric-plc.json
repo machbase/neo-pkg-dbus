@@ -1,0 +1,59 @@
+{
+  "schemaVersion": 1,
+  "id": "ls-electric-plc",
+  "profileVersion": 1,
+  "displayName": "LS Electric PLC",
+  "vendor": "LS Electric",
+  "builtIn": true,
+  "compatibility": {
+    "minNeoVersion": "8.5.6"
+  },
+  "defaults": {
+    "busType": "system",
+    "destination": "ls.plc"
+  },
+  "methods": [
+    {
+      "id": "get-device-data",
+      "displayName": "Get Device Data",
+      "objectPath": "/ls/plc/device",
+      "interface": "ls.plc.device",
+      "methodName": "GetDeviceData",
+      "inputs": [
+        {
+          "id": "dataCount",
+          "type": "uint16",
+          "required": true,
+          "validation": {
+            "minimum": 1
+          }
+        },
+        {
+          "id": "memoryAddress",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "output": {
+        "decoder": "json",
+        "shape": "array",
+        "path": "data",
+        "success": {
+          "path": "rtn",
+          "operator": "equals",
+          "value": 1
+        },
+        "returnedCountPath": "data-count",
+        "expectedCount": {
+          "source": "input",
+          "inputId": "dataCount"
+        }
+      },
+      "tagGeneration": {
+        "capability": "ls-get-device-data",
+        "countInputId": "dataCount",
+        "addressInputId": "memoryAddress"
+      }
+    }
+  ]
+}

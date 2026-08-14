@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "id": "ls",
+  "jobMode": "fixed",
+  "interfaceId": "ls-plc-device",
+  "methodId": "get-device-data",
+  "outputSelections": [
+    {
+      "id": "return-data",
+      "sourceIndex": 0,
+      "interpretation": "json",
+      "selector": "/data",
+      "valueType": "array",
+      "elementType": "numeric",
+      "tags": []
+    }
+  ],
+  "tagGenerator": {
+    "kind": "ls-memory-address-v1"
+  }
+}
