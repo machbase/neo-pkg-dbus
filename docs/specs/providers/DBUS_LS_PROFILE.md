@@ -23,7 +23,7 @@ build는 이 문서를 읽거나 적용하지 않으며 LS Profile과 LS Interfa
 LS target도 제품 이름은 `neo-pkg-dbus`다. generic과 다른 package를 동시에 설치하는
 것이 아니라 같은 package를 LS 정책으로 선택 빌드한다. build 결과의 루트와
 `cgi-bin/package.json`의 `name`, `version`, `minServerVersion`은 서로 같아야 한다.
-LS와 generic은 저장소 루트의 SemVer 하나를 공유하며, 최소 Neo 버전은 `8.5.6`이다.
+LS와 generic은 저장소 루트의 SemVer 하나를 공유하며, 최소 Neo 버전은 `8.5.8`이다.
 Git에 LS 완성 산출물을 커밋하지 않고 배포할 때만 LS target을 빌드한다.
 
 LS Profile은 다음 고정값을 가진다.

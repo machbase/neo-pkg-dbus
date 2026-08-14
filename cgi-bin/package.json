@@ -2,5 +2,5 @@
   "name": "neo-pkg-dbus",
   "version": "1.0.0",
   "description": "CGI and jobs service for neo-pkg-dbus",
-  "minServerVersion": "8.5.6"
+  "minServerVersion": "8.5.8"
 }

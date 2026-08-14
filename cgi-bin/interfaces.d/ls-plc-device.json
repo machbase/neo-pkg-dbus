@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "id": "ls-plc-device",
+  "name": "LS PLC Device",
+  "origin": "discovered",
+  "builtIn": true,
+  "busType": "system",
+  "destination": "ls.plc",
+  "objectPath": "/ls/plc/device",
+  "interface": "ls.plc.device",
+  "methods": [
+    {
+      "id": "get-device-data",
+      "source": "discovered",
+      "member": "GetDeviceData",
+      "inputs": [
+        { "name": "DataCount", "type": "uint16", "validation": { "minimum": 1 } },
+        { "name": "DeviceString", "type": "string", "validation": { "pattern": "^%[^%]+[0-9]+$" } }
+      ],
+      "outputs": [
+        { "name": "Return", "type": "string" }
+      ]
+    }
+  ]
+}

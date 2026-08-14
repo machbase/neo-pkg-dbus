@@ -46,7 +46,7 @@ test('루트와 CGI manifest는 하나의 package identity를 공유한다', () 
   const identity = assertManifestIdentity(packageRoot);
   const rootManifest = JSON.parse(fs.readFileSync(path.join(packageRoot, 'package.json'), 'utf8'));
   const cgiManifest = JSON.parse(fs.readFileSync(path.join(packageRoot, 'cgi-bin', 'package.json'), 'utf8'));
-  assert.deepEqual(identity, { name: 'neo-pkg-dbus', version: '1.0.0', minServerVersion: '8.5.6' });
+  assert.deepEqual(identity, { name: 'neo-pkg-dbus', version: '1.0.0', minServerVersion: '8.5.8' });
   for (const field of ['name', 'version', 'minServerVersion']) {
     assert.equal(rootManifest[field], cgiManifest[field]);
   }

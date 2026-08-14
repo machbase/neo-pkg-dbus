@@ -7,7 +7,7 @@
 Database default track (approved 2026-08-11): `settings.json` stores one default Database Server. Each server can store a default Table, Value Column, and optional String Value Column. A new Job copies only those Database values; it does not receive a default DBus Interface, Method, output parser, or tag rule.
 
 1. Side/Main jobs 패키지만 구현한다.
-2. 최소 Neo는 `8.5.6`, 모든 새 JSON schemaVersion은 `1`이다. 단일 개발 브랜치에서 `generic` 또는 `ls` target을 선택해 같은 이름의 `neo-pkg-dbus` 완성 package를 루트에 만든다. 두 target은 하나의 version과 설치 위치를 공유하며 동시에 설치하지 않는다. 인자 없는 `npm run build`는 항상 generic이다. generic build는 `provider:null`이고 기존 DBus Interface/Method/Job 관리 기능을 모두 제공한다. Provider build는 검증된 읽기 전용 Provider Profile이 명시한 화면 표시와 새 Job 초기값만 바꾼다.
+2. 최소 Neo는 `8.5.8`, 모든 새 JSON schemaVersion은 `1`이다. 단일 개발 브랜치에서 `generic` 또는 `ls` target을 선택해 같은 이름의 `neo-pkg-dbus` 완성 package를 루트에 만든다. 두 target은 하나의 version과 설치 위치를 공유하며 동시에 설치하지 않는다. 인자 없는 `npm run build`는 항상 generic이다. generic build는 `provider:null`이고 기존 DBus Interface/Method/Job 관리 기능을 모두 제공한다. Provider build는 검증된 읽기 전용 Provider Profile이 명시한 화면 표시와 새 Job 초기값만 바꾼다.
 3. Job service 이름은 `_dbu_<jobName>`이다.
 4. 실행 중 Job은 Edit, Delete, Backend update를 할 수 없다. stop-save-start 갱신은 금지다.
 5. DBus와 브라우저 API 요청에 요청 timeout을 만들지 않는다.
@@ -92,6 +92,7 @@ Database default track (approved 2026-08-11): `settings.json` stores one default
 | CCR-068 | LS Method Call의 Tag 이름과 Transform은 화면에서 한 행씩만 수정할 수 있었다. | 선택된 LS Method Call의 Tags 헤더에 `Import CSV`를 제공한다. CSV 헤더는 정확히 `name,bias,multiplier,order`이며 `name`은 필수다. 빈 `bias`, `multiplier`, `order`는 각각 `0`, `1`, `0`으로 해석한다. `order=0`은 `(value + bias) * multiplier`, `order=1`은 `(value * multiplier) + bias`다. 파일 선택 즉시 첫 데이터 행부터 현재 Tag 첫 행에 치환하며 미리보기는 없다. CSV 행이 Tag/DataCount보다 적으면 뒤 Tag는 유지하고, 많으면 DataCount까지만 적용하고 초과 행은 검증하지 않고 무시한다. 적용 대상의 빈 이름, 유한하지 않은 숫자, `0|1`이 아닌 order 또는 CSV 구조 오류가 하나라도 있으면 전체 import를 취소하고 오류를 표시한다. 적용된 이름은 수동 이름으로 표시해 이후 DeviceString/DataCount 변경 때 같은 위치에서 보존한다. Import는 Tag 수와 DataCount를 바꾸지 않는다. Generic 제품, Backend API와 Job 저장 형식은 바꾸지 않는다. | DataCount로 이미 정해진 Tag 배열을 외부 설정표에서 빠르게 덮어쓰되, 부분 실패로 어느 행까지 바뀌었는지 불분명해지거나 CSV가 Tag 수를 몰래 늘리는 일을 막기 위함이다. | 승인됨 — 2026-08-14 사용자가 CSV 열·기본값·order 의미, 초과 행 무시, 부족 행 유지, 미리보기 없는 즉시 반영과 오류 시 전체 취소를 순서대로 확정한 뒤 “승인” |
 | CCR-069 | Job 상세는 Config·Execution·Controller·Interval·Method Calls·Database를 같은 크기의 6개 지표로 따로 표시했고, 마지막 cycle의 시작·종료 시각만 보여 주었다. 실행 중에도 상세를 다시 읽지 않아 화면의 마지막 결과가 오래된 값으로 남았으며 `Stored`가 누적인지 이번 실행의 행 수인지 불분명했다. | 상단은 `JOB`, `METHOD CALLS`, `DATABASE` 세 의미 카드로 합친다. `CONFIG` 표시는 제거하고 Job 카드에는 실행/Controller 상태, Interval, Save Policy를 표시한다. Method Calls 카드는 Call 수를 강조하고 Database 카드는 Server·Table·Value Column·String Column을 표시한다. 실행 결과는 `LATEST RUN`으로 표시하며 `Latest Status`, `Last Successful`, `Last Stored`와 Method별 `Rows saved`, 오류를 보여 준다. `Rows saved`는 마지막 cycle의 해당 Method가 실제 append한 행 수다. 실행 중 Job 상세는 5초마다 다시 읽고 화면을 벗어나거나 정지하면 polling을 끝낸다. Backend lastRun 저장·API 구조는 바꾸지 않는다. | 설정 설치 여부보다 운영자가 필요한 현재 실행 상태·수집 규모·저장 위치·마지막 성공/저장 시각을 한눈에 확인하고, 오래된 실행 결과를 최신 정보로 오해하지 않게 하기 위함이다. | 승인됨 — 2026-08-14 사용자 “config도 제외”, “합칠 수 있는 정보들은 합쳐서 하나의 카드”, 제공한 3카드 참고 이미지 |
 | CCR-070 | Job 상세 상단에는 저장 로그를 여는 `Logs` 버튼만 있었고, 현재 log level·file limit을 확인하거나 상세 화면 안에서 최근 로그를 멈춰 읽을 수 없었다. `/log/tail`의 응답도 `{name,file,content}`로 문서화되어 저장 로그 본문과 혼동될 수 있었다. | 상단 `Logs`는 `Live Logs`로 대체하고 저장 로그는 `LATEST RUN` 아래 `Logging Controls`의 `View Logs`에서 연다. 버튼 순서는 `Live Logs`, `Data Viewer`, `Edit`, `Delete`다. Logging Controls는 현재 level, 실제 기록 level, `config.log.maxFiles`를 표시한다. Live Logs는 active 파일을 `GET /log/list`로 찾고, 기존 JSON `GET /log/tail`을 1초 polling하여 최대 100줄만 보여 준다. `Pause/Resume`, `Clear`, `Close`, drag, resize, viewport clamp와 오류 뒤 자동 복구를 제공하며 SSE를 추가하지 않는다. `/log/tail` 공개 응답은 `{name,file,lines,totalLines}`이다. 페이지형 `/log/content`는 `{name,file,page,linesPerPage,totalLines,lines,nextPage,previousPage}`이고, 전체 본문 `/log/content/all`만 `{name,file,size,content}`를 사용한다. | 새 장기 연결 API 없이 Neo CGI에서 검증된 list/tail 요청·응답을 재사용하면서, 운영자가 상세 화면을 떠나지 않고 로그 설정과 최근 로그를 확인하게 하기 위함이다. 승인 설계 `docs/superpowers/specs/2026-08-14-job-logging-controls-live-logs-design.md`와 현재 `cgi-bin/api/log/tail.js` 및 `cgi-bin/src/log/reader.js`의 `lines`, `totalLines` 응답을 확인했다. | 승인됨 — 2026-08-14 사용자가 권장안인 기존 JSON tail polling 방식으로 진행 승인 |
+| CCR-071 | 패키지 매니페스트와 계약 문서는 최소 Neo 버전을 `8.5.6`으로 안내했다. | generic과 LS가 공유하는 최소 Neo 지원 버전을 `8.5.8`로 올린다. 루트·CGI 매니페스트, 새 Profile 기본값과 built-in LS Profile, README, 사용자 매뉴얼, FE·BE·LS 설계 및 출시 검증 기준을 모두 같은 값으로 유지한다. `8.5.8` 미만은 지원 범위 밖이다. | 실제 납품 기준의 최소 지원 버전이 `8.5.8`임을 바로잡고, 매니페스트·화면 기본값·문서가 서로 다른 버전을 안내하지 않게 하기 위함이다. 과거 `8.5.6` JSH 조사 기록은 당시 확인 사실이므로 보존하되 현재 출시 gate로 사용하지 않는다. | 승인됨 — 2026-08-14 사용자 “최소버전 8.5.8 이였어”, 이어 “변경” |
 
 CCR-060의 초기값 계약에 따라 새 LS Call을 만들 때는 `%MB0`과 DataCount `1`만
 저장하지 않고, 같은 자동 생성 규칙으로 Tag `MB0` 한 개도 즉시 만든다.
@@ -103,7 +104,7 @@ CCR-060의 초기값 계약에 따라 새 LS Call을 만들 때는 `%MB0`과 Dat
 - Neo `8.5.6`부터 확인한 `8.5.9`까지의 JSH에서 전역 `process`와 `Intl`, `fs.utimesSync`, `stat.mtimeMs`가 없었다. `require('process')`, `stat.mtime.unixMilli()`는 사용할 수 있었다.
 - `6e8ec9d`의 Job operation lock은 전역 `process`, `fs.utimesSync`, `stat.mtimeMs`를 사용해 최소 JSH에서 실행 오류가 날 수 있다. 이것은 계약 변경이 아니라 수정해야 할 호환성 버그다.
 - 수정 설계: 모든 process 접근은 `require('process')`로 통일한다. PID 확인 함수가 `false`를 반환하거나 반환·예외의 `code`가 `ESRCH`일 때만 종료로 보고 stale lock을 회수한다. `EPERM`과 알 수 없는 오류는 생존 여부를 확정할 수 없으므로 `JOB_CONFLICT`로 보호한다. 정상 Job lock은 owner JSON과 owner token별 heartbeat 파일로 만료를 판단해, 이전 owner가 새 owner의 lease를 갱신하지 못하게 한다. crash로 owner 문서가 완성되지 않은 경우에만 JSH의 `stat.mtime.unixMilli()`를 fallback으로 쓴다. 따라서 `utimesSync`와 `mtimeMs` 의존성을 제거한다.
-- 검증: Node 단위 테스트와 최소 Neo 8.5.6 JSH smoke test에서 전역 `process`, `Intl`, `fs.utimesSync`, `mtimeMs` 없이 lock 획득·heartbeat·stale reclaim을 확인한다.
+- 검증: Node 단위 테스트와 최소 Neo 8.5.8 JSH smoke test에서 전역 `process`, `Intl`, `fs.utimesSync`, `mtimeMs` 없이 lock 획득·heartbeat·stale reclaim을 확인한다.
 - JSH 통합 검증 전 상태는 계속 “실제 Neo/설비 통합 미검증”으로 표시한다.
 
 ## 2. 공통 모델
@@ -479,7 +480,7 @@ DB Server 관리 화면은 등록 목록을 읽고, Create/Edit/Delete와 Test C
 ### 단계 5: 통합 검증과 문서
 
 1. Node 단위 테스트와 JSH 통합 테스트를 실행한다.
-2. Neo 8.5.6 환경에서 System Bus, generic CRUD, service lifecycle, TAG append, DataViewer를 점검하고 Provider 설비 검증은 해당 배포판 gate에서 따로 수행한다.
+2. Neo 8.5.8 환경에서 System Bus, generic CRUD, service lifecycle, TAG append, DataViewer를 점검하고 Provider 설비 검증은 해당 배포판 gate에서 따로 수행한다.
 3. README와 API 예시를 새 DBus 모델로 교체한다.
 
 완료 기준: 아래 완료 게이트가 모두 충족된다.
@@ -501,7 +502,7 @@ Node 단위 테스트는 Settings/Provider schema validation, path decoder, type
 
 완료 게이트:
 
-1. 최소 Neo `8.5.6`에서 Side/Main 기능이 동작한다.
+1. 최소 Neo `8.5.8`에서 Side/Main 기능이 동작한다.
 2. 새 Settings·Provider Profile·DBus Interface·Job은 모두 schemaVersion `1`이고, build Profile과 Provider가 공급한 Built-in Interface/Method는 읽기 전용이다.
 3. service는 `_dbu_<jobName>`만 사용한다.
 4. running Job은 변경·삭제되지 않고, 참조 중인 사용자 DBus Interface/Method는 변경·삭제되지 않는다.

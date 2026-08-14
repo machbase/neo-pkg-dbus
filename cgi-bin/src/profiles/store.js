@@ -19,7 +19,7 @@ function resolveRuntimeNeoVersion(cgiRoot, explicit) {
     try {
       value = JSON.parse(fs.readFileSync(path.join(cgiRoot, 'package.json'), 'utf8')).minServerVersion;
     } catch (_) {
-      value = '8.5.6';
+      value = '8.5.8';
     }
   }
   const normalized = String(value).replace(/^v(?=\d)/, '');

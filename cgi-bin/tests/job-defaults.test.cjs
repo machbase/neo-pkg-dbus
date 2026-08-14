@@ -37,7 +37,7 @@ test('모든 target은 공통 package identity와 server floor를 사용한다',
   for (const manifest of [rootManifest, cgiManifest]) {
     assert.equal(manifest.name, 'neo-pkg-dbus');
     assert.match(manifest.version, /^\d+\.\d+\.\d+$/);
-    assert.equal(manifest.minServerVersion, '8.5.6');
+    assert.equal(manifest.minServerVersion, '8.5.8');
   }
   assert.equal(rootManifest.version, cgiManifest.version);
 });

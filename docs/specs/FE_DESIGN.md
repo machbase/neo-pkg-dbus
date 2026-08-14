@@ -6,7 +6,7 @@
 
 Database Servers shows the selected default with a `Default` badge. The server form can load tables and columns with its unsaved connection values and save a default Database mapping. New Jobs copy that mapping only; their DBus Method UI stays unchanged.
 
-수집 대상은 Linux System Bus의 DBus Interface와 Method다. generic build는 `GET /settings`에서 `provider:null`을 받고 기존 Interface/Method/Job 관리 화면을 모두 제공한다. Provider build는 검증된 읽기 전용 Profile이 명시한 화면 표시와 새 Job 초기값만 바꾼다. 패키지 최소 Neo 버전은 `8.5.6`이다. DataViewer는 `DBUS_SDD.md` CCR-052의 승인에 따라 `neo-pkg-opcua-client`의 화면 구조와 상호작용을 공통으로 사용한다.
+수집 대상은 Linux System Bus의 DBus Interface와 Method다. generic build는 `GET /settings`에서 `provider:null`을 받고 기존 Interface/Method/Job 관리 화면을 모두 제공한다. Provider build는 검증된 읽기 전용 Profile이 명시한 화면 표시와 새 Job 초기값만 바꾼다. 패키지 최소 Neo 버전은 `8.5.8`이다. DataViewer는 `DBUS_SDD.md` CCR-052의 승인에 따라 `neo-pkg-opcua-client`의 화면 구조와 상호작용을 공통으로 사용한다.
 
 화면은 다음을 제공한다.
 

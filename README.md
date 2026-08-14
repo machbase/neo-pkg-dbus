@@ -2,7 +2,7 @@
 
 Machbase Neo에서 Linux DBus 값을 읽어 TAG table에 저장하는 Job 패키지입니다. Job마다 `_dbu_<jobName>` service 하나를 사용합니다. DBus Interface와 그 안의 Method를 Job의 각 호출에서 선택합니다.
 
-최소 Machbase Neo 버전은 `8.5.6`입니다. 설정 schema는 `schemaVersion: 1`입니다.
+최소 Machbase Neo 버전은 `8.5.8`입니다. 설정 schema는 `schemaVersion: 1`입니다.
 
 ## 주요 기능
 
@@ -70,7 +70,7 @@ Machbase Neo가 `http://localhost:5654`에서 실행 중이면 Vite proxy가 `/p
 node --test cgi-bin/tests/*.test.cjs
 ```
 
-Node 테스트는 JSH 모듈을 주입 가능한 대역으로 검사합니다. 실제 배포 전에는 Neo 8.5.6에서 System Bus, `ls.plc`, `machcli` TAG append, service details, shutdown 정리를 추가로 확인해야 합니다.
+Node 테스트는 JSH 모듈을 주입 가능한 대역으로 검사합니다. 실제 배포 전에는 Neo 8.5.8에서 System Bus, `ls.plc`, `machcli` TAG append, service details, shutdown 정리를 추가로 확인해야 합니다.
 
 ## API 규칙
 

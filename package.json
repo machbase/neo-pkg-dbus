@@ -2,7 +2,7 @@
   "name": "neo-pkg-dbus",
   "version": "1.0.0",
   "description": "Machbase Neo jobs service package",
-  "minServerVersion": "8.5.6",
+  "minServerVersion": "8.5.8",
   "scripts": {
     "build": "node scripts/product-build.js",
     "test:products": "node --test tests/product-build.test.cjs tests/product-modules.test.mjs frontend/tests/build-ls-interface.test.mjs",

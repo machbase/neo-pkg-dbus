@@ -196,7 +196,7 @@ export function createProfileDraft() {
     displayName: "",
     vendor: "",
     builtIn: false,
-    compatibility: { minNeoVersion: "8.5.6" },
+    compatibility: { minNeoVersion: "8.5.8" },
     defaults: { busType: "system", destination: "" },
     methods: [],
   };

@@ -6,7 +6,7 @@
   "vendor": "LS Electric",
   "builtIn": true,
   "compatibility": {
-    "minNeoVersion": "8.5.6"
+    "minNeoVersion": "8.5.8"
   },
   "defaults": {
     "busType": "system",
