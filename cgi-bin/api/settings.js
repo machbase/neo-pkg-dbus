@@ -4,8 +4,7 @@ const path = require('path');
 const process = require('process');
 const marker = `${path.sep}cgi-bin${path.sep}`;
 const root = process.argv[1].slice(0, process.argv[1].indexOf(marker) + marker.length - 1);
-const http = require(path.join(root, 'src', 'cgi', 'http.js'));
-const { SettingsManager } = require(path.join(root, 'src', 'config', 'settings-manager.js'));
+const { http, SettingsManager } = require(path.join(root, 'runtime.js'));
 
 function method() {
   return String((process.env.get && process.env.get('REQUEST_METHOD')) || process.env.REQUEST_METHOD || '');

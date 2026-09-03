@@ -36,8 +36,8 @@ function requiredName() {
   }
 }
 
-function requiredBody(label) {
-  const body = http.readBody();
+function requiredBody(label, maxBytes) {
+  const body = http.readBody(undefined, maxBytes ? { maxBytes } : undefined);
   if (!body.ok) { http.fail(body.error, 400); return null; }
   try { return http.requireObject(body.value, label); } catch (bodyError) {
     http.fail(bodyError, 400);

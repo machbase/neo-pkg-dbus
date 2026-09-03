@@ -125,7 +125,7 @@ export function jobNeedsStringValueColumn(methodCalls, interfaceDetails) {
   });
 }
 
-export function createDefaultJobConfig(provider, server = "local-db", initialMethodCalls = null) {
+export function createDefaultJobConfig(provider, server = "local-db", initialMethodCalls = null, intervalMs = 1000) {
   const fixedCall = Array.isArray(initialMethodCalls) ? cloned(initialMethodCalls) : provider?.jobMode === "fixed" ? [{
     id: `${provider.methodId}-1`,
     name: provider.methodId,
@@ -136,16 +136,16 @@ export function createDefaultJobConfig(provider, server = "local-db", initialMet
   }] : [];
   return {
     schemaVersion: 1,
-    schedule: { intervalMs: 1000 },
+    schedule: { intervalMs },
     retry: { initialDelayMs: 5000, maximumDelayMs: 30000, multiplier: 2 },
     execution: { savePolicy: "perMethod", onMethodError: "stop" },
     methodCalls: fixedCall,
     database: databaseDefaults(server),
-    log: { level: "info", maxFiles: 10 },
+    log: { level: "info", maxFiles: 3 },
   };
 }
 
-const TAG_FIELDS = ["name", "bias", "multiplier", "transformOrder"];
+const TAG_FIELDS = ["name", "bias", "multiplier", "transformOrder", "signed"];
 
 export function serializeJobConfig(config) {
   const cloned = typeof structuredClone === "function" ? structuredClone(config) : JSON.parse(JSON.stringify(config));
@@ -157,8 +157,8 @@ export function serializeJobConfig(config) {
     methodId: call.methodId,
     inputs: { ...(call.inputs || {}) },
     ...(Array.isArray(call.outputSelections)
-      ? { outputSelections: call.outputSelections.map((selection) => ({ id: selection.id, sourceIndex: selection.sourceIndex, interpretation: selection.interpretation || "native", ...(selection.selector !== undefined ? { selector: selection.selector } : {}), ...(selection.valueType !== undefined ? { valueType: selection.valueType } : {}), ...(selection.elementType ? { elementType: selection.elementType } : {}), tags: (selection.tags || []).map((tag) => Object.fromEntries(TAG_FIELDS.map((field) => [field, tag[field]]))) })) }
-      : { tags: (call.tags || []).map((tag) => Object.fromEntries(TAG_FIELDS.map((field) => [field, tag[field]]))) }),
+      ? { outputSelections: call.outputSelections.map((selection) => ({ id: selection.id, sourceIndex: selection.sourceIndex, interpretation: selection.interpretation || "native", ...(selection.selector !== undefined ? { selector: selection.selector } : {}), ...(selection.valueType !== undefined ? { valueType: selection.valueType } : {}), ...(selection.elementType ? { elementType: selection.elementType } : {}), tags: (selection.tags || []).map((tag) => ({ ...Object.fromEntries(TAG_FIELDS.filter((field) => field !== "signed").map((field) => [field, tag[field]])), signed: tag.signed === true })) })) }
+      : { tags: (call.tags || []).map((tag) => ({ ...Object.fromEntries(TAG_FIELDS.filter((field) => field !== "signed").map((field) => [field, tag[field]])), signed: tag.signed === true })) }),
   }));
   return cloned;
 }
@@ -176,11 +176,11 @@ export function hydrateJobConfig(config) {
           valueType: selection.valueType ?? (selection.mode === "each" ? "array" : "json"),
           ...(selection.elementType || selection.mode === "each" ? { elementType: selection.elementType || "json" } : {}),
         } : {}),
-        tags: (selection.tags || []).map((tag) => ({ ...tag, nameEdited: tag.name !== tag.sourceAddress, transformEdited: tag.bias !== 0 || tag.multiplier !== 1 || tag.calcOrder !== "bm" })),
+        tags: (selection.tags || []).map((tag) => ({ ...tag, signed: tag.signed === true, nameEdited: tag.name !== tag.sourceAddress, transformEdited: tag.bias !== 0 || tag.multiplier !== 1 || tag.calcOrder !== "bm" })),
       };
     }),
     tags: (call.tags || []).map((tag) => ({
-      ...tag,
+      ...tag, signed: tag.signed === true,
       nameEdited: tag.name !== tag.sourceAddress,
       transformEdited: tag.bias !== 0 || tag.multiplier !== 1 || tag.calcOrder !== "bm",
     })),

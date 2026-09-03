@@ -143,7 +143,7 @@ function validateInputValue(input, value) {
 
 function validateTag(tag, names) {
   assertObject(tag, 'Tag');
-  assertFields(tag, ['outputIndex', 'sourceAddress', 'name', 'bias', 'multiplier', 'calcOrder', 'transformOrder'], 'Tag');
+  assertFields(tag, ['outputIndex', 'sourceAddress', 'name', 'bias', 'multiplier', 'calcOrder', 'transformOrder', 'signed'], 'Tag');
   if (typeof tag.name !== 'string' || !tag.name.trim()) {
     invalid('Tag name이 필요합니다.');
   }
@@ -159,7 +159,8 @@ function validateTag(tag, names) {
     || !tag.transformOrder.includes('bias') || !tag.transformOrder.includes('multiplier'))) {
     invalid('Tag transformOrder는 bias와 multiplier를 각각 한 번씩 가져야 합니다.');
   }
-  return { name: tag.name, bias: tag.bias, multiplier: tag.multiplier, ...(tag.transformOrder ? { transformOrder: tag.transformOrder.slice() } : {}) };
+  if (tag.signed !== undefined && typeof tag.signed !== 'boolean') invalid('Tag signed는 boolean이어야 합니다.');
+  return { name: tag.name, bias: tag.bias, multiplier: tag.multiplier, signed: tag.signed === true, ...(tag.transformOrder ? { transformOrder: tag.transformOrder.slice() } : {}) };
 }
 
 function validateMethodCall(call, interfaceStore, options, callIds, callNames, tagNames) {
@@ -241,7 +242,10 @@ function validateJobConfig(value, options) {
   const settings = options || {};
   assertObject(value, 'Job config');
   if (Object.prototype.hasOwnProperty.call(value, 'name')) invalid('config에는 name을 넣을 수 없습니다.');
-  if (utf8Bytes(JSON.stringify(value)) > MAX_JOB_JSON_BYTES) invalid(`Job JSON은 ${MAX_JOB_JSON_BYTES} bytes 이하여야 합니다.`);
+  const maxJobJsonBytes = Number.isInteger(settings.maxJobJsonBytes) && settings.maxJobJsonBytes >= MAX_JOB_JSON_BYTES
+    ? settings.maxJobJsonBytes
+    : MAX_JOB_JSON_BYTES;
+  if (utf8Bytes(JSON.stringify(value)) > maxJobJsonBytes) invalid(`Job JSON은 ${maxJobJsonBytes} bytes 이하여야 합니다.`);
   assertFields(value, [
     'schemaVersion', 'schedule', 'retry', 'execution',
     'methodCalls', 'database', 'log',
@@ -258,7 +262,10 @@ function validateJobConfig(value, options) {
 
   assertObject(value.schedule, 'schedule');
   assertFields(value.schedule, ['intervalMs'], 'schedule');
-  if (!Number.isInteger(value.schedule.intervalMs) || value.schedule.intervalMs < 1000 || value.schedule.intervalMs > 86400000) invalid('schedule.intervalMs는 1000~86400000 정수여야 합니다.');
+  const minimumIntervalMs = Number.isInteger(settings.minimumIntervalMs) ? settings.minimumIntervalMs : 1000;
+  if (!Number.isInteger(value.schedule.intervalMs) || value.schedule.intervalMs < minimumIntervalMs || value.schedule.intervalMs > 86400000) invalid(`schedule.intervalMs는 ${minimumIntervalMs}~86400000 정수여야 합니다.`);
+  const intervalCycleMs = Number.isInteger(settings.intervalCycleMs) && settings.intervalCycleMs > 0 ? settings.intervalCycleMs : 1;
+  if (value.schedule.intervalMs < intervalCycleMs || value.schedule.intervalMs % intervalCycleMs !== 0) invalid(`schedule.intervalMs는 ${intervalCycleMs}ms의 배수여야 합니다.`);
   assertObject(value.retry, 'retry');
   assertFields(value.retry, ['initialDelayMs', 'maximumDelayMs', 'multiplier'], 'retry');
   if (!Number.isInteger(value.retry.initialDelayMs) || value.retry.initialDelayMs < 1

@@ -128,7 +128,7 @@ function statusForError(error) {
   if (/_ALREADY_EXISTS$/.test(code) || /_IN_USE/.test(code) || /_READ_ONLY$/.test(code) || /_DEFAULT$/.test(code)
     || /_NOT_AVAILABLE$/.test(code) || code === 'JOB_INVALID_CONFIG'
     || code === 'DBUS_ARGUMENT_UNSUPPORTED'
-    || code === 'JOB_NAME_IMMUTABLE' || code === 'JOB_CONFLICT' || code === 'JOB_RUNNING'
+    || code === 'JOB_NAME_IMMUTABLE' || code === 'JOB_CONFLICT' || code === 'JOB_RUNNING' || code === 'LOG_HOT_APPLY_NOT_AVAILABLE'
     || code === 'SERVICE_NOT_INSTALLED' || code === 'SERVICE_ALREADY_INSTALLED'
     || code === 'SERVICE_NOT_RUNNING') return 409;
   if (/CONTROLLER|UNAVAILABLE|UNKNOWN/.test(code)) return 503;

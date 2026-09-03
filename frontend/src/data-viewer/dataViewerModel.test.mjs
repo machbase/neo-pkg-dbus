@@ -823,6 +823,14 @@ test("resolveTagNodes falls back to DB tag names when collector nodes are empty"
     ]);
 });
 
+test("resolveTagNodes preserves a Job Call tree path returned by the LS Tag API", () => {
+    const nodes = resolveTagNodes([], [{ name: "TAG_1", treePath: ["Call A", "TAG_1"] }]);
+    assert.deepEqual(buildTagRows(nodes).map((row) => [row.type, row.depth, row.label]), [
+        ["folder", 0, "Call A"],
+        ["tag", 1, "TAG_1"],
+    ]);
+});
+
 test("buildTagChartSeries uses real time values and sorts points by time", () => {
     const series = buildTagChartSeries([
         { time: "2026-06-04T10:02:00Z", name: "sensor.a", value: "12.5" },

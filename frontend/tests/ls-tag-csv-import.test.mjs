@@ -20,11 +20,11 @@ test("LS CSV 기본값과 order를 기존 Tag 저장 구조로 바꾼다", () =>
   );
   assert.deepEqual(result[0], {
     ...tags[0], name: "TAG_A", nameMode: "manual", bias: 0, multiplier: 1,
-    transformOrder: ["bias", "multiplier"],
+    transformOrder: ["bias", "multiplier"], signed: false,
   });
   assert.deepEqual(result[1], {
     ...tags[1], name: "TAG_B", nameMode: "manual", bias: 10, multiplier: 2,
-    transformOrder: ["multiplier", "bias"],
+    transformOrder: ["multiplier", "bias"], signed: false,
   });
   assert.deepEqual(result[2], tags[2]);
 });
@@ -123,5 +123,6 @@ test("LS CSV 결과는 기존 Job Tag 형식만 직렬화한다", () => {
     bias: 2,
     multiplier: 3,
     transformOrder: ["multiplier", "bias"],
+    signed: false,
   });
 });

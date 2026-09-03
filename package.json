@@ -1,18 +1,18 @@
 {
   "name": "neo-pkg-dbus",
-  "version": "1.0.0",
-  "description": "Machbase Neo jobs service package",
+  "version": "1.0.1",
+  "description": "Machbase Neo D-Bus data collector package",
   "minServerVersion": "8.5.8",
   "scripts": {
     "build": "node scripts/product-build.js",
     "test:products": "node --test tests/product-build.test.cjs tests/product-modules.test.mjs frontend/tests/build-ls-interface.test.mjs",
-    "install": "scripts/install.js",
-    "start": "scripts/start.js",
-    "stop": "scripts/stop.js",
-    "uninstall": "scripts/uninstall.js"
+    "install": "./scripts/install.js",
+    "start": "./scripts/start.js",
+    "stop": "./scripts/stop.js",
+    "uninstall": "./scripts/uninstall.js"
   },
   "packageService": {
-    "managed": false,
-    "reason": "This package manages one Neo service per configured job."
+    "managed": true,
+    "reason": "This package manages one shared LS collector service; logical Jobs are controlled by the package APIs."
   }
 }

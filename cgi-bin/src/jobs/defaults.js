@@ -8,7 +8,9 @@ function jobDefaults() {
     execution: { savePolicy: 'perMethod', onMethodError: 'stop' },
     methodCalls: [],
     database: { server: '', table: 'TAG', valueColumn: 'VALUE', stringValueColumn: 'STR_VALUE' },
-    log: { level: 'info', maxFiles: 10 },
+    // maxFiles is retained in Job documents for backward compatibility.
+    // Actual PLC rotation is the global settings.logging policy.
+    log: { level: 'info', maxFiles: 3 },
   };
 }
 

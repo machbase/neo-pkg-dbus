@@ -3,6 +3,8 @@ function clone(value) {
 }
 
 export const productTarget = 'generic';
+export const minimumIntervalMs = 1000;
+export const retryConfigurable = true;
 export const tagCsvImporter = null;
 
 export function resolveJobFormMode({ settings, settingsLoading = false, settingsError = null } = {}) {

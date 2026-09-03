@@ -2,6 +2,8 @@
 
 const path = require('path');
 const process = require('process');
+const { createDbApi } = require('./db-api.js');
+const { createLogApi } = require('./log-api.js');
 
 function cgiRoot(script) {
   const source = String(script || process.argv[1] || '');
@@ -13,12 +15,12 @@ function cgiRoot(script) {
 
 function runDb(kind) {
   const root = cgiRoot();
-  require(path.join(root, 'src', 'cgi', 'db-api.js')).createDbApi({ cgiRoot: root }).run(kind);
+  createDbApi({ cgiRoot: root }).run(kind);
 }
 
 function runLog(kind) {
   const root = cgiRoot();
-  require(path.join(root, 'src', 'cgi', 'log-api.js')).createLogApi({ cgiRoot: root }).run(kind);
+  createLogApi({ cgiRoot: root }).run(kind);
 }
 
 module.exports = { cgiRoot, runDb, runLog };

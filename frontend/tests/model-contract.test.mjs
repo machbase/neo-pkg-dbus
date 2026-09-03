@@ -28,7 +28,7 @@ const serializedTag = serializeJobConfig({ ...config, methodCalls: [{ ...typedCa
     name: "read-typed-1", bias: 0, multiplier: 1, transformOrder: ["bias", "multiplier"],
   }],
 }] }] }).methodCalls[0].outputSelections[0].tags[0];
-assert.deepEqual(serializedTag, { name: "read-typed-1", bias: 0, multiplier: 1, transformOrder: ["bias", "multiplier"] });
+assert.deepEqual(serializedTag, { name: "read-typed-1", bias: 0, multiplier: 1, transformOrder: ["bias", "multiplier"], signed: false });
 assert.doesNotMatch(JSON.stringify(serializedTag), /sourceAddress|calcOrder|outputIndex/);
 assert.deepEqual(validateTags([{ ...serializedTag, transformOrder: ["bias", "bias"] }]), ["Tag transform order is invalid."]);
 const hydratedNativeScalar = hydrateJobConfig({

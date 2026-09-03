@@ -68,7 +68,7 @@ const named = (path, name) => queryPath(path, { name });
 export const api = {
   settings: {
     get: (options) => request("/settings", options),
-    update: (settings, options) => send("PUT", "/settings", { limits: settings?.limits || {}, ...(settings?.defaults ? { defaults: settings.defaults } : {}) }, options),
+    update: (settings, options) => send("PUT", "/settings", { limits: settings?.limits || {}, ...(settings?.defaults ? { defaults: settings.defaults } : {}), ...(settings?.logging ? { logging: settings.logging } : {}) }, options),
   },
   interfaces: {
     list: (options) => request("/dbus-interface/list", options),
@@ -89,11 +89,13 @@ export const api = {
     get: (name, options) => get("/job", { name }, options),
     create: (name, config, options) => send("POST", "/job", { name, config }, options),
     update: (name, patch, options) => send("PUT", named("/job", name), Object.fromEntries(Object.entries(patch).filter(([key]) => key !== "name")), options),
+    updateLogLevel: (name, patch, options) => send("PUT", named("/job/log", name), patch, options),
     remove: (name, options) => request(named("/job", name), { ...options, method: "DELETE" }),
     validate: (draft, options) => send("POST", "/job/validate", draft, options),
     start: (name, options) => send("POST", named("/job/start", name), undefined, options),
     stop: (name, options) => send("POST", named("/job/stop", name), undefined, options),
     lastRun: (name, options) => get("/job/last-run", { name }, options),
+    clearOverrun: (name, options) => send("POST", named("/job/overrun/reset", name), undefined, options),
   },
   dbus: {
     call: ({ interfaceId, methodId, inputs }, options) => send("POST", "/dbus/call", { interfaceId, methodId, inputs }, options),

@@ -5,6 +5,7 @@ const path = require('path');
 
 const genericPolicy = {
   target: 'generic',
+  minimumIntervalMs: 1000,
   validateProductConfig(config) { return config; },
 };
 
@@ -13,6 +14,7 @@ function loadProductPolicy(cgiRoot) {
   if (!fs.existsSync(file)) return genericPolicy;
   const policy = require(file);
   if (!policy || !['generic', 'ls'].includes(policy.target)
+    || !Number.isInteger(policy.minimumIntervalMs) || policy.minimumIntervalMs < 1
     || typeof policy.validateProductConfig !== 'function') {
     throw new Error('Product Backend module is invalid.');
   }

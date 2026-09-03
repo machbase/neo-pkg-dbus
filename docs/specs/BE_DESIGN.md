@@ -2,7 +2,7 @@
 
 ## 1. 목적과 변하지 않는 계약
 
-Backend는 Machbase Neo JSH CommonJS 환경에서 Job별 DBus 수집 service, 설정 파일, CGI API를 제공한다. 최소 Neo 버전은 `8.5.8`이고 모든 새 설정의 `schemaVersion`은 `1`이다. 패키지 구현 범위는 Side/Main용 jobs 모델이다. 구현 중 확정한 추가 계약은 `DBUS_SDD.md`의 **1.1**을 따르며, **1.2는 JSH 호환성 수정 설계**다. CCR-007의 `open-create-modal`과 CCR-008의 첫 Main 화면·Back 화살표·모달 배경은 Frontend 전용이므로 Backend API·CGI 동작은 바꾸지 않는다.
+Backend는 Machbase Neo JSH CommonJS 환경에서 설정 파일, CGI API와 lifecycle을 제공한다. 최소 Neo 버전은 `8.5.8`이고 모든 새 설정의 `schemaVersion`은 `1`이다. generic은 기존 Job별 JSH 수집 service를 유지한다. LS만 실제 DBus read/decode/native append를 linux/amd64 Go daemon에 위임하며 JSH는 설정·API·기존 log 조회·service 관리를 계속 소유한다. Go daemon은 같은 Job log 파일 형식으로 lifecycle/error/overrun을 기록한다. 구현 중 확정한 추가 계약은 `DBUS_SDD.md`의 **1.1**과 CCR-060을 따른다. Frontend는 이번 LS data-plane 범위에서 바꾸지 않는다.
 
 `settings.json.defaults.database.server` identifies the default server. The preview APIs use submitted connection values only and never persist or return passwords. Saving a server stores its Default Table mapping without metadata validation or Table creation. A missing Table is created only when a Job is saved, according to `DBUS_SDD.md` CCR-055.
 
@@ -27,13 +27,17 @@ LS Interface의 `DeviceString` 저장값과 Neo DBus 호출값은 모두 `%`가 
 CCR-060의 주소 선택기는 LS Frontend 표시 기능이며 Backend 요청·Job schema·저장값과
 호출값은 바뀌지 않는다. Backend는 선택기 구성값을 받거나 추측하지 않는다.
 
-LS Job은 `ls-plc-device/get-device-data` 고정 Method Call을 하나 이상 가질 수 있다.
+LS Job은 `ls-plc-device/get-device-data` 고정 Method Call을 하나 이상 가질 수 있다. `DataCount`와 한 Job cycle의 전체 Tag 행은 DBus `uint16` 범위인 1~65,535까지 허용한다. 따라서 generic의 `maxGeneratedTagsPerCall` 1,000, `maxBufferedRowsPerCycle` 10,000, 512 KiB Job JSON 제한은 LS에 적용하지 않으며, LS Job JSON은 16 MiB까지, Job create/update/validate request body는 envelope 여유를 포함해 17 MiB까지 허용한다.
 제품 validator는 `methodCalls`의 모든 항목에 고정 Interface, Method, Output
 Selection, 입력과 Tag 규칙을 적용하며 첫 항목만 검사하지 않는다. Call 배열 순서는
 공통 실행 순서이고 마지막 Call 삭제 차단은 FE 표시 규칙과 별개로 Backend의 하나
 이상 규칙이 최종 보장한다.
 
-Job 하나는 service 하나다. service 이름은 반드시 `_dbu_<jobName>`이다. 서로 다른 Job service는 같은 DBus Destination을 사용해도 동시에 실행할 수 있다. 한 Job 안의 Method Call은 config 배열 순서대로 실행한다.
+generic은 Job 하나당 `_dbu_<jobName>` service 하나를 사용한다. LS는 `_dbu_collector` daemon service 하나만 사용하며 Job Start/Stop은 Unix socket control command로 daemon에 전달한다. LS package `install`은 Job 유무와 관계없이 daemon service를 등록하고 시작하지 않는다. package `start`는 daemon 하나만 시작하며 활성 Job 목록을 복구한다. package `stop`은 daemon 하나만 정지하고 활성 목록을 보존한다. package `uninstall`은 daemon을 먼저 정지하고 Job 설정을 정리한 뒤 service를 해제한다. 마지막 logical Job 삭제도 service를 해제하지 않는다. LS daemon의 Job별 reader는 dedicated persistent DBus connection 하나를 가지고, 여러 Job은 같은 DBus Destination이어도 동시에 읽을 수 있다. 모든 reader는 shared bounded queue에 batch를 넣고 writer goroutine 하나만 native appender를 열고 append/flush/close한다. 한 Job Stop은 해당 reader cancel 뒤 in-flight read와 이미 queue에 넣은 batch의 append 완료까지 기다린다.
+
+LS interval은 1ms 이상 정수이며 PLC 로컬 Unix epoch의 `00:00:00`에 정렬한다. 예를 들어 10초는 매 분 `:00`, `:10`, `:20`에 예정된다. 완료 시각에 다음 delay를 더하지 않으며 busy reader 또는 full queue의 예정 tick은 항상 skip한다. `overrunCount`와 `lastOverrunAt`은 daemon checkpoint, 첫 발생 로그와 주기 summary, `GET /job/last-run`과 Job 상세 `LATEST RUN`에 제공한다. `overrunCount > 0`인 두 화면 metric은 warning 상태로 표시한다. logical Job Start와 daemon 재시작은 이 runtime 값을 초기화한다. `queueSkipped`은 내부 진단 값으로만 유지한다.
+
+LS JSH adapter는 validated Job document를 `conf.d/go-collector.json`으로 원자 교체하고, DB password만 `conf.d/go-collector-secrets.json`(0600)으로 분리한다. logical Job의 started/stopped 의도 상태는 `conf.d/go-collector-active-jobs.json`에만 보존하며, Go daemon은 시작할 때 이 목록을 읽어 현재 Job 설정에 남은 항목만 복구한다. daemon runtime checkpoint는 `data/go-collector-runtime.json`, control socket은 `data/neo-dbus-collector.sock`이다. `refresh-log <jobName>` control은 새 snapshot의 해당 `log`만 daemon의 mutex 보호 policy map에 교체한다. reader/writer·DBus connection·scheduler·runtime checkpoint를 멈추거나 다시 만들지 않는다. password와 원본 DBus body는 이 파일 외 API, checkpoint, log에 넣지 않는다.
 
 DBus 호출 timeout은 지원하지 않는다. 호출, decode, validation, DB append 오류는 cycle 실패다. CGI는 응답 후 background 작업을 남기지 않고, collector service만 장기 실행한다.
 
@@ -86,9 +90,21 @@ target의 manifest 이름은 `neo-pkg-dbus`이고 루트의 같은 version과
   },
   "defaults": {
     "database": { "server": "localhost" }
+  },
+  "logging": {
+    "maxFileBytes": 1048576,
+    "maxFiles": 3,
+    "summaryIntervalMs": 3600000
   }
 }
 ```
+
+`logging`은 PLC 저장공간을 위한 전역 정책이다. active log는 최대 `maxFileBytes`이고,
+그 뒤에 `maxFiles`개의 회전 `.log` 파일만 유지한다(archive/gzip 파일을 만들지 않는다).
+`summaryIntervalMs`마다 cycle 수·성공/실패·저장 행·skip·마지막 오류를 한 줄로 축약한다.
+INFO는 lifecycle과 설정 적용만, 첫 실패/skip은 즉시 ERROR/WARN, 반복 발생은 summary로
+기록한다. DEBUG는 summary만 추가한다. Job의 `log.maxFiles`는 이전 Job 문서를 읽기 위한
+호환 필드이며 PLC rotation에는 전역 `logging.maxFiles`가 우선한다.
 
 `provider.json`은 [DBUS_PROVIDER_PROFILE.md](providers/DBUS_PROVIDER_PROFILE.md)의
 schemaVersion 1만 허용한다. 없음은 정상 generic mode다. 있으면 정확한 allow-list,
@@ -131,7 +147,7 @@ decoder는 `raw`와 `json`, shape은 `scalar`, `array`, `object`만 지원한다
 - `afterAllMethods`: 모든 행을 메모리에 모은 뒤 한 번 append를 시도한다. 하나라도 실패하거나 buffer가 `maxBufferedRowsPerCycle`을 넘으면 append하지 않는다.
 - 실패한 cycle은 5초, 10초, 20초, 이후 30초 backoff로 다음 cycle을 예약한다. 성공하면 interval 1000ms 이상 정상 주기로 돌아간다. 실행 시간이 주기를 넘으면 밀린 cycle을 연달아 실행하지 않는다.
 
-`lastRun`만 service details에 덮어쓴다. `startedAt`, `completedAt`, `status`, Method별 `interfaceId`, `methodId`, requested/completed/status/storedCount/error를 보관한다. `lastRunAt`, `lastSuccessfulRunAt`, `lastStoredAt`, `lastError`도 보관한다. 원본 body, 추출 값, Tag 값은 저장하지 않는다.
+`lastRun`만 service details에 덮어쓴다. `startedAt`, `completedAt`, `status`, Method별 `interfaceId`, `methodId`, requested/completed/status/storedCount/error를 보관한다. `lastRunAt`, `lastSuccessfulRunAt`, `lastStoredAt`, `lastError`, `overrunCount`, `lastOverrunAt`도 보관한다. 원본 body, 추출 값, Tag 값은 저장하지 않는다.
 
 CCR-069의 Job 상세 재구성은 이 저장 구조를 그대로 사용한다. `storedCount`는 마지막 cycle의 해당 Method가 실제 append한 행 수이며 누적값이 아니다. FE polling은 기존 `GET /job`과 `GET /job/last-run`을 다시 호출할 뿐 새 상태 파일이나 API 필드를 만들지 않는다.
 
@@ -155,7 +171,7 @@ CCR-069의 Job 상세 재구성은 이 저장 구조를 그대로 사용한다. 
 
 `name`은 항상 `_dbu_<jobName>`, args의 유일한 항목은 항상 `<jobName>.json`이다. start는 실행 전에 Job/DBus Interface/Method/DB 설정을 다시 검증하며 service가 없으면 내부적으로 설치한다.
 
-실행 중에는 Job update와 delete를 하지 않는다. `RUNNING`, `STARTING`, `STOPPING`이면 Job PUT/DELETE는 `JOB_RUNNING`으로 거부한다. Backend update도 stop-save-start로 우회하지 않는다. 사용자는 먼저 stop하여 `STOPPED` 또는 `FAILED`가 된 것을 확인한 뒤 수정·삭제한다.
+실행 중에는 일반 Job update와 delete를 하지 않는다. `RUNNING`, `STARTING`, `STOPPING`이면 일반 Job PUT/DELETE는 `JOB_RUNNING`으로 거부한다. LS만 `PUT /job/log?name=`의 `{revision, level}`을 허용하며, 이 요청은 설정 저장·snapshot 뒤 `refresh-log` control로 level만 hot-apply한다. Backend는 data-plane 변경을 stop-save-start로 우회하지 않는다. 사용자는 Log Level 외 설정을 바꾸려면 먼저 stop하여 `STOPPED` 또는 `FAILED`가 된 것을 확인한다.
 
 삭제는 정지된 Job에만 허용하며 `uninstall → service details 정리 → config 삭제` 순서다. service가 없는 config-only Job은 config만 삭제한다. 설치 상태, 실행 상태, Controller 상태는 각각 계산해 API에 따로 전달한다.
 
@@ -240,7 +256,7 @@ DataViewer의 저장값과 CGI API timestamp·`from`/`to` 범위는 UTC ISO-8601
 
 DB Server API는 연결 정보를 등록 DB Server 저장소에만 보관한다. DB Server 생성·수정의 `name`, `host`, `port`, `user`, `password`는 모두 필수이며 password 누락·빈 값은 `DB_SERVER_INVALID`이다. 기본 `localhost`는 `defaultTable: "DEFAULT_DBUS"`와 빈 기본 Column 두 개로 초기화하되 실제 Table은 만들지 않는다. DB Server Create·Update는 Default Table이나 Column metadata를 검증하지 않고 Table을 만들지 않는다. Job은 `database.server`에 등록 이름만 저장하고 `database.table`은 항상 대문자 SQL 식별자로 정규화해 저장한다. Job POST/정지된 PUT의 database adapter는 Table 존재 여부를 항상 조회한다. 없는 Table은 최종 Output Mapping을 분석해 `{server, table, valueColumn: "VALUE", stringValueColumn: "STR_VALUE"}` 또는 `{server, table, valueColumn: "VALUE", stringValueColumn: null}`로 만든다. 저장 config의 String Value Column은 각각 `STR_VALUE` 또는 빈 문자열이다. Table 생성이 성공했고 생성 이름이 등록 서버의 `defaultTable`과 같으면 DB Server 저장소의 기본 Column도 같은 `VALUE`/선택 `STR_VALUE`로 원자 저장하며 기존 연결 정보와 비밀번호를 보존한다. 다른 Table, 기존 Table, `TABLE_ALREADY_EXISTS` 경쟁은 서버 기본값을 바꾸지 않는다. 기존 Table은 요청 mapping의 SQL 식별자 형식만 검증하며 metadata·자료형을 재검증하지 않는다. `/db/table/create`는 독립 관리 API로 `{server, table, valueColumn, stringValueColumn}`을 받고 `stringValueColumn`은 선택이며 `null`을 허용한다. Backend가 primary key·basetime 열과 자료형을 정해 TAG table을 만든다. 성공 data는 `{server, table, primaryKeyColumn, basetimeColumn, valueColumn, stringValueColumn}`이며 기존 table은 `TABLE_ALREADY_EXISTS`, 잘못된 table 또는 column 설정은 `TABLE_INVALID`이다. `/db/table/columns`는 화면 선택용 metadata를 반환한다. DataViewer의 tags/data/stat/chart은 `job`, server/table/names를 받고 Job의 Database mapping만 일치하면 같은 Table의 모든 실제 Tag를 허용한다. tags는 Asset hierarchy 메타를, data는 page/keyset/total Raw 행을, stat은 시간 경계를, chart는 Neo Web 전용 검증 SQL query를 반환한다. 이전 Job Tag 제한과 series Chart는 CCR-052로 폐기됐다.
 
-Log API는 Job name으로 로그를 찾는다. 로그 파일은 크기 기반 rotation을 사용하며, API 응답에는 DB 비밀번호·raw config·원본 DBus body를 넣지 않는다. Live Logs를 위해 새 endpoint를 추가하지 않는다. 기존 `GET /log/list`의 필수 `name`으로 `active:true` 파일을 찾는다. 페이지 로그 `GET /log/content?name=...&file=...&page=...&lines=...`는 필수 `name`, `file`과 선택 `page`, `lines`을 받고 `{name,file,page,linesPerPage,totalLines,lines,nextPage,previousPage}`를 반환한다. 전체 본문 `GET /log/content/all?name=...&file=...`는 필수 `name`, `file`을 받고 `{name,file,size,content}`를 반환한다. Live Logs의 `GET /log/tail?name=...&file=...&lines=...`는 필수 `name`, `file`과 선택 `lines`을 받고 `{name,file,lines,totalLines}`를 반환한다. `lines`는 로그 줄 배열, `totalLines`는 해당 파일의 전체 줄 수다. SSE와 WebSocket 로그 전송은 제공하지 않는다.
+Log API는 Job name으로 로그를 찾는다. 로그 파일은 전역 `settings.logging`의 크기 기반 rotation을 사용하며 archive/gzip은 만들지 않는다. API 응답에는 DB 비밀번호·raw config·원본 DBus body를 넣지 않는다. Live Logs를 위해 새 endpoint를 추가하지 않는다. 기존 `GET /log/list`의 필수 `name`으로 `active:true` 파일을 찾는다. 페이지 로그 `GET /log/content?name=...&file=...&page=...&lines=...`는 필수 `name`, `file`과 선택 `page`, `lines`을 받고 `{name,file,page,linesPerPage,totalLines,lines,nextPage,previousPage}`를 반환한다. 전체 본문 `GET /log/content/all?name=...&file=...`는 필수 `name`, `file`을 받고 `{name,file,size,content}`를 반환한다. Live Logs의 `GET /log/tail?name=...&file=...&lines=...`는 필수 `name`, `file`과 선택 `lines`을 받고 `{name,file,lines,totalLines}`를 반환한다. `lines`는 로그 줄 배열, `totalLines`는 해당 파일의 전체 줄 수다. SSE와 WebSocket 로그 전송은 제공하지 않는다.
 
 ### API별 입력·검증 규칙
 
@@ -253,7 +269,7 @@ Log API는 Job name으로 로그를 찾는다. 로그 파일은 크기 기반 ro
 - `POST /dbus-interface/discover`는 Bus Type, Destination, Object Path를 받고 저장하지 않은 Interface·Method 목록을 반환한다. Backend는 XML 크기와 Interface·Method·파라미터 수를 제한한다.
 - `POST /dbus-interface`는 새 Interface object 하나를 저장하고 `PUT /dbus-interface`는 기존 Interface object 하나를 저장한다. 다시 Discover한 discovered Method 목록은 `PUT /dbus-interface?discover=true`으로 보낸다. Backend는 manual Method를 보존하고, 참조 Job이 하나라도 있으면 Discover 저장을 `DBUS_INTERFACE_IN_USE`로 거부한다. `{interfaces:[...]}` 배열 wrapper와 Save All은 없다. `/dbus-method` 요청에는 부모 `interfaceId`를 포함하고, 수정·삭제에는 `methodId`를 포함한다. Built-in 수정·삭제는 `DBUS_INTERFACE_READ_ONLY`다. 참조 Interface의 이름 외 변경·삭제와 Method 변경은 `DBUS_INTERFACE_IN_USE`다.
 - `POST /job` 요청은 정확히 `{ "name": "<jobName>", "config": { ... } }`다. `config.name`은 `JOB_INVALID`으로 거부한다. Backend는 검증된 바깥 `name`만 저장 document의 top-level name, `<jobName>.json` 파일명, `_dbu_<jobName>` service 이름에 주입한다.
-- `GET /job?name=<jobName>`과 Job create/update 응답은 현재 정수 `revision`을 포함한다. `PUT /job?name=<jobName>` 본문은 `revision`과 name 없는 부분 config patch다. 본문에 name이 있으면 HTTP 409 `JOB_NAME_IMMUTABLE`, revision이 없거나 1 미만이면 HTTP 400 `JOB_REVISION_REQUIRED`로 거부한다. Backend는 **6.1 Job mutation operation lock과 lease**의 `operation lock`을 상태 조회부터 Controller side effect와 설정 파일 변경 완료까지 유지한다. 저장 직전 현재 revision과 다르면 HTTP 409 `JOB_CONFLICT`로 거부하며 모든 revision 불일치 `JOB_CONFLICT`의 `details`에 `expectedRevision`, `currentRevision`을 넣는다. 성공 저장은 revision을 1 증가시킨다. query name은 고정 식별자이고, Backend는 `defaults → existing config → request patch` 순서로 깊이 병합한다. 배열은 patch가 보낸 배열 전체로 교체하고, 병합 결과를 검증·저장한다.
+- `GET /job?name=<jobName>`과 Job create/update 응답은 현재 정수 `revision`을 포함한다. `PUT /job?name=<jobName>` 본문은 `revision`과 name 없는 부분 config patch다. 본문에 name이 있으면 HTTP 409 `JOB_NAME_IMMUTABLE`, revision이 없거나 1 미만이면 HTTP 400 `JOB_REVISION_REQUIRED`로 거부한다. `PUT /job/log?name=<jobName>`은 LS 전용이며 정확히 `{revision, level}`만 허용한다. 두 요청 모두 **6.1 Job mutation operation lock과 lease**의 `operation lock`을 상태 조회부터 설정 파일 변경 완료까지 유지한다. 저장 직전 현재 revision과 다르면 HTTP 409 `JOB_CONFLICT`로 거부하며 모든 revision 불일치 `JOB_CONFLICT`의 `details`에 `expectedRevision`, `currentRevision`을 넣는다. 성공 저장은 revision을 1 증가시킨다. 일반 Job PUT은 `defaults → existing config → request patch` 순서로 깊이 병합하고 배열은 patch가 보낸 배열 전체로 교체한다. log PUT은 현재 config의 `log.level`만 교체해 전체 config를 검증·저장한다.
 - 저장 파일 `<jobName>.json`의 top-level `name`은 반드시 파일명과 같아야 한다. 읽을 때 불일치하면 `JOB_INVALID_CONFIG`으로 보고 list/detail에는 진단만 표시하며 start/stop/update/delete처럼 상태를 바꾸는 동작을 모두 차단한다.
 - `POST /job/validate`는 파일과 service를 바꾸지 않는다. 유효한 draft는 HTTP 200 `{ "ok": true, "data": { "valid": true, "warnings": [{ "code": "...", "reason": "...", "path": "...", "details": {} }] } }`를 반환한다. `path`는 draft 안의 문제 위치를 가리키는 JSON Pointer다. 다른 Job과 같은 DB/table/tag name은 `TAG_NAME_USED_BY_ANOTHER_JOB` warning으로 반환하고 저장 차단 조건으로 만들지 않는다. 유효하지 않은 draft는 `JOB_INVALID` 실패 envelope를 반환한다.
 - `POST /job/start`은 Interface/Method/DB 설정을 재검증한다. service가 외부에서 지워진 config-only Job이면 같은 operation lock 안에서 자동 설치한 뒤 시작한다. 같은 destination을 쓰는 다른 Job은 시작 차단 사유가 아니다. `POST /job/stop`은 실행 중 service만 정지한다.

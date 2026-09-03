@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "limits": {
+    "maxGeneratedTagsPerCall": 1000,
+    "maxBufferedRowsPerCycle": 10000
+  },
+  "defaults": {
+    "database": { "server": "localhost" }
+  },
+  "logging": {
+    "maxFileBytes": 1048576,
+    "maxFiles": 3,
+    "summaryIntervalMs": 3600000
+  },
+  "ls": {
+    "interval": { "useTaskCycle": true }
+  }
+}

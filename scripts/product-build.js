@@ -7,6 +7,18 @@ const { spawnSync } = require('child_process');
 
 const PACKAGE_NAME = 'neo-pkg-dbus';
 const TARGETS = new Set(['generic', 'ls']);
+const LS_COLLECTOR_SOURCE = path.join('collector-go', 'dist', 'linux-amd64', 'neo-dbus-collector');
+const CGI_RUNTIME_ENTRY = path.join('cgi-bin', 'src', 'cgi', 'runtime.js');
+const CGI_RUNTIME_OUTPUT = path.join('cgi-bin', 'runtime.js');
+const RELEASE_EXECUTABLES = [
+  path.join('scripts', 'install.js'),
+  path.join('scripts', 'start.js'),
+  path.join('scripts', 'stop.js'),
+  path.join('scripts', 'uninstall.js'),
+  path.join('cgi-bin', 'neo-dbus-launcher.js'),
+  path.join('cgi-bin', 'neo-dbus-control.js'),
+  path.join('cgi-bin', 'bin', 'neo-dbus-collector'),
+];
 
 function parseTarget(args) {
   if (!Array.isArray(args) || args.length === 0) return 'generic';
@@ -59,6 +71,31 @@ function prepareProductBackend({ root, stagingRoot, target }) {
   const interfaces = path.join(productRoot, 'interfaces');
   if (fs.existsSync(profile)) fs.copyFileSync(profile, path.join(cgiStage, 'provider.json'));
   if (fs.existsSync(interfaces)) copyDirectory(interfaces, interfacesOutput);
+  const collector = path.join(root, LS_COLLECTOR_SOURCE);
+  if (target === 'ls' && fs.existsSync(collector)) {
+    fs.mkdirSync(path.join(cgiStage, 'bin'), { recursive: true });
+    const destination = path.join(cgiStage, 'bin', 'neo-dbus-collector');
+    fs.copyFileSync(collector, destination);
+    // Make the release artifact itself executable. Runtime repeats this for
+    // GitHub ZIP/archive extractors that discard Unix mode bits.
+    fs.chmodSync(destination, 0o755);
+  }
+}
+
+function buildCgiRuntime(root) {
+  // The frontend toolchain already provides esbuild. Keep the backend bundle
+  // self-contained except for modules supplied by Machbase Neo JSH at runtime.
+  const esbuild = require(path.join(root, 'frontend', 'node_modules', 'esbuild'));
+  esbuild.buildSync({
+    entryPoints: [path.join(root, CGI_RUNTIME_ENTRY)],
+    outfile: path.join(root, CGI_RUNTIME_OUTPUT),
+    bundle: true,
+    format: 'cjs',
+    platform: 'node',
+    target: 'es2020',
+    external: ['appender', 'db', 'dbus', 'fs', 'http', 'machcli', 'net', 'os', 'path', 'process', 'service', 'sql'],
+    logLevel: 'warning',
+  });
 }
 
 const GENERATED_OUTPUTS = [
@@ -66,6 +103,7 @@ const GENERATED_OUTPUTS = [
   path.join('cgi-bin', 'product'),
   path.join('cgi-bin', 'provider.json'),
   path.join('cgi-bin', 'interfaces.d'),
+  path.join('cgi-bin', 'bin'),
 ];
 
 function validateStaging(stagingRoot, target) {
@@ -82,6 +120,15 @@ function validateStaging(stagingRoot, target) {
   if (target === 'generic' && fs.existsSync(providerFile)) throw new Error('Generic output must not contain provider.json.');
   if (target === 'generic' && fs.readdirSync(interfaces).length) throw new Error('Generic output must not contain Provider Interfaces.');
   if (target === 'ls' && !fs.existsSync(providerFile)) throw new Error('LS output requires provider.json.');
+}
+
+function buildLsCollector(root) {
+  const script = path.join(root, 'collector-go', 'build.sh');
+  if (!fs.existsSync(script)) throw new Error('LS collector build script not found.');
+  const result = spawnSync('bash', [script], { cwd: root, stdio: 'inherit' });
+  if (result.status !== 0) throw new Error('LS Go collector build failed.');
+  const binary = path.join(root, LS_COLLECTOR_SOURCE);
+  if (!fs.existsSync(binary) || fs.statSync(binary).size === 0) throw new Error('LS Go collector output not found.');
 }
 
 function copyOutput(source, destination) {
@@ -121,6 +168,17 @@ function installGeneratedOutputs(root, stagingRoot) {
   }
 }
 
+function ensureReleaseExecutables(root) {
+  // GitHub ZIP extraction does not retain Unix mode bits.  These entry points
+  // are invoked by Neo's package/JSH command resolution before application
+  // code can repair permissions, so the committed LS artifact itself must be
+  // executable as well as the native collector.
+  RELEASE_EXECUTABLES.forEach((relative) => {
+    const file = path.join(root, relative);
+    if (fs.existsSync(file) && fs.statSync(file).isFile()) fs.chmodSync(file, 0o755);
+  });
+}
+
 function runFrontendBuild(stagingRoot, target, root) {
   const script = path.join(root, 'frontend', 'scripts', 'build-root.mjs');
   const result = spawnSync(process.execPath, [script, `--target=${target}`, `--output=${stagingRoot}`], {
@@ -139,6 +197,7 @@ function buildPackage({ root, target, runFrontend = runFrontendBuild }) {
     prepareProductBackend({ root, stagingRoot, target });
     validateStaging(stagingRoot, target);
     installGeneratedOutputs(root, stagingRoot);
+    ensureReleaseExecutables(root);
   } finally {
     fs.rmSync(stagingRoot, { recursive: true, force: true });
   }
@@ -147,6 +206,8 @@ function buildPackage({ root, target, runFrontend = runFrontendBuild }) {
 function main() {
   const root = path.resolve(__dirname, '..');
   const target = parseTarget(process.argv.slice(2));
+  if (target === 'ls') buildLsCollector(root);
+  buildCgiRuntime(root);
   buildPackage({ root, target });
 }
 
@@ -154,5 +215,7 @@ if (require.main === module) main();
 
 module.exports = {
   PACKAGE_NAME, TARGETS, parseTarget, assertManifestIdentity,
-  prepareProductBackend, validateStaging, installGeneratedOutputs, buildPackage,
+  LS_COLLECTOR_SOURCE, CGI_RUNTIME_ENTRY, CGI_RUNTIME_OUTPUT, RELEASE_EXECUTABLES,
+  prepareProductBackend, validateStaging, installGeneratedOutputs, ensureReleaseExecutables,
+  buildLsCollector, buildCgiRuntime, buildPackage,
 };

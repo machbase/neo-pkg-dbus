@@ -6,6 +6,10 @@ const { createDataViewer } = require('../db/data-viewer.js');
 const { createMetadataReader } = require('../db/metadata-reader.js');
 const { MAX_SERVER_JSON_BYTES, createServerStore } = require('../db/server-store.js');
 const { loadSettings } = require('../config/settings-loader.js');
+const { loadProductPolicy } = require('../config/product-policy.js');
+const { createLsRuntime } = require('../collector/ls-runtime.js');
+const { createControllerAdapter } = require('../service/controller-adapter.js');
+const { JobRepository } = require('../jobs/repository.js');
 const { error } = require('../config/errors.js');
 const path = require('path');
 
@@ -17,9 +21,23 @@ function createDbApi(options) {
   const settings = options || {};
   const http = settings.http || httpDefault;
   const store = settings.store || createServerStore({ cgiRoot: settings.cgiRoot, jobDir: settings.jobDir });
-  const viewer = settings.viewer || createDataViewer({ cgiRoot: settings.cgiRoot, serverStore: store });
+  const productPolicy = settings.productPolicy || (settings.cgiRoot ? loadProductPolicy(settings.cgiRoot) : null);
+  const viewer = settings.viewer || createDataViewer({ cgiRoot: settings.cgiRoot, serverStore: store, productPolicy });
   const metadataReader = settings.metadataReader || createMetadataReader({ clientFactory: settings.clientFactory });
   const method = settings.method || requestMethod;
+
+  function lsRuntime() {
+    if (settings.lsRuntime) return settings.lsRuntime;
+    if (!settings.cgiRoot) return null;
+    const policy = productPolicy || loadProductPolicy(settings.cgiRoot);
+    if (policy.target !== 'ls') return null;
+    return createLsRuntime({
+      cgiRoot: settings.cgiRoot,
+      controller: createControllerAdapter(),
+      serverStore: store,
+      repository: settings.repository || new JobRepository({ cgiRoot: settings.cgiRoot, jobDir: settings.jobDir }),
+    });
+  }
 
   function run(kind) {
     let responded = false;
@@ -68,20 +86,42 @@ function createDbApi(options) {
           const params = query();
           if (params) store.getPublic(params.name, callback(200));
         } else if (verb === 'POST') {
+          if (lsRuntime()) { fail(error('LS_DATABASE_PROFILE_FIXED', 'LS에서는 Database 설정을 추가할 수 없습니다. 기존 설정을 수정하십시오.'), 409); return; }
           const payload = body();
           if (payload) store.create(payload, callback(201));
         } else if (verb === 'PUT') {
           const params = query();
           if (!params) return;
           const payload = body();
-          if (payload) store.update(params.name, payload, callback(200));
+          if (!payload) return;
+          const runtime = lsRuntime();
+          if (!runtime) { store.update(params.name, payload, callback(200)); return; }
+          let active;
+          try { active = runtime.activeNames(); } catch (activeError) { fail(activeError); return; }
+          if (active.length && payload.restartRunningJobs !== true) {
+            fail(error('LS_DATABASE_RESTART_REQUIRED', 'Database 설정을 저장하면 실행 중인 LS Job이 재시작됩니다.', { jobs: active }), 409);
+            return;
+          }
+          store.update(params.name, payload, (updateError, value) => {
+            if (updateError) { fail(updateError); return; }
+            if (!active.length) {
+              try { runtime.snapshot(); } catch (snapshotError) { fail(snapshotError); return; }
+              reply(200, value);
+              return;
+            }
+            runtime.reloadAllActive((reloadError) => {
+              if (reloadError) { fail(reloadError); return; }
+              reply(200, value);
+            });
+          });
         } else if (verb === 'DELETE') {
           const params = query();
           if (params) {
             const defaults = loadSettings(path.join(settings.cgiRoot, 'conf.d', 'settings.json'));
             if (params.name === defaults.defaults.database.server) {
               fail(error('DB_SERVER_DEFAULT_REQUIRED', '기본 Database Server는 다른 기본 서버를 지정하기 전에는 삭제할 수 없습니다.', { name: params.name }), 409);
-            } else store.remove(params.name, callback(200));
+            } else if (lsRuntime()) fail(error('LS_DATABASE_PROFILE_FIXED', 'LS에서는 Database 설정을 삭제할 수 없습니다.'), 409);
+            else store.remove(params.name, callback(200));
           }
         } else notAllowed(['GET', 'POST', 'PUT', 'DELETE']);
         return;

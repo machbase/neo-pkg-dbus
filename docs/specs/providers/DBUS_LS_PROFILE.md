@@ -134,9 +134,14 @@ Call 목록은 최대 8행 높이를 유지하고 9번째 Call부터 목록 내�
 늘어나지 않는다. Tag Transform의 Bias와 Multiplier는 Address·DataCount와 같은
 위·아래 화살표를 사용하고 기존 숫자 범위와 계산 규칙은 바꾸지 않는다.
 
-Database Server, Table, Value Column과 실행 주기·재시도 설정은 공통 화면과 같은
-control을 사용한다. 공통 Backend의 Interface/Method/Job CRUD API 자체를 이
-Profile이 막거나 삭제하지 않는다.
+실행 주기와 재시도 설정은 공통 화면과 같은 control을 사용한다. 반면 LS의 Database
+Server는 하나의 공통 profile이다. 모든 LS Job은 이 profile의 server, Default Table,
+Value Column과 String Value Column을 공유한다. Job Database 요약은 읽기 전용이며
+개별 Job에서 server/table/column을 바꾸지 않는다. LS Database Server 목록에서는
+추가·삭제·기본 서버 전환을 제공하지 않고 기존 profile만 수정한다. 실행 중인 logical
+Job이 있으면 수정 확인 뒤 각 Job을 reload하며, pending writer rows는 stop 과정에서
+flush한다. 공통 Backend의 Interface/Method/Job CRUD API 자체를 이 Profile이 막거나
+삭제하지 않는다.
 
 기존 Job을 LS 고정 Call로 바꾸는 migration은 제공하지 않는다. 고정 규칙에 맞는
 기존 단일 Call Job은 같은 LS 전용 편집기를 사용한다. 고정 규칙을 위반하는 기존

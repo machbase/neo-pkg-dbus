@@ -1,5 +1,14 @@
 'use strict';
 
+// GetDeviceData receives DataCount as DBus uint16. LS intentionally does not
+// inherit the generic JSH collector's 1,000/10,000-row limits: its Go data
+// plane owns a bounded queue and one native writer instead. A Job still has a
+// uint16-sized reader batch, and its JSON may grow beyond generic's 512 KiB
+// when it contains a Tag per PLC address.
+const MAX_DATA_COUNT = 65535;
+const MAX_LS_JOB_JSON_BYTES = 16 * 1024 * 1024;
+const MAX_LS_JOB_REQUEST_BYTES = 17 * 1024 * 1024;
+
 function invalid(reason, details) {
   const failure = new Error(reason);
   failure.code = 'JOB_INVALID';
@@ -27,4 +36,14 @@ function validateProductConfig(config) {
   return config;
 }
 
-module.exports = { target: 'ls', validateProductConfig };
+module.exports = {
+  target: 'ls',
+  minimumIntervalMs: 1,
+  validationLimits: {
+    maxGeneratedTagsPerCall: MAX_DATA_COUNT,
+    maxBufferedRowsPerCycle: MAX_DATA_COUNT,
+  },
+  maxJobJsonBytes: MAX_LS_JOB_JSON_BYTES,
+  maxRequestJsonBytes: MAX_LS_JOB_REQUEST_BYTES,
+  validateProductConfig,
+};
