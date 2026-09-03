@@ -14,6 +14,17 @@ function defaultSettings() {
     defaults: {
       database: { server: 'localhost' },
     },
+    logging: {
+      maxFileBytes: 1024 * 1024,
+      maxFiles: 3,
+      summaryIntervalMs: 60 * 60 * 1000,
+    },
+    // LS writer tuning is intentionally an internal deployment setting. It
+    // is copied into the Go collector snapshot but is not exposed in the UI.
+    ls: {
+      interval: { useTaskCycle: true },
+      writer: { queueCapacity: 64, flushMaxRows: 1024, flushIntervalMs: 1000 },
+    },
   };
 }
 
@@ -39,6 +50,13 @@ function loadSettings(file) {
       ...base.defaults,
       ...defaults,
       database: { ...base.defaults.database, ...(defaults.database || {}) },
+    },
+    logging: { ...base.logging, ...((value.logging && typeof value.logging === 'object' && !Array.isArray(value.logging)) ? value.logging : {}) },
+    ls: {
+      ...base.ls,
+      ...((value.ls && typeof value.ls === 'object' && !Array.isArray(value.ls)) ? value.ls : {}),
+      interval: { ...base.ls.interval, ...((value.ls?.interval && typeof value.ls.interval === 'object' && !Array.isArray(value.ls.interval)) ? value.ls.interval : {}) },
+      writer: { ...base.ls.writer, ...((value.ls?.writer && typeof value.ls.writer === 'object' && !Array.isArray(value.ls.writer)) ? value.ls.writer : {}) },
     },
   });
 }

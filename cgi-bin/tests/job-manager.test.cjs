@@ -286,6 +286,8 @@ async function testHappyLifecycleAndProjection() {
         lastSuccessfulRunAt: '2026-08-03T00:00:01.000Z',
         lastStoredAt: '2026-08-03T00:00:01.000Z',
         lastError: null,
+        overrunCount: 2,
+        lastOverrunAt: '2026-08-03T00:00:00.500Z',
         password: 'secret', config: {}, payload: {}, values: [1, 2], body: 'raw', extra: 'drop',
       },
     });
@@ -301,6 +303,7 @@ async function testHappyLifecycleAndProjection() {
         lastRunAt: '2026-08-03T00:00:01.000Z',
         lastSuccessfulRunAt: '2026-08-03T00:00:01.000Z',
         lastStoredAt: '2026-08-03T00:00:01.000Z', lastError: null,
+        overrunCount: 2, lastOverrunAt: '2026-08-03T00:00:00.500Z',
       },
     });
 
@@ -998,6 +1001,67 @@ function testPackageLifecycleSessionRetriesFenceRelease() {
   }
 }
 
+async function testLsLogLevelHotApplyDoesNotStopLogicalJob() {
+  const root = setupRoot('neo-ls-log-hot-apply-');
+  try {
+    const calls = [];
+    const lsRuntime = {
+      inspect(_name, callback) {
+        callback(null, { controllerState: 'RUNNING', controllerDetail: null, statusError: null });
+      },
+      snapshot() { calls.push('snapshot'); },
+      refreshLog(name, callback) { calls.push(['refreshLog', name]); callback(null); },
+    };
+    const manager = new JobManager({
+      cgiRoot: root,
+      productPolicy: {
+        target: 'ls',
+        minimumIntervalMs: 1,
+        validationLimits: {},
+        validateProductConfig(config) { return config; },
+      },
+      lsRuntime,
+      databaseAdapter: fakeDatabase(),
+    });
+    manager.repository.create('alpha', jobConfig());
+
+    const result = await call(manager, 'updateLog', 'alpha', { revision: 1, level: 'warn' });
+    assert.equal(result.running, true);
+    assert.equal(result.revision, 2);
+    assert.equal(result.config.log.level, 'warn');
+    assert.deepEqual(calls, ['snapshot', ['refreshLog', 'alpha']]);
+    assert.equal(manager.repository.read('alpha').log.level, 'warn');
+    assert.equal(manager.repository.read('alpha').revision, 2);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
+async function testLsClearOverrunUsesLogicalCollectorControl() {
+  const root = setupRoot('neo-ls-clear-overrun-');
+  try {
+    const calls = [];
+    const lsRuntime = {
+      clearOverrun(name, callback) { calls.push(['clearOverrun', name]); callback(null); },
+      lastRun(name, callback) { calls.push(['lastRun', name]); callback(null, { status: 'success', overrunCount: 0, lastOverrunAt: '', methodCalls: [] }); },
+    };
+    const manager = new JobManager({
+      cgiRoot: root,
+      productPolicy: { target: 'ls', minimumIntervalMs: 1, validationLimits: {}, validateProductConfig(config) { return config; } },
+      lsRuntime,
+      databaseAdapter: fakeDatabase(),
+    });
+    manager.repository.create('alpha', jobConfig());
+
+    const result = await call(manager, 'clearOverrun', 'alpha');
+    assert.deepEqual(calls, [['clearOverrun', 'alpha'], ['lastRun', 'alpha']]);
+    assert.equal(result.lastRun.overrunCount, 0);
+    assert.equal(result.lastRun.lastOverrunAt, '');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
 async function run() {
   await testHappyLifecycleAndProjection();
   await testUpdateRejectsStaleRevision();
@@ -1019,6 +1083,8 @@ async function run() {
   await testDifferentJobMutationsShareLifecycleAvailabilityProbe();
   await testPackageUninstallFencesDeletedAndNewJobNamesUntilCompletion();
   await testPackageStopHoldsEarlierJobLockUntilWholeLifecycleCompletes();
+  await testLsLogLevelHotApplyDoesNotStopLogicalJob();
+  await testLsClearOverrunUsesLogicalCollectorControl();
 
   const adapter = createControllerAdapter(fakeServiceModule());
   assert.equal(typeof adapter.status, 'function');

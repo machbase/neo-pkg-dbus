@@ -80,10 +80,15 @@ assert.equal(data.searchParams.get("table"), "TAG");
 assert.deepEqual(data.searchParams.getAll("names"), ["A", "B"]);
 
 assert.equal(isPackageMessage({ type: "open-create-modal", target: "dbus-interface" }), true);
+assert.equal(isPackageMessage({ type: "ready" }), true);
 assert.equal(isPackageMessage({ type: "open-create-modal", target: "profile" }), false);
 const sent = [];
 globalThis.BroadcastChannel = class { postMessage(value) { sent.push(value); } close() {} };
 const channel = createPackageChannel({ enabled: true, name: "test", onMessage() {} });
+channel.ready();
 channel.openCreateModal("dbus-interface");
-assert.deepEqual(sent, [{ type: "open-create-modal", target: "dbus-interface" }]);
+assert.deepEqual(sent, [{ type: "ready" }, { type: "open-create-modal", target: "dbus-interface" }]);
+sent.length = 0;
+channel.ready("side");
+assert.deepEqual(sent, [{ type: "ready", surface: "side" }]);
 console.log("api and channel contract tests passed");

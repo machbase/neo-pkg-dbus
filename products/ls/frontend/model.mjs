@@ -20,6 +20,8 @@ function generatedInput(inputs, names) {
 }
 
 export const productTarget = 'ls';
+export const minimumIntervalMs = 1;
+export const retryConfigurable = false;
 export const tagCsvImporter = Object.freeze({ apply: applyLsTagCsv });
 
 function nextCallIdentity(calls, methodId) {
@@ -116,6 +118,7 @@ export function reconcileProductTags(inputs, existingTags = [], provider = null)
       name: manual ? existing.name : `${prefix}${String(start + index).padStart(width, '0')}`,
       bias: Number.isFinite(Number(existing.bias)) ? Number(existing.bias) : 0,
       multiplier: Number.isFinite(Number(existing.multiplier)) ? Number(existing.multiplier) : 1,
+      signed: existing.signed === true,
       transformOrder: validTransformOrder(existing.transformOrder)
         ? [...existing.transformOrder] : ['bias', 'multiplier'],
       nameMode: manual ? 'manual' : 'auto',

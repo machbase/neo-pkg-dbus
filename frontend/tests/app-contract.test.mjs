@@ -42,14 +42,14 @@ function renderModal() {
   return create(React.createElement(DbusInterfacesModal));
 }
 
-test("Settings 실패는 Side에 오류를 표시하고 DBus Interface 진입점을 숨긴다", async () => {
+test("Settings API 실패는 Side에 남기지 않고 DBus Interface 진입점을 숨긴다", async () => {
   let renderer;
   await act(async () => { renderer = create(React.createElement(JobSide, {
     jobs: [], selected: "", loading: false,
     settingsError: { code: "PROVIDER_PROFILE_INVALID", reason: "Provider Profile is invalid." },
     onSelect() {}, onNew() {}, onRefresh() {}, onToggle() {},
   })); });
-  assert.match(JSON.stringify(renderer.toJSON()), /PROVIDER_PROFILE_INVALID/);
+  assert.doesNotMatch(JSON.stringify(renderer.toJSON()), /PROVIDER_PROFILE_INVALID/);
   assert.equal(button(renderer.root, "New DBus Interface"), undefined);
   await act(async () => { renderer.unmount(); });
 });
@@ -116,26 +116,107 @@ test("Job 상세는 의미별 세 카드와 최신 실행 시각을 표시한다
   assert.match(source, /label="LATEST STATUS" value=\{lastRun\.status\}/);
   assert.match(source, /label="LAST SUCCESSFUL" value=\{lastRun\.lastSuccessfulRunAt/);
   assert.match(source, /label="LAST STORED" value=\{lastRun\.lastStoredAt/);
+  assert.doesNotMatch(source, /label="SKIPPED CYCLES"/);
+  assert.doesNotMatch(source, /label="LAST SKIPPED"/);
+  assert.match(source, /const hasSkippedCycles = Number\(lastRun\?\.overrunCount \|\| 0\) > 0/);
+  assert.match(source, /\{hasSkippedCycles \? <div className="neo-overview-card__overrun">/);
+  assert.match(styles, /\.neo-overview-card__overrun/);
   assert.match(source, /<th>Rows saved<\/th>/);
   assert.match(source, /setInterval\(\(\) => \{ void loaded\.reload\(\); \}, 5000\)/);
   assert.match(styles, /\.neo-job-overview\s*\{[^}]*grid-template-columns:\s*repeat\(3,\s*minmax\(0,\s*1fr\)\)/s);
 });
 
-test("Job 상세는 Live Logs와 Logging Controls를 실제 화면에 연결한다", () => {
+test("Job 상세는 Live Logs, LOGS 패널의 Log Level 제어와 저장 로그 화면을 연결한다", () => {
   const source = fs.readFileSync(new URL("../src/App.jsx", import.meta.url), "utf8");
   const styles = fs.readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
+  assert.match(source, /function isTransientRequestError\(error\)/);
   assert.match(source, /import LiveLogs from "\.\/live-logs\/LiveLogs"/);
-  assert.match(source, /import \{ recordedLevels \} from "\.\/live-logs\/liveLogsModel"/);
   assert.match(source, /const \[liveLogsOpen, setLiveLogsOpen\] = useState\(false\)/);
   assert.match(source, /terminal[^]*Live Logs[^]*query_stats[^]*Data Viewer[^]*edit[^]*Edit[^]*delete[^]*Delete/);
   assert.doesNotMatch(source, />Logs<\/Link>/);
-  assert.match(source, /LOGGING CONTROLS/);
-  assert.match(source, /Records \{recordedLevels\(config\.log\?\.level\)\.join\(", "\)\} messages/);
-  assert.match(source, /File Limit[^]*config\.log\?\.maxFiles/);
+  assert.match(source, /<h2>LOGS<\/h2>/);
+  assert.match(source, /neo-logging-controls__item--level[^]*aria-label="Log level"/);
+  assert.match(source, /updateLogLevel\(name, \{ revision: job\.revision, level: logLevel \}/);
+  assert.match(source, /aria-label="Log level"/);
+  assert.match(source, /ROTATION[^]*logSizeLabel\(loggingPolicy\.maxFileBytes\)[^]*loggingPolicy\.maxFiles/);
+  assert.doesNotMatch(source, /Records \$\{recordedLevels/);
   assert.match(source, /to=\{`\/logs\/\$\{encodeURIComponent\(name\)\}`\}[^]*View Logs/);
   assert.match(source, /<LiveLogs jobName=\{name\} open=\{liveLogsOpen\}/);
   assert.match(styles, /\.neo-logging-controls/);
   assert.match(styles, /\.neo-button--primary-outline/);
+});
+
+test("초기 Job 선택, skip 초기화와 로그 파일 기본 읽기 UX를 제공한다", () => {
+  const source = fs.readFileSync(new URL("../src/App.jsx", import.meta.url), "utf8");
+  const styles = fs.readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
+  assert.match(source, /locationPathRef\.current === "\/" && initialName\) navigateRef\.current\(`\/jobs\/\$\{encodeURIComponent\(initialName\)\}`/);
+  assert.match(source, /api\.jobs\.clearOverrun\(name/);
+  // app.run() increments jobRevision, which already reloads the detail. A
+  // second explicit reload would abort the first Job/last-run request and
+  // make the side panel show a spurious request-failed toast.
+  const clearOverrunSource = source.slice(source.indexOf("const clearOverrun = async"), source.indexOf("return <main", source.indexOf("const clearOverrun = async")));
+  assert.doesNotMatch(clearOverrunSource, /loaded\.reload\(\)/);
+  assert.match(source, /SKIPPED \{lastRun\.overrunCount\}/);
+  assert.match(source, /label="Clear skipped cycle monitoring"/);
+  assert.match(source, /icon="delete_sweep"/);
+  assert.match(source, /const initialFile = files\[0\]\.name/);
+  assert.match(source, /void read\("content", initialFile\)/);
+  assert.match(source, /title="Read the current log file"/);
+  assert.match(source, /title="Read this log and its rotated files"/);
+  assert.match(source, /title="Read the most recent log lines"/);
+  assert.match(source, /onBack=\{\(\) => navigate\(name \? `\/jobs\/\$\{encodeURIComponent\(name\)\}` : "\/"\)\}/);
+  assert.match(styles, /\.neo-side \{[^}]*width: 100%;[^}]*min-width: 0;/);
+  assert.match(styles, /\.neo-side__section \{[^}]*padding: 0 12px;/);
+  assert.match(styles, /\.neo-job-row \{[^}]*padding-right: 12px;/);
+  assert.match(styles, /\.neo-job-row \{ display: grid; width: 100%;[^}]*grid-template-columns: minmax\(0, 1fr\) 28px;/);
+  assert.match(styles, /\.neo-job-row__select \{[^}]*min-width: 0;[^}]*text-overflow: ellipsis;/);
+  assert.match(styles, /\.neo-button\.is-active,[\s\S]*background: var\(--neo-primary\);[\s\S]*font-weight: 600;/);
+  assert.match(styles, /\.neo-overview-card__overrun/);
+  assert.match(styles, /border: 1px solid #ff9800/);
+});
+
+test("Edit 경로 전환은 side Job 재선택 메시지로 되돌아가지 않는다", () => {
+  const source = fs.readFileSync(new URL("../src/App.jsx", import.meta.url), "utf8");
+  assert.match(source, /const locationPathRef = useRef\(location\.pathname\);/);
+  assert.match(source, /const navigateRef = useRef\(navigate\);/);
+  assert.match(source, /locationPathRef\.current = location\.pathname;/);
+  assert.match(source, /navigateRef\.current = navigate;/);
+  assert.match(source, /function routeJobName\(pathname\)/);
+  assert.match(source, /message\.surface === "side"/);
+  assert.match(source, /channel\.ready\(surface\)/);
+  assert.match(source, /locationPathRef\.current === "\/" && initialName/);
+  assert.match(source, /\}, \[notify, surface\]\);/);
+  assert.match(source, /\}, \[refresh, surface\]\);/);
+  assert.doesNotMatch(source, /\}, \[navigate, refresh, surface\]\);/);
+  assert.doesNotMatch(source, /\}, \[location\.pathname, navigate, notify, surface\]\);/);
+});
+
+test("모든 API 실패는 패널 오류 대신 자동으로 사라지는 알림으로 표시한다", () => {
+  const source = fs.readFileSync(new URL("../src/App.jsx", import.meta.url), "utf8");
+  const styles = fs.readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
+  assert.match(source, /setError\(null\);\s*notify\(failure\);/);
+  assert.match(source, /function ToastLayer\(\)[\s\S]*window\.setTimeout\(\(\) => dismissToast\(toast\.id\), 5000\)/);
+  assert.match(source, /function Notice\(\{ error, status, children \}\)[\s\S]*if \(error\) notify\(error\);[\s\S]*if \(error \|\| !children\) return null/);
+  assert.match(source, /app\.notify\(failure\);/);
+  assert.match(source, /<ToastLayer \/>/);
+  assert.match(styles, /\.neo-toast-stack/);
+});
+
+test("LS Job Configuration은 retry 입력을 숨기고 정해진 주기마다 연결을 다시 시도한다", () => {
+  const source = fs.readFileSync(new URL("../src/App.jsx", import.meta.url), "utf8");
+  const lsProduct = fs.readFileSync(new URL("../../products/ls/frontend/model.mjs", import.meta.url), "utf8");
+  const collector = fs.readFileSync(new URL("../../collector-go/cmd/neo-dbus-collector/main.go", import.meta.url), "utf8");
+  assert.match(source, /retryConfigurable as productRetryConfigurable/);
+  assert.match(source, /\{productRetryConfigurable \? <>\s*<Field label="Retry Initial/);
+  assert.match(lsProduct, /export const retryConfigurable = false;/);
+  assert.match(collector, /if connection == nil \{[\s\S]*connection, connectError = d\.connectDBus\(name\)/);
+  assert.doesNotMatch(collector, /func \(d \*daemon\) connectDBus\(ctx context\.Context, config jobConfig/);
+});
+
+test("LS Tag 표는 Signed 변환을 계산 Transform보다 먼저 표시한다", () => {
+  const source = fs.readFileSync(new URL("../src/App.jsx", import.meta.url), "utf8");
+  assert.match(source, /neo-fixed-tag-list__name" \/><col className="neo-fixed-tag-list__signed" \/><col className="neo-fixed-tag-list__transform"/);
+  assert.match(source, /<th>TAG NAME<\/th><th>SIGNED<\/th><th>TRANSFORM<\/th>/);
 });
 
 test("Start와 Stop은 현재 Side 목록을 다시 읽지 않고 응답 Job 상태를 반영한다", () => {
@@ -175,7 +256,7 @@ test("새 Job의 Database Mapping은 빈 직접 입력 콤보박스로 시작한
 test("새 Job은 Interface 목록이 비어도 Database 기본값을 복사한다", () => {
   const source = fs.readFileSync(new URL("../src/App.jsx", import.meta.url), "utf8");
   assert.match(source, /const server = \(servers \|\| \[\]\)\.find/);
-  assert.match(source, /setConfig\(createDefaultJobConfig\(provider, server \|\| \{ name: databaseServer \}, createInitialMethodCalls\(provider\)\)\)/);
+  assert.match(source, /setConfig\(createDefaultJobConfig\(provider, server \|\| \{ name: databaseServer \}, createInitialMethodCalls\(provider\), intervalDefaultMs\)\)/);
   assert.match(source, /createDefaultJobConfig\(provider, server/);
 });
 
@@ -543,7 +624,7 @@ test("참조 결과가 바뀌면 사용자 Interface Delete는 다시 상세를 
   await flush();
   assert.deepEqual(calls, ["alpha"]);
   assert.notEqual(button(renderer.root, "Delete DBus Interface").props.disabled, true);
-  assert.match(JSON.stringify(renderer.toJSON()), /line-a/);
+  assert.doesNotMatch(JSON.stringify(renderer.toJSON()), /line-a/);
 
   await act(async () => { button(renderer.root, "Delete DBus Interface").props.onClick(); });
   await flush();
@@ -1262,7 +1343,7 @@ test("Job Configuration 모달은 Apply한 값을 summary에 반영하고 Edit �
     assert.equal(jobNameInput().props.value, "job-3");
 
     await act(async () => { jobNameInput().props.onChange({ target: { value: "custom-job" } }); });
-    const intervalInput = renderer.root.findAll((node) => node.type === "input" && node.props.min === "1000")[0];
+    const intervalInput = renderer.root.findAll((node) => node.type === "input" && node.props["aria-label"] === "Run Interval (ms)")[0];
     const savePolicySelect = renderer.root.findAll((node) => node.type === "select" && node.props.value === "perMethod")[0];
     await act(async () => {
       intervalInput.props.onChange({ target: { value: "2500" } });

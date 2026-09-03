@@ -227,6 +227,28 @@ async function testStopAndUninstallPrintNormalFailureEnvelope(root) {
   }
 }
 
+async function testLsPackageLifecycleUsesOneDaemonAndDoesNotReplayJobStart(root) {
+  const manager = lifecycleManager({
+    line: { configState: 'installed', executionState: 'running', controllerState: 'RUNNING' },
+  });
+  manager.isLs = true;
+  manager.installPackageService = (callback) => { manager.calls.push(['installPackageService']); callback(null); };
+  manager.startDaemonForPackage = (callback) => { manager.calls.push(['startDaemonForPackage']); callback(null); };
+  manager.stopDaemonForPackage = (callback) => { manager.calls.push(['stopDaemonForPackage']); callback(null); };
+  manager.uninstallDaemonForPackage = (callback) => { manager.calls.push(['uninstallDaemonForPackage']); callback(null); };
+  const lifecycle = createLifecycle(manager, path.join(root, 'data', 'ls-package-state.json'), { print() {} });
+  assert.deepEqual(await invoke(lifecycle.install), []);
+  assert.deepEqual(await invoke(lifecycle.stop), ['line']);
+  assert.deepEqual(await invoke(lifecycle.start), ['line']);
+  assert.equal(manager.calls.some(([method]) => method === 'start'), false);
+  assert.equal(manager.calls.some(([method]) => method === 'startDaemonForPackage'), true);
+  assert.deepEqual(await invoke(lifecycle.uninstall), ['line']);
+  assert.equal(manager.calls.some(([method]) => method === 'uninstallDaemonForPackage'), true);
+  const finalDaemonStop = manager.calls.map(([method]) => method).lastIndexOf('stopDaemonForPackage');
+  const deleteIndex = manager.calls.map(([method]) => method).lastIndexOf('delete');
+  assert.ok(finalDaemonStop >= 0 && finalDaemonStop < deleteIndex, 'LS daemon must stop before Job config removal');
+}
+
 async function run() {
   const root = setupRoot('neo-job-scripts-');
   try {
@@ -235,6 +257,7 @@ async function run() {
     await testLifecycleAcquireConflictAggregatesAndRecovers(root);
     await testLifecycleReleaseFailurePreservesOperationError(root);
     await testStopAndUninstallPrintNormalFailureEnvelope(root);
+    await testLsPackageLifecycleUsesOneDaemonAndDoesNotReplayJobStart(root);
     const statePath = path.join(root, 'data', 'package-stop-state.json');
     const manager = lifecycleManager({
       config: { configState: 'config-only', executionState: 'stopped', controllerState: 'NOT_INSTALLED' },
@@ -243,8 +266,13 @@ async function run() {
       starting: { configState: 'installed', executionState: 'running', controllerState: 'STARTING' },
       stopping: { configState: 'installed', executionState: 'running', controllerState: 'STOPPING' },
     });
-    const lifecycle = createLifecycle(manager, statePath, { print() {} });
+    let installPrepared = 0;
+    const lifecycle = createLifecycle(manager, statePath, {
+      print() {},
+      beforeInstall() { installPrepared += 1; },
+    });
     assert.deepEqual(await invoke(lifecycle.install), ['config']);
+    assert.equal(installPrepared, 1);
     assert.deepEqual(manager.calls, [['install', 'config']]);
 
     assert.deepEqual(await invoke(lifecycle.stop), ['config', 'running', 'starting', 'stopped', 'stopping']);

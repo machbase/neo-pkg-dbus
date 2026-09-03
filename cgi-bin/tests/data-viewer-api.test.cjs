@@ -114,6 +114,7 @@ function fixture(options) {
     close() { calls.push({ type: 'close' }); },
   };
   const viewer = createDataViewer({
+    productPolicy: settings.productPolicy,
     jobRepository: settings.jobRepository || {
       read(name) {
         if (name === 'line-a') return jobDocument(name);
@@ -363,6 +364,12 @@ async function run() {
   assert.deepEqual(await call(tags.viewer, 'tags', { server: 'local-db', table: 'TAG', limit: '1' }), {
     server: 'local-db', table: 'TAG', tags: [{ id: '1', name: '%MB3' }], assetHierarchy: null, limited: true, limit: 1,
   });
+
+  const lsScopedTags = fixture({ productPolicy: { target: 'ls' } });
+  assert.deepEqual(await call(lsScopedTags.viewer, 'tags', { job: 'line-b', server: 'local-db', table: 'TAG' }), {
+    server: 'local-db', table: 'TAG', tags: [{ id: null, name: 'OTHER-JOB-TAG', treePath: ['Call 1', 'OTHER-JOB-TAG'] }], assetHierarchy: null, limited: false, limit: 1,
+  });
+  assert.equal(lsScopedTags.calls.some((entry) => entry.type === 'query'), false, 'LS Tag 목록은 shared table metadata를 읽지 않습니다.');
 
   const alternateRoles = fixture({
     columns: [

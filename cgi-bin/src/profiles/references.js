@@ -40,6 +40,10 @@ class ReferenceAnalyzer {
   constructor(options) {
     this.jobDir = path.join(options.cgiRoot, 'conf.d', 'jobs');
     this.controller = options.controller;
+    // LS has a single service process, so its per-Job state is owned by the
+    // collector runtime rather than by _dbu_<job>. Generic keeps controller
+    // status as its source of truth.
+    this.stateInspector = options.stateInspector || null;
   }
 
   documents() {
@@ -144,7 +148,25 @@ class ReferenceAnalyzer {
         if (pending === 0) callback(null, results);
       };
       try {
-        this.controller.status(`_dbu_${reference.name}`, done);
+        if (this.stateInspector) {
+          this.stateInspector(reference.name, (statusError, state) => {
+            if (statusError) { done(statusError); return; }
+            const controllerState = state && state.controllerState;
+            const known = ['RUNNING', 'STARTING', 'STOPPING', 'STOPPED', 'FAILED', 'NOT_INSTALLED'].includes(controllerState);
+            if (!known) {
+              done(new Error((state && state.controllerDetail) || 'LS collector Job state is unknown.'));
+              return;
+            }
+            results[index] = {
+              ...reference,
+              controllerState,
+              controllerDetail: state.controllerDetail || null,
+              executionState: executionState(controllerState),
+            };
+            pending -= 1;
+            if (pending === 0) callback(null, results);
+          });
+        } else this.controller.status(`_dbu_${reference.name}`, done);
       } catch (statusError) {
         done(statusError);
       }

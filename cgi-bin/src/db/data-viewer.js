@@ -242,6 +242,7 @@ function decodeCursor(value) {
 function createDataViewer(options) {
   const settings = options || {};
   const store = settings.serverStore || createServerStore({ cgiRoot: settings.cgiRoot });
+  const jobScopedTags = settings.productPolicy?.target === 'ls';
   let jobs = settings.jobRepository || null;
   const connectionFactory = settings.connectionFactory || defaultConnectionFactory;
 
@@ -379,9 +380,23 @@ function createDataViewer(options) {
         sourceMismatch(name, '요청 stringValueColumn이 Job DB 설정과 다릅니다.');
       }
     }
+    const tagEntries = [];
+    document.methodCalls.forEach((call, callIndex) => {
+      const callLabel = String(call?.name || call?.id || `Call ${callIndex + 1}`).trim() || `Call ${callIndex + 1}`;
+      const groups = Array.isArray(call.outputSelections)
+        ? call.outputSelections.map((selection) => selection.tags || [])
+        : [call.tags || []];
+      groups.flat().forEach((tag) => {
+        const tagName = String(tag?.name || '').trim();
+        if (tagName && !tagEntries.some((item) => item.name === tagName)) {
+          tagEntries.push({ name: tagName, treePath: [callLabel, tagName] });
+        }
+      });
+    });
     return {
       name,
       names: requestedNames,
+      tagEntries,
       database: { server: database.server, table, valueColumn, stringValueColumn },
     };
   }
@@ -576,6 +591,28 @@ function createDataViewer(options) {
     tags(params, callback) {
       let selectedJob;
       try { selectedJob = jobDataRequest(params, false); } catch (failure) { callback(failure); return; }
+      // LS has one shared table, so a table-level Tag scan would include rows
+      // owned by every Job. Its Data Viewer must instead start from the Tags
+      // configured for the requested Job. Those Tags should remain visible
+      // even before their first row has created table metadata.
+      if (jobScopedTags) {
+        const tagEntries = selectedJob.tagEntries || [];
+        let limit = tagEntries.length;
+        if (params.limit !== undefined && params.limit !== '') {
+          try {
+            if (tagEntries.length) limit = positiveInteger(params.limit, tagEntries.length, tagEntries.length, 'limit');
+            else if (Number(params.limit) !== 0) throw invalid('limit은 Tag가 없을 때 0이어야 합니다.');
+          } catch (failure) { callback(failure); return; }
+        }
+        return callback(null, {
+          server: selectedJob.database.server,
+          table: selectedJob.database.table,
+          tags: tagEntries.slice(0, limit).map((tag) => ({ id: null, name: tag.name, treePath: tag.treePath })),
+          assetHierarchy: null,
+          limited: tagEntries.length > limit,
+          limit,
+        });
+      }
       let limit;
       try { limit = positiveInteger(params.limit, 200, MAX_TAGS, 'limit'); } catch (failure) { callback(failure); return; }
       withServer(selectedJob.database.server, (connection, server) => {

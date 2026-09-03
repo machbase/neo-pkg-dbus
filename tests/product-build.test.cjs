@@ -23,6 +23,13 @@ function makePackageFixture() {
   fs.mkdirSync(path.join(root, 'cgi-bin', 'conf.d', 'jobs'), { recursive: true });
   fs.copyFileSync(path.join(packageRoot, 'package.json'), path.join(root, 'package.json'));
   fs.copyFileSync(path.join(packageRoot, 'cgi-bin', 'package.json'), path.join(root, 'cgi-bin', 'package.json'));
+  fs.mkdirSync(path.join(root, 'scripts'), { recursive: true });
+  for (const name of ['install.js', 'start.js', 'stop.js', 'uninstall.js']) {
+    fs.copyFileSync(path.join(packageRoot, 'scripts', name), path.join(root, 'scripts', name));
+  }
+  for (const name of ['neo-dbus-launcher.js', 'neo-dbus-control.js']) {
+    fs.copyFileSync(path.join(packageRoot, 'cgi-bin', name), path.join(root, 'cgi-bin', name));
+  }
   copyDirectory(path.join(packageRoot, 'products'), path.join(root, 'products'));
   fs.writeFileSync(path.join(root, 'cgi-bin', 'conf.d', 'jobs', 'keep.json'), '{"name":"keep"}');
   return root;
@@ -46,7 +53,7 @@ test('루트와 CGI manifest는 하나의 package identity를 공유한다', () 
   const identity = assertManifestIdentity(packageRoot);
   const rootManifest = JSON.parse(fs.readFileSync(path.join(packageRoot, 'package.json'), 'utf8'));
   const cgiManifest = JSON.parse(fs.readFileSync(path.join(packageRoot, 'cgi-bin', 'package.json'), 'utf8'));
-  assert.deepEqual(identity, { name: 'neo-pkg-dbus', version: '1.0.0', minServerVersion: '8.5.8' });
+  assert.deepEqual(identity, { name: 'neo-pkg-dbus', version: '1.0.1', minServerVersion: '8.5.8' });
   for (const field of ['name', 'version', 'minServerVersion']) {
     assert.equal(rootManifest[field], cgiManifest[field]);
   }
@@ -80,6 +87,11 @@ test('target 전환은 생성 영역만 바꾸고 사용자 설정을 보존한�
     assert.match(fs.readFileSync(path.join(root, 'main.html'), 'utf8'), /data-product="ls"/);
     assert.equal(JSON.parse(fs.readFileSync(path.join(root, 'cgi-bin', 'provider.json'), 'utf8')).id, 'ls');
     assert.equal(require(path.join(root, 'cgi-bin', 'product', 'index.js')).target, 'ls');
+    for (const file of [
+      path.join(root, 'scripts', 'install.js'), path.join(root, 'scripts', 'start.js'),
+      path.join(root, 'scripts', 'stop.js'), path.join(root, 'scripts', 'uninstall.js'),
+      path.join(root, 'cgi-bin', 'neo-dbus-launcher.js'), path.join(root, 'cgi-bin', 'neo-dbus-control.js'),
+    ]) assert.equal(fs.statSync(file).mode & 0o777, 0o755, `${file} must be executable in a release artifact`);
 
     buildPackage({ root, target: 'generic', runFrontend: fakeFrontend });
     const genericModule = path.join(root, 'cgi-bin', 'product', 'index.js');

@@ -17,7 +17,9 @@ async function run() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'neo-settings-default-'));
   const file = path.join(root, 'conf.d', 'settings.json');
   try {
-    assert.equal(loadSettings(file).defaults.database.server, 'localhost');
+    const initial = loadSettings(file);
+    assert.equal(initial.defaults.database.server, 'localhost');
+    assert.deepEqual(initial.logging, { maxFileBytes: 1024 * 1024, maxFiles: 3, summaryIntervalMs: 60 * 60 * 1000 });
     assert.equal(fs.existsSync(file), false);
 
     const manager = new SettingsManager({ cgiRoot: root });
@@ -26,6 +28,7 @@ async function run() {
     });
     assert.deepEqual(saved.limits, { maxGeneratedTagsPerCall: 250, maxBufferedRowsPerCycle: 2000 });
     assert.equal(saved.defaults.database.server, 'localhost');
+    assert.deepEqual(saved.logging, initial.logging);
     assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), saved);
 
     fs.writeFileSync(file, '{"schemaVersion":1,"limits":{"maxGeneratedTagsPerCall":0}}', 'utf8');

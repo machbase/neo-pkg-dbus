@@ -84,6 +84,7 @@ async function run() {
       schemaVersion: 1,
       limits: { maxGeneratedTagsPerCall: 1000, maxBufferedRowsPerCycle: 10000 },
       defaults: { database: { server: 'localhost' } },
+      logging: { maxFileBytes: 1024 * 1024, maxFiles: 3, summaryIntervalMs: 60 * 60 * 1000 },
       provider: null,
     });
     const updatedSettings = await call(settings, 'update', {

@@ -3,7 +3,12 @@
 const fs = require('fs');
 const path = require('path');
 const process = require('process');
-const { writeJsonAtomic } = require('../cgi-bin/src/config/atomic-json.js');
+// JSH package command resolution does not resolve CommonJS `../` paths in a
+// script the same way Node does.  Use the executing script's absolute virtual
+// path so `pkg run` works both in Neo JSH and in local Node tests.
+const SCRIPT_ROOT = typeof __dirname === 'string' && __dirname
+  ? __dirname : path.resolve(path.dirname(process.argv[1] || '.'));
+const { writeJsonAtomic } = require(path.join(SCRIPT_ROOT, '..', 'cgi-bin', 'src', 'config', 'atomic-json.js'));
 
 function defaultPrint(message) {
   if (console.println) console.println(message);
@@ -58,6 +63,7 @@ function createLifecycle(manager, statePath, options) {
   const settings = options || {};
   const print = settings.print || defaultPrint;
   const exit = settings.exit || process.exit.bind(process);
+  const beforeInstall = settings.beforeInstall || (() => {});
 
   function packageFailure(failure) {
     if (failure && failure.code === 'PACKAGE_LIFECYCLE_FAILED') return failure;
@@ -124,13 +130,25 @@ function createLifecycle(manager, statePath, options) {
   }
 
   function install(callback) {
-    manager.list((listError, jobs) => {
+    try { beforeInstall(); } catch (prepareError) {
+      finish(callback, prepareError, [], 'installed');
+      return;
+    }
+    const installJobs = () => manager.list((listError, jobs) => {
       if (listError) { finish(callback, listError, [], 'installed'); return; }
       const names = jobs.filter((job) => job.configState === 'config-only').map((job) => job.name);
       eachSeries(names, (name, next) => manager.install(name, next), (installError) => {
         finish(callback, installError, names, 'installed');
       });
     });
+    if (manager.isLs === true && typeof manager.installPackageService === 'function') {
+      manager.installPackageService((installError) => {
+        if (installError) { finish(callback, installError, [], 'installed'); return; }
+        installJobs();
+      });
+      return;
+    }
+    installJobs();
   }
 
   function stop(callback) {
@@ -171,9 +189,15 @@ function createLifecycle(manager, statePath, options) {
         return;
       }
       eachSeriesCollect(targetNames, session.stopForPackage, (stopFailures) => {
-        finishLifecycleSession(
-          session, callback, aggregateFailure([...unsafe, ...stopFailures]), targetNames, 'stopped',
-        );
+        const allFailures = [...unsafe, ...stopFailures];
+        if (allFailures.length || typeof manager.stopDaemonForPackage !== 'function') {
+          finishLifecycleSession(session, callback, aggregateFailure(allFailures), targetNames, 'stopped');
+          return;
+        }
+        manager.stopDaemonForPackage((daemonError) => {
+          if (daemonError) allFailures.push(failureRecord(daemonError, 'ls-collector'));
+          finishLifecycleSession(session, callback, aggregateFailure(allFailures), targetNames, 'stopped');
+        });
       });
     });
   }
@@ -191,6 +215,18 @@ function createLifecycle(manager, statePath, options) {
       const names = checkpoint === null
         ? [...startable].sort()
         : checkpoint.filter((name) => startable.has(name)).sort();
+      if (manager.isLs === true && typeof manager.startDaemonForPackage === 'function') {
+        manager.startDaemonForPackage((startError) => {
+          if (!startError) {
+            try { clearCheckpoint(); } catch (clearError) {
+              finish(callback, clearError, names, 'started');
+              return;
+            }
+          }
+          finish(callback, startError, names, 'started');
+        });
+        return;
+      }
       eachSeries(names, (name, next) => manager.start(name, next), (startError) => {
         if (!startError) {
           try { clearCheckpoint(); } catch (clearError) {
@@ -223,7 +259,7 @@ function createLifecycle(manager, statePath, options) {
         );
         return;
       }
-      eachSeriesCollect(running, session.stopForPackage, (stopFailures) => {
+      const deleteJobs = () => eachSeriesCollect(running, session.stopForPackage, (stopFailures) => {
         const stopError = aggregateFailure(stopFailures);
         if (stopError) {
           finishLifecycleSession(session, callback, stopError, names, 'uninstalled');
@@ -231,35 +267,144 @@ function createLifecycle(manager, statePath, options) {
         }
         eachSeriesCollect(names, session.delete, (deleteFailures) => {
           const deleteError = aggregateFailure(deleteFailures);
-          if (!deleteError) {
+          if (deleteError) {
+            finishLifecycleSession(session, callback, deleteError, names, 'uninstalled');
+            return;
+          }
+          const finishUninstall = (daemonError) => {
+            if (daemonError) {
+              finishLifecycleSession(session, callback, aggregateFailure([failureRecord(daemonError, 'ls-collector')]), names, 'uninstalled');
+              return;
+            }
             try { clearCheckpoint(); } catch (clearError) {
               finishLifecycleSession(session, callback, clearError, names, 'uninstalled');
               return;
             }
-          }
-          finishLifecycleSession(session, callback, deleteError, names, 'uninstalled');
+            finishLifecycleSession(session, callback, null, names, 'uninstalled');
+          };
+          if (manager.isLs === true && typeof manager.uninstallDaemonForPackage === 'function') {
+            manager.uninstallDaemonForPackage(finishUninstall);
+          } else finishUninstall(null);
         });
       });
+      // Unlike generic's independent Job services, LS has one data-plane
+      // process. Stop it before removing any Job snapshot/config it may read.
+      if (manager.isLs === true && typeof manager.stopDaemonForPackage === 'function') {
+        manager.stopDaemonForPackage((daemonError) => {
+          if (daemonError) {
+            finishLifecycleSession(session, callback, aggregateFailure([failureRecord(daemonError, 'ls-collector')]), names, 'uninstalled');
+            return;
+          }
+          deleteJobs();
+        });
+      } else deleteJobs();
     });
   }
 
   return { install, start, stop, uninstall };
 }
 
+function ensureLsCollectorExecutable(cgiRoot) {
+  const productFile = path.join(cgiRoot, 'product', 'index.js');
+  if (!fs.existsSync(productFile) || require(productFile).target !== 'ls') return;
+  const files = [
+    path.join(cgiRoot, 'bin', 'neo-dbus-collector'),
+    path.join(cgiRoot, 'neo-dbus-launcher.js'),
+    path.join(cgiRoot, 'neo-dbus-control.js'),
+  ];
+  if (files.some((file) => !fs.existsSync(file) || !fs.statSync(file).isFile())) {
+    const failure = new Error('LS collector executable or JSH launcher files are missing from this package build.');
+    failure.code = 'PACKAGE_INSTALL_FAILED';
+    throw failure;
+  }
+  if (typeof fs.chmodSync !== 'function') {
+    const failure = new Error('LS collector executable permissions cannot be set by this JSH runtime.');
+    failure.code = 'PACKAGE_INSTALL_FAILED';
+    throw failure;
+  }
+  files.forEach((file) => fs.chmodSync(file, 0o755));
+}
+
 function defaultLifecycle() {
-  const root = path.resolve(path.dirname(process.argv[1]), '..');
-  const cgiRoot = path.join(root, 'cgi-bin');
+  const cgiRoot = defaultCgiRoot();
   const { JobManager } = require(path.join(cgiRoot, 'src', 'jobs', 'manager.js'));
   return createLifecycle(
     new JobManager({ cgiRoot }),
     path.join(cgiRoot, 'data', 'package-stop-state.json'),
+    { beforeInstall: () => ensureLsCollectorExecutable(cgiRoot) },
   );
+}
+
+function defaultCgiRoot() {
+  const root = path.resolve(path.dirname(process.argv[1]), '..');
+  return path.join(root, 'cgi-bin');
+}
+
+// `pkg run` executes a package script in a short-lived child JSH engine.  The
+// service module is callback based, so an LS package lifecycle must use the
+// synchronous servicectl command: otherwise that child can exit before the
+// service RPC callback has completed.  Generic keeps its existing per-Job
+// callback lifecycle unchanged.
+function runLsPackageAction(action) {
+  const cgiRoot = defaultCgiRoot();
+  const productFile = path.join(cgiRoot, 'product', 'index.js');
+  if (!fs.existsSync(productFile) || require(productFile).target !== 'ls') return false;
+
+  ensureLsCollectorExecutable(cgiRoot);
+  const launcher = path.join(cgiRoot, 'neo-dbus-launcher.js');
+  const serviceName = '_dbu_collector';
+  const exec = (...args) => {
+    const result = process.exec(...args);
+    if (result instanceof Error) throw result;
+    return result;
+  };
+  const stopNative = () => {
+    // The controller can lose the JSH launcher while its native child retains
+    // inherited pipes.  Kill the exact collector command first so stop never
+    // waits indefinitely and no orphan keeps collecting after package stop.
+    const result = process.exec('@pkill', '-TERM', '-f', '/cgi-bin/bin/neo-dbus-collector');
+    if (result instanceof Error) throw result;
+  };
+
+  if (action === 'install') {
+    if (exec('servicectl', 'install', '--name', serviceName,
+      '--working-dir', cgiRoot, '--executable', launcher, '--enable') !== 0) {
+      throw new Error('LS collector service installation failed.');
+    }
+  } else if (action === 'start') {
+    if (exec('servicectl', 'start', serviceName) !== 0) throw new Error('LS collector service start failed.');
+  } else if (action === 'stop') {
+    stopNative();
+    const result = exec('servicectl', 'stop', serviceName);
+    if (result !== 0) defaultPrint('[WARN] LS collector service was already stopped or unavailable.');
+  } else if (action === 'uninstall') {
+    stopNative();
+    exec('servicectl', 'stop', serviceName);
+    const result = exec('servicectl', 'uninstall', serviceName);
+    if (result !== 0) defaultPrint('[WARN] LS collector service was already uninstalled or unavailable.');
+  } else throw new Error(`Unsupported package lifecycle action: ${action}`);
+  defaultPrint(`[INFO] LS collector ${action} completed`);
+  return true;
+}
+
+function packageAction(action) {
+  try {
+    if (runLsPackageAction(action)) return;
+  } catch (failure) {
+    defaultPrint(JSON.stringify({ ok: false, code: 'PACKAGE_LIFECYCLE_FAILED', reason: failure.message || String(failure) }));
+    process.exit(1);
+    return;
+  }
+  defaultLifecycle()[action]();
 }
 
 module.exports = {
   createLifecycle,
-  install(callback) { defaultLifecycle().install(callback); },
-  start(callback) { defaultLifecycle().start(callback); },
-  stop(callback) { defaultLifecycle().stop(callback); },
-  uninstall(callback) { defaultLifecycle().uninstall(callback); },
+  defaultCgiRoot,
+  ensureLsCollectorExecutable,
+  runLsPackageAction,
+  install(callback) { if (callback) defaultLifecycle().install(callback); else packageAction('install'); },
+  start(callback) { if (callback) defaultLifecycle().start(callback); else packageAction('start'); },
+  stop(callback) { if (callback) defaultLifecycle().stop(callback); else packageAction('stop'); },
+  uninstall(callback) { if (callback) defaultLifecycle().uninstall(callback); else packageAction('uninstall'); },
 };

@@ -142,6 +142,33 @@ function run() {
   assert.equal(maximumGet.replies.length, 1);
   assert.equal(calls.find((call) => call.name === 'maximumData').args[0].names.length, 100);
 
+  const profileChangeRequired = harness({ query: { name: 'local-db' }, body: { name: 'local-db', host: 'localhost', port: 5656, user: 'sys', password: 'secret' } });
+  const activeRuntime = { activeNames() { return ['line-a', 'line-b']; } };
+  createDbApi({
+    http: profileChangeRequired.http,
+    method: () => 'PUT',
+    store: {}, viewer: {}, lsRuntime: activeRuntime,
+  }).run('server');
+  assert.equal(profileChangeRequired.failures.length, 1);
+  assert.equal(profileChangeRequired.failures[0].failure.code, 'LS_DATABASE_RESTART_REQUIRED');
+  assert.equal(profileChangeRequired.failures[0].status, 409);
+
+  const profileChange = harness({ query: { name: 'local-db' }, body: { name: 'local-db', host: 'localhost', port: 5656, user: 'sys', password: 'secret', restartRunningJobs: true } });
+  let reloaded = false;
+  createDbApi({
+    http: profileChange.http,
+    method: () => 'PUT',
+    store: { update(_name, payload, callback) { callback(null, { name: payload.name, defaultTable: 'TAG' }); } },
+    viewer: {},
+    lsRuntime: {
+      activeNames() { return ['line-a']; },
+      reloadAllActive(callback) { reloaded = true; callback(null, { names: ['line-a'], reloaded: true }); },
+    },
+  }).run('server');
+  assert.equal(profileChange.failures.length, 0);
+  assert.equal(profileChange.replies[0].status, 200);
+  assert.equal(reloaded, true);
+
   const wrongMethod = harness();
   createDbApi({ http: wrongMethod.http, method: () => 'POST', store: {}, viewer: {} }).run('table-data');
   assert.equal(wrongMethod.failures.length, 1);

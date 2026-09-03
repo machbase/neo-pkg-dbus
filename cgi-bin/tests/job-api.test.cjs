@@ -50,6 +50,9 @@ function run() {
   const stateFile = path.join(temporary, 'controller-state.json');
   try {
     fs.cpSync(path.resolve(__dirname, '..'), cgiRoot, { recursive: true });
+    // These contracts use a configurable generic Interface fixture.  The
+    // checked-in delivery artifact may currently be an LS product build.
+    fs.rmSync(path.join(cgiRoot, 'product'), { recursive: true, force: true });
     fs.rmSync(path.join(cgiRoot, 'conf.d', 'jobs'), { recursive: true, force: true });
     fs.mkdirSync(path.join(cgiRoot, 'conf.d', 'jobs'), { recursive: true });
     fs.mkdirSync(path.join(cgiRoot, 'conf.d', 'interfaces'), { recursive: true });

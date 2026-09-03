@@ -1,7 +1,7 @@
 'use strict';
 const path = require('path'); const process = require('process');
 const marker = `${path.sep}cgi-bin${path.sep}`; const root = process.argv[1].slice(0, process.argv[1].indexOf(marker) + marker.length - 1);
-const http = require(path.join(root, 'src', 'cgi', 'http.js')); const { InterfaceManager } = require(path.join(root, 'src', 'interfaces', 'manager.js'));
+const { http, InterfaceManager } = require(path.join(root, 'runtime.js'));
 const method = String((process.env.get && process.env.get('REQUEST_METHOD')) || process.env.REQUEST_METHOD || ''); const factory = http.createFactory(() => new InterfaceManager({ cgiRoot: root }));
 function done(status) { return (failure, value) => failure ? http.fail(failure) : http.reply(status, { ok: true, data: value }); }
 function invalid(failure) { return Object.assign(new Error(failure && failure.message ? failure.message : 'DBus Interface 요청이 잘못되었습니다.'), { code: 'DBUS_INTERFACE_INVALID', details: (failure && failure.details) || {} }); }

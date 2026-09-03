@@ -47,4 +47,15 @@ code(() => validateJobConfig({ ...config(), profileId: 'legacy' }, { interfaceSt
 code(() => validateJobConfig({ ...config(), dbus: { busType: 'system', destination: 'example.device' } }, { interfaceStore: interfaceStore(), limits }));
 code(() => validateJobConfig({ ...config(), methodCalls: [{ ...config().methodCalls[0], interfaceId: 'missing' }] }, { interfaceStore: interfaceStore(), limits }));
 code(() => validateJobConfig({ ...config(), methodCalls: [{ ...config().methodCalls[0], inputs: { address: 'bad' } }] }, { interfaceStore: interfaceStore(), limits }));
+
+const lsTagCount = 10001;
+const largeLsLikeCall = {
+  ...config().methodCalls[0],
+  tags: Array.from({ length: lsTagCount }, (_unused, index) => ({ name: `MB${index}`, bias: 0, multiplier: 1 })),
+};
+assert.equal(validateJobConfig({ ...config(), methodCalls: [largeLsLikeCall] }, {
+  interfaceStore: interfaceStore(),
+  limits: { maxGeneratedTagsPerCall: 65535, maxBufferedRowsPerCycle: 65535 },
+  maxJobJsonBytes: 16 * 1024 * 1024,
+}).methodCalls[0].tags.length, lsTagCount);
 console.log('Job Interface contract: ok');

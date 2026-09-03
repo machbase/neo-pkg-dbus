@@ -38,13 +38,13 @@ function run() {
       database: { ...jobConfig().database, table: 'lower_case_table' },
     }), { interfaceStore: interfaces, limits }).database.table, 'LOWER_CASE_TABLE');
     assert.deepEqual(valid.methodCalls[0].tags[0], {
-      name: '%MB3', bias: 0, multiplier: 1,
+      name: '%MB3', bias: 0, multiplier: 1, signed: false,
     });
     const legacyMbTag = { ...methodCall().tags[0], calcOrder: 'mb' };
     assert.deepEqual(validateJobConfig(jobConfig({
       methodCalls: [methodCall({ tags: [legacyMbTag] })],
     }), { interfaceStore: interfaces, limits }).methodCalls[0].tags[0], {
-      name: '%MB3', bias: 0, multiplier: 1,
+      name: '%MB3', bias: 0, multiplier: 1, signed: false,
     });
     const newSelection = {
       id: 'output-1', sourceIndex: 0, interpretation: 'json', selector: '/data', valueType: 'array', elementType: 'numeric', tags: methodCall().tags,
@@ -63,7 +63,7 @@ function run() {
       methodCalls: [methodCall({ tags: undefined, outputSelections: [nativeStringSelection] })],
     }), { interfaceStore: interfaces, limits }).methodCalls[0].outputSelections[0], {
       ...nativeStringSelection,
-      tags: nativeStringSelection.tags.map(({ name, bias, multiplier }) => ({ name, bias, multiplier })),
+      tags: nativeStringSelection.tags.map(({ name, bias, multiplier }) => ({ name, bias, multiplier, signed: false })),
     });
     const nativeScalarMigration = {
       id: 'output-native-migration', sourceIndex: 0, interpretation: 'native',
@@ -74,7 +74,7 @@ function run() {
       methodCalls: [methodCall({ tags: undefined, outputSelections: [nativeScalarMigration] })],
     }), { interfaceStore: interfaces, limits }).methodCalls[0].outputSelections[0], {
       id: 'output-native-migration', sourceIndex: 0, interpretation: 'native',
-      tags: [{ name: '%MB3', bias: 0, multiplier: 1 }],
+      tags: [{ name: '%MB3', bias: 0, multiplier: 1, signed: false }],
     });
     const withoutOutputIndex = methodCall().tags.map(({ name, bias, multiplier }) => ({ name, bias, multiplier }));
     assert.equal(validateJobConfig(jobConfig({ methodCalls: [methodCall({ tags: withoutOutputIndex })] }), {

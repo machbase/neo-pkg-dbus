@@ -71,9 +71,16 @@ function csvNumber(value, fallback, row, column) {
   return number;
 }
 
-function csvRowToTag(row, rowNumber) {
-  if (row.length !== 4) {
-    throw csvError('TAG_CSV_STRUCTURE_INVALID', 'Each applicable CSV row must have four columns.', { row: rowNumber });
+function csvBoolean(value, row) {
+  const normalized = value.trim().toLowerCase();
+  if (!normalized || normalized === 'false' || normalized === '0') return false;
+  if (normalized === 'true' || normalized === '1') return true;
+  throw csvError('TAG_CSV_BOOLEAN_INVALID', 'signed must be true or false.', { row, column: 'signed' });
+}
+
+function csvRowToTag(row, rowNumber, signedColumn) {
+  if (row.length !== (signedColumn ? 5 : 4)) {
+    throw csvError('TAG_CSV_STRUCTURE_INVALID', `Each applicable CSV row must have ${signedColumn ? 'five' : 'four'} columns.`, { row: rowNumber });
   }
   const name = row[0].trim();
   if (!name) throw csvError('TAG_CSV_NAME_REQUIRED', 'Tag name is required.', { row: rowNumber, column: 'name' });
@@ -88,6 +95,7 @@ function csvRowToTag(row, rowNumber) {
     bias,
     multiplier,
     transformOrder: order === '0' ? ['bias', 'multiplier'] : ['multiplier', 'bias'],
+    signed: signedColumn ? csvBoolean(row[4], rowNumber) : false,
   };
 }
 
@@ -96,18 +104,19 @@ export function applyLsTagCsv(text, currentTags, dataCount) {
   const limit = Math.min(Math.max(0, Number(dataCount) || 0), tags.length);
   const rows = parseCsvRows(String(text ?? ''));
   const header = rows.shift() || [];
-  if (header.length !== 4
+  const signedColumn = header.length === 5 && header[4] === 'signed';
+  if ((header.length !== 4 && !signedColumn)
     || header[0]?.replace(/^\uFEFF/, '') !== 'name'
     || header[1] !== 'bias'
     || header[2] !== 'multiplier'
     || header[3] !== 'order') {
-    throw csvError('TAG_CSV_HEADER_INVALID', 'CSV header must be name,bias,multiplier,order.', { row: 1 });
+    throw csvError('TAG_CSV_HEADER_INVALID', 'CSV header must be name,bias,multiplier,order[,signed].', { row: 1 });
   }
   const sourceRows = rows.filter((sourceRow) => sourceRow.some((value) => value.trim() !== ''));
   if (!sourceRows.length || limit === 0) {
     throw csvError('TAG_CSV_EMPTY', 'CSV has no applicable Tag rows.');
   }
-  const replacements = sourceRows.slice(0, limit).map((sourceRow, index) => csvRowToTag(sourceRow, index + 2));
+  const replacements = sourceRows.slice(0, limit).map((sourceRow, index) => csvRowToTag(sourceRow, index + 2, signedColumn));
   return tags.map((tag, index) => index < replacements.length
     ? { ...tag, ...replacements[index], nameMode: 'manual' }
     : tag);

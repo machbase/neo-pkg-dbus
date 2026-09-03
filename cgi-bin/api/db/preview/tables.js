@@ -1,2 +1,6 @@
 'use strict';
-require('../../../src/cgi/bootstrap.js').runDb('preview-tables');
+const path = require('path');
+const process = require('process');
+const source = String(process.argv[1] || '');
+const root = source.slice(0, source.lastIndexOf('/cgi-bin/') + '/cgi-bin'.length);
+require(path.join(root, 'runtime.js')).bootstrap.runDb('preview-tables');

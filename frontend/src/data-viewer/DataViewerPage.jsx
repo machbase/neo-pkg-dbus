@@ -1030,7 +1030,7 @@ export default function DataViewerPage({ job = "", detail, embedded = false, not
             .catch((e) => {
                 if (!alive) return;
                 const message = e.reason || e.message || "Failed to load tags";
-                setTagError(message);
+                setTagError("");
                 setAssetHierarchyChecked(true);
                 notify(message, "error");
             })
@@ -1393,7 +1393,7 @@ export default function DataViewerPage({ job = "", detail, embedded = false, not
                 setPinnedRange({ from: "", to: "", key: pinKey });
                 // With nothing selected there is no window to resolve, which is not an error.
                 if (tagNames.length > 0) {
-                    setError(e.reason || e.message || "Failed to resolve the time range");
+                    notify(e.reason || e.message || "Failed to resolve the time range", "error");
                 }
             }
         })();
@@ -1471,7 +1471,7 @@ export default function DataViewerPage({ job = "", detail, embedded = false, not
         } catch (e) {
             if (rowsRequestRef.current !== requestId) return;
             const message = e.reason || e.message || "Failed to load data";
-            setError(message);
+            setError("");
             notify(message, "error");
             setResult({ rows: [], total: 0, page: resultPage, pageSize: rawPageSize });
             setRawPageBounds(null);
@@ -1687,7 +1687,7 @@ export default function DataViewerPage({ job = "", detail, embedded = false, not
                 } catch (e) {
                     if (splitRangeRequestRef.current !== splitRequestId) return;
                     const message = e.reason || e.message || "Failed to update chart range";
-                    setChartError(message);
+                    setChartError("");
                     notify(message, "error");
                     return;
                 }
@@ -1784,7 +1784,7 @@ export default function DataViewerPage({ job = "", detail, embedded = false, not
             } catch (e) {
                 if (splitRangeRequestRef.current !== splitRequestId) return;
                 const message = e.reason || e.message || "Failed to refresh chart range";
-                setChartError(message);
+                setChartError("");
                 notify(message, "error");
                 return;
             }
@@ -1830,7 +1830,7 @@ export default function DataViewerPage({ job = "", detail, embedded = false, not
         } catch (e) {
             if (endPageRequestRef.current !== requestId) return;
             const message = e.reason || e.message || "Failed to calculate end page";
-            setError(message);
+            setError("");
             notify(message, "error");
         } finally {
             if (endPageRequestRef.current === requestId) {
@@ -1921,7 +1921,7 @@ export default function DataViewerPage({ job = "", detail, embedded = false, not
         } catch (e) {
             if (splitRangeRequestRef.current !== splitRequestId) return;
             const message = e.reason || e.message || "Failed to set global time";
-            setChartError(message);
+            setChartError("");
             notify(message, "error");
         }
     };
@@ -2006,7 +2006,7 @@ export default function DataViewerPage({ job = "", detail, embedded = false, not
         } catch (e) {
             if (splitRangeRequestRef.current !== splitRequestId) return;
             const message = e.reason || e.message || "Failed to move chart range";
-            setChartError(message);
+            setChartError("");
             notify(message, "error");
         }
     };

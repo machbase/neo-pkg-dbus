@@ -7,9 +7,16 @@ const path = require('node:path');
 
 function runCgi(script, options) {
   const settings = options || {};
-  const program = `const env=process.env; process.env={...env,get:(name)=>env[name]}; process.stdin.read=()=>process.argv[2]||''; require(process.argv[1]);`;
-  const result = childProcess.spawnSync(process.execPath, ['-e', program, script, settings.body || ''], { encoding: 'utf8', env: { ...process.env, REQUEST_METHOD: settings.method || 'GET', QUERY_STRING: settings.query || '' } });
-  assert.equal(result.status, 0, result.stderr);
+  const body = settings.body || '';
+  const query = settings.query || '';
+  const argument = Buffer.byteLength(body, 'utf8') > 128 * 1024 ? `@bytes:${Buffer.byteLength(body, 'utf8')}` : body;
+  const queryArgument = Buffer.byteLength(query, 'utf8') > 128 * 1024 ? `@bytes:${Buffer.byteLength(query, 'utf8')}` : query;
+  const program = `const env=process.env; const raw=process.argv[2]||''; const query=String(env.QUERY_STRING||''); const resolvedQuery=query.startsWith('@bytes:')?'a'.repeat(Number(query.slice(7))):query; process.env={...env,QUERY_STRING:resolvedQuery,get:(name)=>process.env[name]}; process.stdin.read=()=>raw.startsWith('@bytes:')?'x'.repeat(Number(raw.slice(7))):raw; require(process.argv[1]);`;
+  const result = childProcess.spawnSync(process.execPath, ['-e', program, script, argument], {
+    encoding: 'utf8',
+    env: { ...process.env, REQUEST_METHOD: settings.method || 'GET', QUERY_STRING: queryArgument },
+  });
+  assert.equal(result.status, 0, result.error ? result.error.message : result.stderr);
   const split = result.stdout.indexOf('\r\n\r\n');
   assert.notEqual(split, -1, result.stdout);
   return { status: Number(/Status: (\d+)/.exec(result.stdout.slice(0, split))[1]), payload: JSON.parse(result.stdout.slice(split + 4)) };

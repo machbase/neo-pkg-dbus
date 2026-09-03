@@ -6,6 +6,44 @@ function positiveInteger(value) {
   return Number.isInteger(value) && value > 0;
 }
 
+function loggingPolicy(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+    || !positiveInteger(value.maxFileBytes) || value.maxFileBytes < 64 * 1024 || value.maxFileBytes > 10 * 1024 * 1024
+    || !positiveInteger(value.maxFiles) || value.maxFiles > 10
+    || !positiveInteger(value.summaryIntervalMs) || value.summaryIntervalMs < 60 * 1000 || value.summaryIntervalMs > 24 * 60 * 60 * 1000) {
+    throw error('SETTINGS_INVALID', 'logging 설정이 잘못되었습니다.');
+  }
+  return {
+    maxFileBytes: value.maxFileBytes,
+    maxFiles: value.maxFiles,
+    summaryIntervalMs: value.summaryIntervalMs,
+  };
+}
+
+function lsPolicy(value) {
+  if (value === undefined) return null;
+  const interval = value?.interval;
+  const writer = value?.writer;
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+    || !interval || typeof interval !== 'object' || Array.isArray(interval)
+    || typeof interval.useTaskCycle !== 'boolean'
+    || !writer || typeof writer !== 'object' || Array.isArray(writer)
+    || !positiveInteger(writer.queueCapacity) || writer.queueCapacity > 1024
+    || !positiveInteger(writer.flushMaxRows) || writer.flushMaxRows > 65535
+    || !positiveInteger(writer.flushIntervalMs) || writer.flushIntervalMs > 60 * 60 * 1000) {
+    throw error('SETTINGS_INVALID', 'LS interval 설정이 잘못되었습니다.');
+  }
+  return {
+    interval: { useTaskCycle: interval.useTaskCycle },
+    // Shared writer settings; users do not edit them in the frontend.
+    writer: {
+      queueCapacity: writer.queueCapacity,
+      flushMaxRows: writer.flushMaxRows,
+      flushIntervalMs: writer.flushIntervalMs,
+    },
+  };
+}
+
 function validateSettings(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw error('SETTINGS_INVALID', 'settings는 JSON 객체여야 합니다.');
@@ -32,6 +70,8 @@ function validateSettings(value) {
     defaults: {
       database: { server: defaults.database.server },
     },
+    logging: loggingPolicy(value.logging),
+    ...(lsPolicy(value.ls) ? { ls: lsPolicy(value.ls) } : {}),
   };
 }
 

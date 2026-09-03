@@ -6,6 +6,8 @@ const fs = require('fs');
 const path = require('path');
 const { loadSettings } = require('../config/settings-loader.js');
 const { createControllerAdapter } = require('../service/controller-adapter.js');
+const { createLsRuntime } = require('../collector/ls-runtime.js');
+const { loadProductPolicy } = require('../config/product-policy.js');
 const { validateMethod, validateProfile } = require('./validator.js');
 const { ProfileStore } = require('./store.js');
 const { ReferenceAnalyzer } = require('./references.js');
@@ -14,14 +16,23 @@ const { createJobOperationLock } = require('../jobs/operation-lock.js');
 class ProfileManager {
   constructor(options) {
     const settings = options || {};
+    const productPolicy = settings.productPolicy || loadProductPolicy(settings.cgiRoot);
     this.store = settings.store || new ProfileStore({
       cgiRoot: settings.cgiRoot,
       runtimeNeoVersion: settings.runtimeNeoVersion,
     });
     this.controller = settings.controller || createControllerAdapter(settings.serviceModule);
+    const lsRuntime = productPolicy.target === 'ls' ? createLsRuntime({
+      cgiRoot: settings.cgiRoot,
+      controller: this.controller,
+      // Profile guards only call inspect(), but retain a complete adapter
+      // shape so the data-plane implementation remains encapsulated here.
+      repository: { list: () => [] },
+    }) : null;
     this.references = settings.references || new ReferenceAnalyzer({
       cgiRoot: settings.cgiRoot,
       controller: this.controller,
+      stateInspector: lsRuntime && lsRuntime.inspect,
     });
     this.profileMutationLock = settings.profileMutationLock || createJobOperationLock({
       directory: path.join(settings.cgiRoot, 'conf.d', '.profile-mutation-locks'),

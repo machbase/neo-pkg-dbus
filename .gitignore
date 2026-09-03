@@ -1,8 +1,10 @@
 frontend/node_modules/
 cgi-bin/provider.json
 cgi-bin/interfaces.d/
-cgi-bin/conf.d/
+cgi-bin/conf.d/*
+!cgi-bin/conf.d/settings.json
 cgi-bin/data/*
 !cgi-bin/data/.gitkeep
+collector-go/dist/
 .DS_Store
 *.log

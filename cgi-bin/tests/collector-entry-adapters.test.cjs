@@ -242,7 +242,10 @@ function testStartupFailuresStayAliveAndBackoff() {
     runtime = startCollector({ name: 'alpha', ...outputSelectionJobConfig() }, {
       cgiRoot: '/tmp/cgi-bin', jobName: 'alpha', database, dbus,
       interfaceStore: interfaceStore(),
-      settings: { limits: { maxGeneratedTagsPerCall: 1000, maxBufferedRowsPerCycle: 10000 } },
+      settings: {
+        limits: { maxGeneratedTagsPerCall: 1000, maxBufferedRowsPerCycle: 10000 },
+        logging: { maxFileBytes: 1024 * 1024, maxFiles: 3, summaryIntervalMs: 60 * 60 * 1000 },
+      },
       validateConfig(config) { return config; },
       details: { setLastRun() {} },
       process: { on() {}, removeListener() {} },
@@ -281,7 +284,10 @@ function testCollectorLoggerAndLogApiIntegration() {
       cgiRoot: path.join(root, 'cgi-bin'),
       jobName: 'alpha',
       interfaceStore: interfaceStore(),
-      settings: { limits: { maxGeneratedTagsPerCall: 1000, maxBufferedRowsPerCycle: 10000 } },
+      settings: {
+        limits: { maxGeneratedTagsPerCall: 1000, maxBufferedRowsPerCycle: 10000 },
+        logging: { maxFileBytes: 1024 * 1024, maxFiles: 3, summaryIntervalMs: 60 * 60 * 1000 },
+      },
       validateConfig(config) { return config; },
       database: {
         open() { throw new Error('password=database-secret token: db-token %MB3'); },
@@ -305,7 +311,10 @@ function testCollectorLoggerAndLogApiIntegration() {
     });
     assert.deepEqual(loggerInit, {
       config: { level: 'info', maxFiles: 10 },
-      options: { name: 'alpha', cgiRoot: path.join(root, 'cgi-bin') },
+      options: {
+        name: 'alpha', cgiRoot: path.join(root, 'cgi-bin'),
+        maxFileBytes: 1024 * 1024, maxFiles: 3, summaryIntervalMs: 60 * 60 * 1000,
+      },
     });
     assert.equal(scheduled[0].delay, 5000);
     runtime.stop();
@@ -318,7 +327,8 @@ function testCollectorLoggerAndLogApiIntegration() {
     assert.match(content.content, /collector started/);
     assert.match(content.content, /database open failed/);
     assert.match(content.content, /cycle failed/);
-    assert.match(content.content, /retry scheduled/);
+    assert.doesNotMatch(content.content, /retry scheduled/);
+    assert.doesNotMatch(content.content, /cycle summary/);
     assert.match(content.content, /collector stopped/);
     assert.equal(content.content.includes('database-secret'), false);
     assert.equal(content.content.includes('db-token'), false);

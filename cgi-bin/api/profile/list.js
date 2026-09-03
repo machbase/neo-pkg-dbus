@@ -4,8 +4,7 @@ const path = require('path');
 const process = require('process');
 const marker = `${path.sep}cgi-bin${path.sep}`;
 const root = process.argv[1].slice(0, process.argv[1].indexOf(marker) + marker.length - 1);
-const http = require(path.join(root, 'src', 'cgi', 'http.js'));
-const { ProfileManager } = require(path.join(root, 'src', 'profiles', 'manager.js'));
+const { http, ProfileManager } = require(path.join(root, 'runtime.js'));
 
 const managerFactory = http.createFactory(() => new ProfileManager({ cgiRoot: root }));
 

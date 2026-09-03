@@ -10,20 +10,27 @@ function runCgi(script, options) {
   const settings = options || {};
   const program = `
     const environment = process.env;
-    process.env = { ...environment, get: (name) => environment[name] };
-    process.stdin.read = () => process.argv[2] || '';
+    const query = String(environment.QUERY_STRING || '');
+    const resolvedQuery = query.startsWith('@bytes:') ? 'a'.repeat(Number(query.slice(7))) : query;
+    process.env = { ...environment, QUERY_STRING: resolvedQuery, get: (name) => process.env[name] };
+    const raw = process.argv[2] || '';
+    process.stdin.read = () => raw.startsWith('@bytes:') ? 'x'.repeat(Number(raw.slice(7))) : raw;
     require(process.argv[1]);
   `;
-  const result = childProcess.spawnSync(process.execPath, ['-e', program, script, settings.body || ''], {
+  const body = settings.body || '';
+  const query = settings.query || '';
+  const argument = Buffer.byteLength(body, 'utf8') > 128 * 1024 ? `@bytes:${Buffer.byteLength(body, 'utf8')}` : body;
+  const queryArgument = Buffer.byteLength(query, 'utf8') > 128 * 1024 ? `@bytes:${Buffer.byteLength(query, 'utf8')}` : query;
+  const result = childProcess.spawnSync(process.execPath, ['-e', program, script, argument], {
     encoding: 'utf8',
     env: {
       ...process.env,
       REQUEST_METHOD: settings.method || 'GET',
-      QUERY_STRING: settings.query || '',
+      QUERY_STRING: queryArgument,
       ...(settings.environment || {}),
     },
   });
-  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.status, 0, result.error ? result.error.message : result.stderr);
   const splitAt = result.stdout.indexOf('\r\n\r\n');
   assert.notEqual(splitAt, -1, result.stdout);
   return {
@@ -75,7 +82,7 @@ function run() {
     if (fs.existsSync(legacyExample)) fs.unlinkSync(legacyExample);
 
     let versionResponse = runCgi(path.join(root, 'api', 'profile', 'list.js'), {
-      environment: { MACHBASE_NEO_VERSION: 'v8.5.6' },
+      environment: { MACHBASE_NEO_VERSION: 'v8.5.8' },
     });
     assert.equal(versionResponse.status, 200);
     assert.equal(versionResponse.payload.data[0].compatible, true);
@@ -94,6 +101,7 @@ function run() {
       schemaVersion: 1,
       limits: { maxGeneratedTagsPerCall: 1000, maxBufferedRowsPerCycle: 10000 },
       defaults: { database: { server: 'localhost' } },
+      logging: { maxFileBytes: 1024 * 1024, maxFiles: 3, summaryIntervalMs: 60 * 60 * 1000 },
       provider: null,
     });
 
@@ -108,6 +116,7 @@ function run() {
       schemaVersion: 1,
       limits: { maxGeneratedTagsPerCall: 250, maxBufferedRowsPerCycle: 2000 },
       defaults: { database: { server: 'localhost' } },
+      logging: { maxFileBytes: 1024 * 1024, maxFiles: 3, summaryIntervalMs: 60 * 60 * 1000 },
     });
 
     for (const malformedBody of ['null', '[]', '"text"']) {

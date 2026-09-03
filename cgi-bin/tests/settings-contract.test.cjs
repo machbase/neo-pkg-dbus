@@ -8,6 +8,12 @@ const childProcess = require('node:child_process');
 const { SettingsManager } = require('../src/config/settings-manager.js');
 const { validateSettings } = require('../src/config/settings-validator.js');
 
+const DEFAULT_LOGGING = {
+  maxFileBytes: 1024 * 1024,
+  maxFiles: 3,
+  summaryIntervalMs: 60 * 60 * 1000,
+};
+
 function call(target, method, ...args) {
   return new Promise((resolve, reject) => {
     target[method](...args, (failure, value) => (failure ? reject(failure) : resolve(value)));
@@ -47,6 +53,7 @@ async function run() {
       schemaVersion: 1,
       limits: { maxGeneratedTagsPerCall: 1000, maxBufferedRowsPerCycle: 10000 },
       defaults: { database: { server: 'localhost' } },
+      logging: { ...DEFAULT_LOGGING },
     };
     writeJson(path.join(root, 'conf.d', 'settings.json'), original);
 
@@ -61,6 +68,7 @@ async function run() {
       schemaVersion: 1,
       limits: { maxGeneratedTagsPerCall: 250, maxBufferedRowsPerCycle: 2000 },
       defaults: { database: { server: 'localhost' } },
+      logging: DEFAULT_LOGGING,
     });
     assert.deepEqual(JSON.parse(fs.readFileSync(path.join(root, 'conf.d', 'settings.json'), 'utf8')), updated);
 
@@ -88,6 +96,7 @@ async function run() {
       schemaVersion: 1,
       limits: { maxGeneratedTagsPerCall: 1000, maxBufferedRowsPerCycle: 10000 },
       defaults: { database: { server: 'localhost' } },
+      logging: { ...DEFAULT_LOGGING },
     });
     if (fs.existsSync(providerFile)) fs.unlinkSync(providerFile);
 

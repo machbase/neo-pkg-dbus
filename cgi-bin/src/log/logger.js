@@ -44,7 +44,9 @@ class Logger {
     const settings = options || {};
     this.disabled = logging.disable === true;
     this.level = Object.prototype.hasOwnProperty.call(LEVELS, logging.level) ? LEVELS[logging.level] : LEVELS.info;
-    this.maxFiles = Number.isInteger(logging.maxFiles) && logging.maxFiles > 0 ? Math.min(logging.maxFiles, 1000) : 10;
+    this.maxFiles = Number.isInteger(settings.maxFiles) && settings.maxFiles > 0
+      ? Math.min(settings.maxFiles, 10)
+      : (Number.isInteger(logging.maxFiles) && logging.maxFiles > 0 ? Math.min(logging.maxFiles, 10) : 3);
     this.name = settings.name || 'neo-pkg-dbus';
     this.logDir = settings.logDir || (settings.cgiRoot ? path.join(path.dirname(settings.cgiRoot), 'logs') : defaultLogDir());
     this.maxFileBytes = settings.maxFileBytes || MAX_FILE_SIZE;

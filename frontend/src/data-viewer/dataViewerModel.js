@@ -1004,6 +1004,7 @@ export function resolveTagNodes(configuredNodes = [], tableTags = []) {
             const name = tag?.name || tag?.NAME;
             if (!name) return null;
             const node = { name: String(name) };
+            if (Array.isArray(tag?.treePath) || typeof tag?.treePath === "string") node.treePath = tag.treePath;
             const dataType = tag?.dataType || tag?.type || tag?.TYPE;
             if (dataType) node.dataType = String(dataType);
             return node;

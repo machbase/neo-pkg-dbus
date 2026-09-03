@@ -34,6 +34,54 @@ function setupFailure(previous, now) {
   });
 }
 
+function createLogSummary(log, intervalMs, now) {
+  const interval = Number.isInteger(intervalMs) && intervalMs >= 60000 ? intervalMs : 60 * 60 * 1000;
+  let startedAt = now().getTime();
+  let cycles = 0;
+  let succeeded = 0;
+  let failed = 0;
+  let stored = 0;
+  let retries = 0;
+  let lastError = null;
+
+  function flush(force) {
+    const current = now().getTime();
+    if (!force && current - startedAt < interval) return;
+    if (!cycles && !retries) { startedAt = current; return; }
+    const fields = {
+      msg: 'cycle summary', durationMs: Math.max(0, current - startedAt), cycles, succeeded, failed, stored, retries,
+      ...(lastError ? { lastError } : {}),
+    };
+    if (failed > 1 || retries > 1) log('warn', 'collector', fields);
+    log('debug', 'collector', fields);
+    startedAt = current;
+    cycles = 0;
+    succeeded = 0;
+    failed = 0;
+    stored = 0;
+    retries = 0;
+    lastError = null;
+  }
+
+  return {
+    result(result) {
+      const methodCalls = result && Array.isArray(result.methodCalls) ? result.methodCalls : [];
+      const status = result && result.status || 'failed';
+      cycles += 1;
+      stored += methodCalls.reduce((sum, method) => sum + (Number(method && method.storedCount) || 0), 0);
+      if (status === 'success') succeeded += 1;
+      else {
+        failed += 1;
+        lastError = result && result.lastError || 'cycle failed';
+        if (failed === 1) log('error', 'collector', { msg: 'cycle failed', status, lastError });
+      }
+      flush(false);
+    },
+    retry() { retries += 1; },
+    flush,
+  };
+}
+
 function startCollector(document, context) {
   const settings = context || {};
   const cgiRoot = settings.cgiRoot || path.resolve(__dirname, '..', '..');
@@ -47,7 +95,7 @@ function startCollector(document, context) {
   const job = { name: jobName, ...validate(stripName(document)) };
   const loggerFactory = settings.loggerFactory || initLogger;
   let logger = null;
-  try { logger = loggerFactory(job.log, { name: jobName, cgiRoot }); } catch (_) {}
+  try { logger = loggerFactory(job.log, { name: jobName, cgiRoot, ...runtimeSettings.logging }); } catch (_) {}
   const log = (level, stage, fields) => {
     try {
       if (logger && typeof logger[level] === 'function') logger[level](stage, fields);
@@ -63,6 +111,7 @@ function startCollector(document, context) {
   let stopped = false;
   let scheduler = null;
   let databaseReady = false;
+  const summary = createLogSummary(log, runtimeSettings.logging && runtimeSettings.logging.summaryIntervalMs, now);
 
   const cycleDatabase = {
     append(rows) {
@@ -82,6 +131,7 @@ function startCollector(document, context) {
     if (scheduler) scheduler.stop();
     dbus.close();
     database.close();
+    summary.flush(true);
     log('info', 'collector', { msg: 'collector stopped', job: jobName });
     try { if (logger && typeof logger.close === 'function') logger.close(); } catch (_) {}
     if (processApi && typeof processApi.removeListener === 'function') {
@@ -122,24 +172,11 @@ function startCollector(document, context) {
     },
     onResult(result) {
       details.setLastRun(result, () => {});
-      const methodCalls = result && Array.isArray(result.methodCalls) ? result.methodCalls : [];
-      const storedCount = methodCalls.reduce((sum, method) => sum + (Number(method && method.storedCount) || 0), 0);
-      const status = result && result.status || 'failed';
-      log(status === 'success' ? 'info' : 'warn', 'cycle', {
-        msg: `cycle ${status}`,
-        status,
-        methodCallCount: methodCalls.length,
-        storedCount,
-        errorCode: status === 'success' ? null : 'CYCLE_FAILED',
-      });
+      summary.result(result);
     },
     onSchedule(schedule) {
       if (schedule && schedule.consecutiveFailures > 0) {
-        log('warn', 'scheduler', {
-          msg: 'retry scheduled',
-          delayMs: schedule.delayMs,
-          consecutiveFailures: schedule.consecutiveFailures,
-        });
+        summary.retry();
       }
     },
   });
