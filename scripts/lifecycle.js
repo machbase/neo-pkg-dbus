@@ -325,6 +325,29 @@ function ensureLsCollectorExecutable(cgiRoot) {
   files.forEach((file) => fs.chmodSync(file, 0o755));
 }
 
+// `pkg install` normally reaches the JobManager lifecycle, which refreshes the
+// LS collector snapshot as part of package installation.  The LS fast path
+// below deliberately uses servicectl directly (the service controller must not
+// depend on an asynchronous JSH callback), so a manually unpacked package can
+// otherwise register a service with no go-collector.json and the Go child exits
+// immediately.  Seed the snapshot before install/start; this is also safe when
+// Jobs already exist and preserves their current active checkpoint.
+function ensureLsCollectorSnapshot(cgiRoot) {
+  const { JobManager } = require(path.join(cgiRoot, 'src', 'jobs', 'manager.js'));
+  const manager = new JobManager({ cgiRoot });
+  if (!manager.isLs || !manager.lsRuntime) return;
+
+  // server-store.list() creates the default localhost profile when a freshly
+  // unpacked package has no DB profile directory yet. Its callback-based API is
+  // synchronous by contract, just like the snapshot's server-store access.
+  if (manager.serverStore && typeof manager.serverStore.list === 'function') {
+    let listError = null;
+    manager.serverStore.list((error) => { listError = error || null; });
+    if (listError) throw listError;
+  }
+  manager.lsRuntime.snapshot();
+}
+
 function defaultLifecycle() {
   const cgiRoot = defaultCgiRoot();
   const { JobManager } = require(path.join(cgiRoot, 'src', 'jobs', 'manager.js'));
@@ -367,11 +390,13 @@ function runLsPackageAction(action) {
   };
 
   if (action === 'install') {
+    ensureLsCollectorSnapshot(cgiRoot);
     if (exec('servicectl', 'install', '--name', serviceName,
       '--working-dir', cgiRoot, '--executable', launcher, '--enable') !== 0) {
       throw new Error('LS collector service installation failed.');
     }
   } else if (action === 'start') {
+    ensureLsCollectorSnapshot(cgiRoot);
     if (exec('servicectl', 'start', serviceName) !== 0) throw new Error('LS collector service start failed.');
   } else if (action === 'stop') {
     stopNative();
