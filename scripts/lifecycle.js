@@ -325,6 +325,46 @@ function ensureLsCollectorExecutable(cgiRoot) {
   files.forEach((file) => fs.chmodSync(file, 0o755));
 }
 
+// `pkg install` normally reaches the JobManager lifecycle, which refreshes the
+// LS collector snapshot as part of package installation.  The LS fast path
+// below deliberately uses servicectl directly (the service controller must not
+// depend on an asynchronous JSH callback), so a manually unpacked package can
+// otherwise register a service with no go-collector.json and the Go child exits
+// immediately.  Seed the snapshot before install/start; this is also safe when
+// Jobs already exist and preserves their current active checkpoint.
+function ensureLsCollectorSnapshot(cgiRoot) {
+  // Do not require the CGI JobManager here. `pkg run` and the Neo JSH Console
+  // execute package scripts in a restricted child module loader where loading
+  // the whole CGI source graph can fail with "Invalid module". The full
+  // JobManager snapshot is still produced whenever a Job is created/updated;
+  // this bootstrap only makes an unpacked, empty LS package startable.
+  const confDir = path.join(cgiRoot, 'conf.d');
+  const dataDir = path.join(cgiRoot, 'data');
+  let settings = {};
+  try { settings = JSON.parse(fs.readFileSync(path.join(confDir, 'settings.json'), 'utf8')); } catch (_) {}
+
+  const snapshot = path.join(confDir, 'go-collector.json');
+  if (!fs.existsSync(snapshot)) {
+    writeJsonAtomic(snapshot, {
+      schemaVersion: 1,
+      jobs: [],
+      logging: settings.logging || {},
+      writer: (settings.ls && settings.ls.writer) || {},
+    });
+  }
+  const secrets = path.join(confDir, 'go-collector-secrets.json');
+  if (!fs.existsSync(secrets)) writeJsonAtomic(secrets, { schemaVersion: 1, servers: {} });
+  // This file is later populated with the DB password. The archive/PLC umask
+  // must never decide whether that secret becomes world-readable.
+  if (typeof fs.chmodSync !== 'function') throw new Error('secure collector secret file permissions are unavailable.');
+  fs.chmodSync(secrets, 0o600);
+  const active = path.join(confDir, 'go-collector-active-jobs.json');
+  if (!fs.existsSync(active)) writeJsonAtomic(active, { schemaVersion: 1, names: [] });
+  // The Go daemon creates its runtime file itself, but ensure its parent exists
+  // for old builds that write the first status synchronously during startup.
+  fs.mkdirSync(dataDir, { recursive: true });
+}
+
 function defaultLifecycle() {
   const cgiRoot = defaultCgiRoot();
   const { JobManager } = require(path.join(cgiRoot, 'src', 'jobs', 'manager.js'));
@@ -367,11 +407,13 @@ function runLsPackageAction(action) {
   };
 
   if (action === 'install') {
+    ensureLsCollectorSnapshot(cgiRoot);
     if (exec('servicectl', 'install', '--name', serviceName,
       '--working-dir', cgiRoot, '--executable', launcher, '--enable') !== 0) {
       throw new Error('LS collector service installation failed.');
     }
   } else if (action === 'start') {
+    ensureLsCollectorSnapshot(cgiRoot);
     if (exec('servicectl', 'start', serviceName) !== 0) throw new Error('LS collector service start failed.');
   } else if (action === 'stop') {
     stopNative();
