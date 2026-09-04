@@ -333,19 +333,32 @@ function ensureLsCollectorExecutable(cgiRoot) {
 // immediately.  Seed the snapshot before install/start; this is also safe when
 // Jobs already exist and preserves their current active checkpoint.
 function ensureLsCollectorSnapshot(cgiRoot) {
-  const { JobManager } = require(path.join(cgiRoot, 'src', 'jobs', 'manager.js'));
-  const manager = new JobManager({ cgiRoot });
-  if (!manager.isLs || !manager.lsRuntime) return;
+  // Do not require the CGI JobManager here. `pkg run` and the Neo JSH Console
+  // execute package scripts in a restricted child module loader where loading
+  // the whole CGI source graph can fail with "Invalid module". The full
+  // JobManager snapshot is still produced whenever a Job is created/updated;
+  // this bootstrap only makes an unpacked, empty LS package startable.
+  const confDir = path.join(cgiRoot, 'conf.d');
+  const dataDir = path.join(cgiRoot, 'data');
+  let settings = {};
+  try { settings = JSON.parse(fs.readFileSync(path.join(confDir, 'settings.json'), 'utf8')); } catch (_) {}
 
-  // server-store.list() creates the default localhost profile when a freshly
-  // unpacked package has no DB profile directory yet. Its callback-based API is
-  // synchronous by contract, just like the snapshot's server-store access.
-  if (manager.serverStore && typeof manager.serverStore.list === 'function') {
-    let listError = null;
-    manager.serverStore.list((error) => { listError = error || null; });
-    if (listError) throw listError;
+  const snapshot = path.join(confDir, 'go-collector.json');
+  if (!fs.existsSync(snapshot)) {
+    writeJsonAtomic(snapshot, {
+      schemaVersion: 1,
+      jobs: [],
+      logging: settings.logging || {},
+      writer: (settings.ls && settings.ls.writer) || {},
+    });
   }
-  manager.lsRuntime.snapshot();
+  const secrets = path.join(confDir, 'go-collector-secrets.json');
+  if (!fs.existsSync(secrets)) writeJsonAtomic(secrets, { schemaVersion: 1, servers: {} });
+  const active = path.join(confDir, 'go-collector-active-jobs.json');
+  if (!fs.existsSync(active)) writeJsonAtomic(active, { schemaVersion: 1, names: [] });
+  // The Go daemon creates its runtime file itself, but ensure its parent exists
+  // for old builds that write the first status synchronously during startup.
+  fs.mkdirSync(dataDir, { recursive: true });
 }
 
 function defaultLifecycle() {
