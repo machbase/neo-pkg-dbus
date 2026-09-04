@@ -354,6 +354,10 @@ function ensureLsCollectorSnapshot(cgiRoot) {
   }
   const secrets = path.join(confDir, 'go-collector-secrets.json');
   if (!fs.existsSync(secrets)) writeJsonAtomic(secrets, { schemaVersion: 1, servers: {} });
+  // This file is later populated with the DB password. The archive/PLC umask
+  // must never decide whether that secret becomes world-readable.
+  if (typeof fs.chmodSync !== 'function') throw new Error('secure collector secret file permissions are unavailable.');
+  fs.chmodSync(secrets, 0o600);
   const active = path.join(confDir, 'go-collector-active-jobs.json');
   if (!fs.existsSync(active)) writeJsonAtomic(active, { schemaVersion: 1, names: [] });
   // The Go daemon creates its runtime file itself, but ensure its parent exists
