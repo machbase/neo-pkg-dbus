@@ -47,6 +47,8 @@ export function jobActions(job = {}) {
   const known = job.statusKnown === true;
   const valid = job.valid !== false && job.errorCode !== "JOB_INVALID_CONFIG";
   const transition = TRANSITION_STATES.has(job.controllerState);
+  const starting = job.controllerState === "STARTING";
+  const stopping = job.controllerState === "STOPPING";
   const configOnly = known && job.configState === "config-only";
   const installed = known && job.configState === "installed";
   const running = installed && job.executionState === "running";
@@ -54,11 +56,11 @@ export function jobActions(job = {}) {
   const safe = known && valid && !transition;
   return {
     start: safe && (configOnly || stopped),
-    stop: safe && running,
+    stop: known && valid && installed && running && !stopping,
     edit: safe && (configOnly || stopped),
     remove: safe && (configOnly || stopped),
     switchVisible: known,
-    switchDisabled: !(safe && (configOnly || running || stopped)),
+    switchDisabled: !((safe && (configOnly || stopped)) || (running && (safe || starting))),
   };
 }
 
@@ -93,10 +95,11 @@ function cloned(value) {
 
 function databaseDefaults(server) {
   if (typeof server === "string") return { server, table: "", valueColumn: "", stringValueColumn: "" };
+  const table = server?.defaultTable || "";
   return {
     server: server?.name || "",
-    table: server?.defaultTable || "",
-    valueColumn: server?.defaultValueColumn ?? server?.valueColumn ?? "",
+    table,
+    valueColumn: (server?.defaultValueColumn ?? server?.valueColumn) || (table ? "VALUE" : ""),
     stringValueColumn: server?.defaultStringValueColumn ?? server?.stringValueColumn ?? "",
   };
 }
@@ -254,7 +257,11 @@ export function validateJobTags(calls, options = {}) {
     const tags = Array.isArray(call.outputSelections)
       ? call.outputSelections.flatMap((selection) => selection.tags || [])
       : call.tags || [];
-    const max = Number(options.maxGeneratedTagsPerCall);
+    const configuredMax = options.maxGeneratedTagsPerCall;
+    // null/undefined means that the product owns its own limit. Number(null)
+    // is 0, which would otherwise reject every non-empty LS Call.
+    const max = configuredMax === null || configuredMax === undefined || configuredMax === ""
+      ? Number.NaN : Number(configuredMax);
     if (Number.isInteger(max) && tags.length > max && !errors.includes("Tag count exceeds the configured limit.")) errors.push("Tag count exceeds the configured limit.");
     for (const tag of tags) {
       const name = String(tag.name || "").trim();

@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const { classifyControllerState } = require('../service/controller-state.js');
 const { isNotInstalled } = require('../service/controller-adapter.js');
+const { JobIndexRepository } = require('../jobs/index-repository.js');
 
 const JOB_ID = /^[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?$/;
 const PROFILE_METHOD_ID = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
@@ -44,9 +45,32 @@ class ReferenceAnalyzer {
     // collector runtime rather than by _dbu_<job>. Generic keeps controller
     // status as its source of truth.
     this.stateInspector = options.stateInspector || null;
+    this.indexes = options.useIndex === true
+      ? new JobIndexRepository({ cgiRoot: options.cgiRoot, jobDirectory: this.jobDir }) : null;
   }
 
   documents() {
+    if (this.indexes) {
+      return this.indexes.list().map((record) => {
+        if (record.error || !record.index) {
+          return invalidRecord(record.name, null, record.error && record.error.message, true);
+        }
+        return {
+          stem: record.name,
+          value: {
+            name: record.name,
+            profileId: record.index.profileId,
+            methodCalls: record.index.methodReferences.map((reference) => ({
+              id: reference.callId,
+              methodId: reference.methodId,
+            })),
+          },
+          invalidConfig: false,
+          global: false,
+          reason: null,
+        };
+      });
+    }
     if (!fs.existsSync(this.jobDir)) return [];
     const documents = [];
     fs.readdirSync(this.jobDir).filter((name) => name.endsWith('.json')).sort().forEach((file) => {

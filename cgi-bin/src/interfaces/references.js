@@ -1,5 +1,6 @@
 'use strict';
 const fs = require('fs'); const path = require('path');
+const { JobIndexRepository } = require('../jobs/index-repository.js');
 const JOB_NAME = /^[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?$/;
 const CALL_ID = /^[A-Za-z0-9](?:[A-Za-z0-9_-]*[A-Za-z0-9])?$/;
 const IDENTIFIER = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
@@ -34,8 +35,26 @@ function invalid(name, job) {
   return [{ name, documentName: job && typeof job.name === 'string' ? job.name : null, calls: [], methodIds: [], invalidConfig: true }];
 }
 class InterfaceReferenceAnalyzer {
-  constructor(options) { this.jobDir = path.join(options.cgiRoot, 'conf.d', 'jobs'); }
+  constructor(options) {
+    this.jobDir = path.join(options.cgiRoot, 'conf.d', 'jobs');
+    this.useIndex = options.useIndex === true;
+    this.indexes = this.useIndex ? new JobIndexRepository({ cgiRoot: options.cgiRoot, jobDirectory: this.jobDir }) : null;
+  }
   find(interfaceId, methodId) {
+    if (this.indexes) {
+      return this.indexes.list().flatMap((record) => {
+        if (record.error || !record.index) return invalid(record.name, null);
+        const calls = record.index.methodReferences.filter((call) => call.interfaceId === interfaceId
+          && (!methodId || call.methodId === methodId));
+        return calls.length ? [{
+          name: record.name,
+          documentName: record.name,
+          calls: calls.map((call) => call.callId),
+          methodIds: [...new Set(calls.map((call) => call.methodId))],
+          invalidConfig: false,
+        }] : [];
+      });
+    }
     if (!fs.existsSync(this.jobDir)) return [];
     return fs.readdirSync(this.jobDir).filter((file) => file.endsWith('.json')).sort().flatMap((file) => {
       const name = file.slice(0, -5); let job;

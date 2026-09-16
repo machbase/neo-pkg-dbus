@@ -3,9 +3,14 @@ export function isPackageMessage(value) {
     value.type === "ready"
     ||
     value.type === "refresh"
+    || (value.type === "job-save-state"
+      && typeof value.active === "boolean"
+      && typeof value.token === "string"
+      && value.token.length > 0
+      && (!value.active || (Number.isFinite(value.startedAt) && Number.isFinite(value.expiresAt))))
     || value.type === "new-job"
     || (value.type === "open-create-modal"
-      && (value.target === "dbus-interface" || value.target === "db-server"))
+      && (value.target === "dbus-interface" || value.target === "db-server" || /^db-server:[A-Za-z0-9_][A-Za-z0-9_-]*$/.test(value.target)))
     || (value.type === "navigate"
       && typeof value.path === "string"
       && value.path.length > 0)
@@ -20,7 +25,8 @@ export function createPackageChannel({ enabled, name, onMessage }) {
     return {
       channel: null,
       refresh() {},
-    selectJob() {},
+      selectJob() {},
+      jobSaveState() {},
       newJob() {},
       openCreateModal() {},
       navigate() {},
@@ -71,6 +77,7 @@ export function createPackageChannel({ enabled, name, onMessage }) {
     ready(surface = "") { send({ type: "ready", ...(surface ? { surface } : {}) }); },
     refresh() { send({ type: "refresh" }); },
     selectJob(name, { sync = false } = {}) { send({ type: "select-job", name, ...(sync ? { sync: true } : {}) }); },
+    jobSaveState(state) { send({ type: "job-save-state", ...state }); },
     newJob() { send({ type: "new-job" }); },
     openCreateModal(target) { send({ type: "open-create-modal", target }); },
     navigate(path) { send({ type: "navigate", path }); },

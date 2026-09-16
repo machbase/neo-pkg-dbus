@@ -50,8 +50,7 @@ function reply(jobs, daemonState) {
 }
 
 if (!factory.ok) api.http.fail(factory.error);
-else factory.value.list((listError, jobs) => {
-  if (listError) { api.http.fail(listError); return; }
-  if (!factory.value.isLs) { reply(jobs, null); return; }
-  factory.value.daemonStatus((_daemonError, daemonState) => reply(jobs, daemonState));
+else factory.value.health((healthError, value) => {
+  if (healthError) { api.http.fail(healthError); return; }
+  reply(value.jobs, value.daemonState);
 });

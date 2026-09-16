@@ -7,6 +7,10 @@ export const minimumIntervalMs = 1000;
 export const retryConfigurable = true;
 export const tagCsvImporter = null;
 
+export function dataCountLimit() {
+  return null;
+}
+
 export function resolveJobFormMode({ settings, settingsLoading = false, settingsError = null } = {}) {
   if (settingsLoading || settingsError || !settings || !Object.hasOwn(settings, 'provider')) return 'blocked';
   return 'generic';

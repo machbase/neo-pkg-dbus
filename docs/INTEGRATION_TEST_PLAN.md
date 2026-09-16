@@ -13,7 +13,7 @@ Record the Neo version, Docker CPU quota, free disk space, `/tmp` usage, DBus in
 - Stop every Job and confirm that health, UI, and the actual process state all report `stopped` consistently.
 - Verify that Job Start resets overrun statistics.
 - Force a Neo container stop/start and verify that the JSH service and its Go child terminate, no orphan collector remains, and only active Jobs resume.
-- Edit the database profile while the package service is stopped. Confirm that the snapshot is saved without implicitly starting the service.
+- Edit the database profile while the package service is stopped. Confirm that the collector policy/secret files are saved without implicitly starting the service.
 
 ## 2. Shared database profile and table policy
 
@@ -127,4 +127,3 @@ The package team should ask the delivery user to perform these GitHub ZIP tests 
 3. Confirm that ZIP extraction removing executable bits is corrected and `neo-dbus-collector` runs with mode `0755`.
 4. Confirm package UI/public URL access, then test stop/uninstall and an upgrade from the prior package.
 5. Confirm no collector remains after stop/uninstall and that configuration, logs, and Job state follow the intended upgrade/removal policy.
-

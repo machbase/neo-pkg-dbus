@@ -51,6 +51,7 @@ await api.interfaces.discover({ busType: "system", destination: "com.example.Plc
 assert.equal(api.interfaces.saveAll, undefined);
 assert.equal(api.jobs.install, undefined);
 await api.methods.create("plc", { id: "read" });
+await api.jobs.status("line-a");
 await api.dbus.call({ interfaceId: "plc", methodId: "read", inputs: { count: 1 } });
 await api.db.preview.tables({ host: "127.0.0.1", port: 5656, user: "sys", password: "manager" });
 await api.db.preview.columns({ host: "127.0.0.1", port: 5656, user: "sys", password: "manager", table: "TAG" });
@@ -64,6 +65,7 @@ assert.deepEqual(JSON.parse(calls.find((call) => call.url.endsWith("/settings") 
   defaults: { database: { server: "local" } },
 });
 assert.ok(urls.some((url) => url.endsWith("/dbus-interface/list")));
+assert.ok(urls.some((url) => url.includes("/job/status?name=line-a")));
 assert.ok(urls.some((url) => url.includes("/dbus-interface?id=plc")));
 assert.deepEqual(JSON.parse(calls.find((call) => call.url.endsWith("/dbus-interface/discover")).options.body), { busType: "system", destination: "com.example.Plc", objectPath: "/plc" });
 assert.deepEqual(JSON.parse(calls.find((call) => call.url.endsWith("/dbus/call")).options.body), { interfaceId: "plc", methodId: "read", inputs: { count: 1 } });
@@ -80,7 +82,13 @@ assert.equal(data.searchParams.get("table"), "TAG");
 assert.deepEqual(data.searchParams.getAll("names"), ["A", "B"]);
 
 assert.equal(isPackageMessage({ type: "open-create-modal", target: "dbus-interface" }), true);
+assert.equal(isPackageMessage({ type: "open-create-modal", target: "db-server:localhost" }), true);
+assert.equal(isPackageMessage({ type: "open-create-modal", target: "db-server:../bad" }), false);
 assert.equal(isPackageMessage({ type: "ready" }), true);
+assert.equal(isPackageMessage({ type: "job-save-state", active: true, token: "save-1", startedAt: 1, expiresAt: 2 }), true);
+assert.equal(isPackageMessage({ type: "job-save-state", active: false, token: "save-1" }), true);
+assert.equal(isPackageMessage({ type: "job-save-state", active: true, token: "", startedAt: 1, expiresAt: 2 }), false);
+assert.equal(isPackageMessage({ type: "job-save-state", active: true, token: "save-1" }), false);
 assert.equal(isPackageMessage({ type: "open-create-modal", target: "profile" }), false);
 const sent = [];
 globalThis.BroadcastChannel = class { postMessage(value) { sent.push(value); } close() {} };
@@ -91,4 +99,11 @@ assert.deepEqual(sent, [{ type: "ready" }, { type: "open-create-modal", target: 
 sent.length = 0;
 channel.ready("side");
 assert.deepEqual(sent, [{ type: "ready", surface: "side" }]);
+sent.length = 0;
+channel.jobSaveState({ active: true, token: "save-1", startedAt: 1, expiresAt: 2 });
+channel.jobSaveState({ active: false, token: "save-1" });
+assert.deepEqual(sent, [
+  { type: "job-save-state", active: true, token: "save-1", startedAt: 1, expiresAt: 2 },
+  { type: "job-save-state", active: false, token: "save-1" },
+]);
 console.log("api and channel contract tests passed");

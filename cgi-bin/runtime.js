@@ -761,6 +761,9 @@ var require_repository = __commonJS({
       file(name) {
         return path.join(this.directory, `${validateJobName(name)}.json`);
       }
+      exists(name) {
+        return fs.existsSync(this.file(name));
+      }
       parse(name) {
         let document;
         try {
@@ -811,6 +814,17 @@ var require_repository = __commonJS({
         }
         return document;
       }
+      // LS holds the per-Job mutation lock before calling this method, so the
+      // canonical document can be committed with the same atomic file replacement
+      // used by Update. This avoids leaving a partially written 1MB Job after an
+      // interrupted CGI process.
+      createAtomic(name, config) {
+        validateJobName(name);
+        if (this.exists(name)) throw error("JOB_ALREADY_EXISTS", "\uAC19\uC740 \uC774\uB984\uC758 Job\uC774 \uC774\uBBF8 \uC788\uC2B5\uB2C8\uB2E4.", { name });
+        const document = { ...config, name, revision: 1 };
+        writeJsonAtomic(this.file(name), document);
+        return document;
+      }
       save(name, document, expectedRevision) {
         validateJobName(name);
         const file = this.file(name);
@@ -830,6 +844,15 @@ var require_repository = __commonJS({
       remove(name) {
         this.read(name);
         fs.unlinkSync(this.file(name));
+        return { name };
+      }
+      discard(name) {
+        const file = this.file(name);
+        try {
+          fs.unlinkSync(file);
+        } catch (failure) {
+          if (!failure || failure.code !== "ENOENT") throw failure;
+        }
         return { name };
       }
       list() {
@@ -855,6 +878,469 @@ var require_repository = __commonJS({
   }
 });
 
+// cgi-bin/src/jobs/operation-lock.js
+var require_operation_lock = __commonJS({
+  "cgi-bin/src/jobs/operation-lock.js"(exports2, module2) {
+    "use strict";
+    var fs = require("fs");
+    var path = require("path");
+    var process = require("process");
+    var { error } = require_errors();
+    var DEFAULT_LEASE_MS = 30 * 1e3;
+    var DEFAULT_HEARTBEAT_MS = 5 * 1e3;
+    var MAX_ACQUIRE_ATTEMPTS = 8;
+    function defaultToken() {
+      return `${process.pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+    }
+    function jobConflict(name) {
+      return error("JOB_CONFLICT", "\uB2E4\uB978 \uC694\uCCAD\uC774 \uAC19\uC740 Job\uC744 \uBCC0\uACBD\uD558\uACE0 \uC788\uC2B5\uB2C8\uB2E4.", { name });
+    }
+    function defaultIsProcessAlive(pid) {
+      try {
+        const result = process.kill(pid, 0);
+        return !isConfirmedMissingProcess(result);
+      } catch (failure) {
+        return !isConfirmedMissingProcess(failure);
+      }
+    }
+    function isConfirmedMissingProcess(result) {
+      if (result === false || Boolean(result && result.code === "ESRCH")) return true;
+      let message = "";
+      try {
+        message = String(result && result.message ? result.message : result || "");
+      } catch (_) {
+      }
+      return /\b(?:no such process|process already finished)\b/i.test(message);
+    }
+    function createJobOperationLock(options) {
+      const settings = options || {};
+      const fileSystem = settings.fs || fs;
+      const directory = settings.directory || path.join(settings.cgiRoot, "conf.d", ".job-operation-locks");
+      const now = settings.now || Date.now;
+      const randomToken = settings.randomToken || defaultToken;
+      const randomReclaimToken = settings.randomReclaimToken || defaultToken;
+      const startTimer = settings.setInterval || setInterval;
+      const stopTimer = settings.clearInterval || clearInterval;
+      const isProcessAlive = settings.isProcessAlive || defaultIsProcessAlive;
+      const leaseMs = settings.leaseMs === void 0 ? DEFAULT_LEASE_MS : settings.leaseMs;
+      const heartbeatMs = settings.heartbeatMs === void 0 ? DEFAULT_HEARTBEAT_MS : settings.heartbeatMs;
+      fileSystem.mkdirSync(directory, { recursive: true });
+      function isMissing(failure) {
+        return Boolean(failure && failure.code === "ENOENT");
+      }
+      function isAlreadyPresent(failure, target) {
+        if (failure && failure.code === "EEXIST") return true;
+        try {
+          return fileSystem.existsSync(target);
+        } catch (_) {
+          return false;
+        }
+      }
+      function modifiedAt(target) {
+        const stat = fileSystem.statSync(target);
+        if (stat.mtime && typeof stat.mtime.unixMilli === "function") {
+          const value = stat.mtime.unixMilli();
+          if (Number.isFinite(value)) return value;
+        }
+        if (stat.mtime && typeof stat.mtime.getTime === "function") {
+          const value = stat.mtime.getTime();
+          if (Number.isFinite(value)) return value;
+        }
+        return null;
+      }
+      function isDirectory(target) {
+        const stat = fileSystem.statSync(target);
+        return typeof stat.isDirectory === "function" ? stat.isDirectory() : Boolean(stat.isDirectory);
+      }
+      function isValidOwner(owner) {
+        return Boolean(owner) && typeof owner.token === "string" && owner.token.length > 0 && Number.isSafeInteger(owner.pid) && owner.pid > 0 && Number.isFinite(owner.acquiredAt) && Number.isFinite(owner.heartbeatAt) && owner.heartbeatAt >= owner.acquiredAt;
+      }
+      function writeAll(descriptor, content) {
+        let remaining = content;
+        while (remaining.length > 0) {
+          const count = fileSystem.writeSync(descriptor, remaining);
+          if (!Number.isInteger(count) || count <= 0 || count > remaining.length) {
+            const failure = new Error("lock \uBB38\uC11C\uB97C \uB05D\uAE4C\uC9C0 \uAE30\uB85D\uD558\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.");
+            failure.code = "EIO";
+            throw failure;
+          }
+          remaining = remaining.slice(count);
+        }
+      }
+      function unlinkIfPresent(target) {
+        try {
+          fileSystem.unlinkSync(target);
+          return true;
+        } catch (failure) {
+          if (isMissing(failure)) return false;
+          throw failure;
+        }
+      }
+      function writeExclusive(target, document) {
+        let descriptor;
+        let created = false;
+        try {
+          descriptor = fileSystem.openSync(target, "wx", 384);
+          created = true;
+          writeAll(descriptor, `${JSON.stringify(document)}
+`);
+          if (typeof fileSystem.fsyncSync === "function") fileSystem.fsyncSync(descriptor);
+          fileSystem.closeSync(descriptor);
+          descriptor = void 0;
+        } catch (failure) {
+          if (descriptor !== void 0) {
+            try {
+              fileSystem.closeSync(descriptor);
+            } catch (closeFailure) {
+              failure.closeError = closeFailure;
+            }
+          }
+          if (created) {
+            try {
+              unlinkIfPresent(target);
+            } catch (cleanupFailure) {
+              failure.cleanupError = cleanupFailure;
+            }
+          }
+          throw failure;
+        }
+      }
+      function ownerDocument(token, timestamp) {
+        return {
+          token,
+          pid: process.pid,
+          acquiredAt: timestamp,
+          heartbeatAt: timestamp
+        };
+      }
+      function readJsonOwner(target) {
+        try {
+          const owner = JSON.parse(fileSystem.readFileSync(target, "utf8"));
+          return isValidOwner(owner) ? owner : null;
+        } catch (_) {
+          return null;
+        }
+      }
+      function normalizedEntries(target) {
+        return fileSystem.readdirSync(target).filter((entry) => entry !== "." && entry !== "..");
+      }
+      function newestModifiedAt(target, entries) {
+        let newest = modifiedAt(target);
+        for (const entry of entries || []) {
+          try {
+            const value = modifiedAt(path.join(target, entry));
+            if (Number.isFinite(value) && (!Number.isFinite(newest) || value > newest)) newest = value;
+          } catch (_) {
+          }
+        }
+        return newest;
+      }
+      function inspectLegacyLock(lockPath) {
+        let entries;
+        try {
+          entries = normalizedEntries(lockPath);
+        } catch (failure) {
+          if (isMissing(failure)) return { missing: true };
+          throw failure;
+        }
+        const ownerFiles = entries.filter((entry) => /^owner.*\.json$/.test(entry));
+        const temporaryFiles = entries.filter((entry) => /^owner\.json\.tmp-/.test(entry));
+        const heartbeatFiles = entries.filter((entry) => /^heartbeat-/.test(entry));
+        const unexpected = entries.filter((entry) => !ownerFiles.includes(entry) && !temporaryFiles.includes(entry) && !heartbeatFiles.includes(entry));
+        const lastModified = newestModifiedAt(lockPath, entries);
+        if (!entries.includes("owner.json")) {
+          return ownerFiles.length === 0 && unexpected.length === 0 ? { missing: false, type: "legacy-directory", incomplete: true, entries, lastActivity: lastModified } : { missing: false, type: "legacy-directory", ambiguous: true, entries, lastActivity: lastModified };
+        }
+        if (ownerFiles.length !== 1 || temporaryFiles.length !== 0 || unexpected.length !== 0) {
+          return { missing: false, type: "legacy-directory", ambiguous: true, entries, lastActivity: lastModified };
+        }
+        const owner = readJsonOwner(path.join(lockPath, "owner.json"));
+        if (!owner) return { missing: false, type: "legacy-directory", incomplete: true, entries, lastActivity: lastModified };
+        let heartbeat = owner.heartbeatAt;
+        try {
+          const value = Number(String(fileSystem.readFileSync(
+            path.join(lockPath, `heartbeat-${encodeURIComponent(owner.token)}`),
+            "utf8"
+          )).trim());
+          if (Number.isFinite(value) && value >= owner.acquiredAt) heartbeat = value;
+        } catch (_) {
+        }
+        return { missing: false, type: "legacy-directory", owner, entries, lastActivity: heartbeat };
+      }
+      function inspectLock(lockPath) {
+        try {
+          if (isDirectory(lockPath)) return inspectLegacyLock(lockPath);
+        } catch (failure) {
+          if (isMissing(failure)) return { missing: true };
+          throw failure;
+        }
+        let lastActivity;
+        try {
+          lastActivity = modifiedAt(lockPath);
+        } catch (failure) {
+          if (isMissing(failure)) return { missing: true };
+          throw failure;
+        }
+        const owner = readJsonOwner(lockPath);
+        if (!owner) return { missing: false, type: "file", incomplete: true, lastActivity };
+        return { missing: false, type: "file", owner, lastActivity: owner.heartbeatAt };
+      }
+      function requireReclaimable(state, name) {
+        if (!state || state.missing) return;
+        if (state.ambiguous) throw jobConflict(name);
+        if (!Number.isFinite(state.lastActivity) || now() - state.lastActivity < leaseMs) throw jobConflict(name);
+        if (state.incomplete) return;
+        let alive = true;
+        try {
+          alive = isProcessAlive(state.owner.pid);
+        } catch (_) {
+          alive = true;
+        }
+        if (!isConfirmedMissingProcess(alive)) throw jobConflict(name);
+      }
+      function guardOwnerFile(guardPath) {
+        return path.join(guardPath, "owner.json");
+      }
+      function guardClaimFile(guardPath, token) {
+        return path.join(guardPath, `claim-${encodeURIComponent(token)}.json`);
+      }
+      function writeExisting(target, document) {
+        let descriptor;
+        try {
+          descriptor = fileSystem.openSync(target, "w", 384);
+          if (typeof fileSystem.fchmodSync === "function") fileSystem.fchmodSync(descriptor, 384);
+          writeAll(descriptor, `${JSON.stringify(document)}
+`);
+          if (typeof fileSystem.fsyncSync === "function") fileSystem.fsyncSync(descriptor);
+          fileSystem.closeSync(descriptor);
+          descriptor = void 0;
+        } catch (failure) {
+          if (descriptor !== void 0) {
+            try {
+              fileSystem.closeSync(descriptor);
+            } catch (closeFailure) {
+              failure.closeError = closeFailure;
+            }
+          }
+          throw failure;
+        }
+      }
+      function inspectGuard(guardPath) {
+        let entries;
+        try {
+          entries = normalizedEntries(guardPath);
+        } catch (failure) {
+          if (isMissing(failure)) return { missing: true };
+          throw failure;
+        }
+        const lastActivity = newestModifiedAt(guardPath, entries);
+        if (entries.length === 0) return { missing: false, empty: true, entries, lastActivity };
+        if (entries.length !== 1) {
+          return { missing: false, ambiguous: true, entries, lastActivity };
+        }
+        const entry = entries[0];
+        const isOwner = entry === "owner.json";
+        const isClaim = /^claim-.*\.json$/.test(entry);
+        if (!isOwner && !isClaim) return { missing: false, ambiguous: true, entries, lastActivity };
+        const owner = readJsonOwner(path.join(guardPath, entry));
+        if (!owner || isClaim && entry !== path.basename(guardClaimFile(guardPath, owner.token))) {
+          return { missing: false, incomplete: true, entry, entries, lastActivity };
+        }
+        return { missing: false, owner, entry, entries, lastActivity: owner.heartbeatAt };
+      }
+      function releaseGuard(guardPath, ownerPath, token) {
+        const current = readJsonOwner(ownerPath);
+        if (!current || current.token !== token) return;
+        try {
+          if (!unlinkIfPresent(ownerPath)) return;
+        } catch (_) {
+          return;
+        }
+        try {
+          fileSystem.rmdirSync(guardPath);
+        } catch (_) {
+        }
+      }
+      function acquireGuard(guardPath, name) {
+        for (let attempt = 0; attempt < MAX_ACQUIRE_ATTEMPTS; attempt += 1) {
+          try {
+            fileSystem.mkdirSync(guardPath);
+          } catch (failure) {
+            if (!isAlreadyPresent(failure, guardPath)) throw failure;
+          }
+          const state = inspectGuard(guardPath);
+          if (state.missing) continue;
+          if (state.empty) {
+            const token2 = randomReclaimToken();
+            const ownerPath = guardOwnerFile(guardPath);
+            try {
+              writeExclusive(ownerPath, ownerDocument(token2, now()));
+              return { token: token2, release() {
+                releaseGuard(guardPath, ownerPath, token2);
+              } };
+            } catch (failure) {
+              if (isAlreadyPresent(failure, ownerPath) || isMissing(failure)) continue;
+              throw failure;
+            }
+          }
+          requireReclaimable(state, name);
+          const current = inspectGuard(guardPath);
+          if (current.missing || current.empty) continue;
+          requireReclaimable(current, name);
+          if (state.entry !== current.entry) throw jobConflict(name);
+          if (state.owner && (!current.owner || current.owner.token !== state.owner.token)) throw jobConflict(name);
+          const currentPath = path.join(guardPath, current.entry);
+          if (current.entry !== "owner.json") {
+            if (!unlinkIfPresent(currentPath)) continue;
+            continue;
+          }
+          const token = randomReclaimToken();
+          const claimPath = guardClaimFile(guardPath, token);
+          try {
+            fileSystem.renameSync(currentPath, claimPath);
+          } catch (failure) {
+            if (isMissing(failure)) continue;
+            throw failure;
+          }
+          try {
+            writeExisting(claimPath, ownerDocument(token, now()));
+          } catch (failure) {
+            throw failure;
+          }
+          return { token, release() {
+            releaseGuard(guardPath, claimPath, token);
+          } };
+        }
+        throw jobConflict(name);
+      }
+      function removeLegacyLock(lockPath, expected, name) {
+        const current = inspectLegacyLock(lockPath);
+        requireReclaimable(current, name);
+        if (expected.owner && (!current.owner || current.owner.token !== expected.owner.token)) throw jobConflict(name);
+        if (current.ambiguous) throw jobConflict(name);
+        for (const entry of current.entries || []) {
+          const target = path.join(lockPath, entry);
+          try {
+            if (isDirectory(target)) throw jobConflict(name);
+          } catch (failure) {
+            if (failure && failure.code === "JOB_CONFLICT") throw failure;
+            if (!isMissing(failure)) throw failure;
+            continue;
+          }
+          unlinkIfPresent(target);
+        }
+        try {
+          fileSystem.rmdirSync(lockPath);
+        } catch (failure) {
+          if (!isMissing(failure)) throw failure;
+        }
+      }
+      function removeStaleLock(lockPath, state, name) {
+        const current = inspectLock(lockPath);
+        if (current.missing) return;
+        requireReclaimable(current, name);
+        if (state.owner && (!current.owner || current.owner.token !== state.owner.token)) throw jobConflict(name);
+        if (current.type === "legacy-directory") removeLegacyLock(lockPath, current, name);
+        else unlinkIfPresent(lockPath);
+      }
+      function readOwnedFile(lockPath, name, token) {
+        const state = inspectLock(lockPath);
+        if (state.missing || state.type !== "file" || !state.owner || state.owner.token !== token) throw jobConflict(name);
+        return state.owner;
+      }
+      function replaceOwner(lockPath, name, token, owner) {
+        const temporaryPath = `${lockPath}.tmp-${defaultToken()}`;
+        try {
+          writeExclusive(temporaryPath, owner);
+          readOwnedFile(lockPath, name, token);
+          fileSystem.renameSync(temporaryPath, lockPath);
+        } catch (failure) {
+          try {
+            unlinkIfPresent(temporaryPath);
+          } catch (cleanupFailure) {
+            failure.cleanupError = cleanupFailure;
+          }
+          throw failure;
+        }
+      }
+      function removeOwnedFile(lockPath, name, token) {
+        let owner;
+        try {
+          owner = readOwnedFile(lockPath, name, token);
+        } catch (_) {
+          return false;
+        }
+        if (owner.token !== token) return false;
+        return unlinkIfPresent(lockPath);
+      }
+      function createHandle(name, lockPath, token) {
+        function assertOwned() {
+          readOwnedFile(lockPath, name, token);
+        }
+        let timer;
+        try {
+          timer = startTimer(() => {
+            try {
+              const owner = readOwnedFile(lockPath, name, token);
+              replaceOwner(lockPath, name, token, { ...owner, heartbeatAt: now() });
+            } catch (_) {
+            }
+          }, heartbeatMs);
+        } catch (failure) {
+          try {
+            removeOwnedFile(lockPath, name, token);
+          } catch (cleanupFailure) {
+            failure.cleanupError = cleanupFailure;
+          }
+          throw failure;
+        }
+        function release() {
+          let timerFailure = null;
+          try {
+            stopTimer(timer);
+          } catch (failure) {
+            timerFailure = failure;
+          }
+          removeOwnedFile(lockPath, name, token);
+          if (timerFailure) throw timerFailure;
+        }
+        return { token, assertOwned, release };
+      }
+      function acquire(name) {
+        const lockPath = path.join(directory, `${name}.lock`);
+        const guardPath = `${lockPath}.reclaim`;
+        const guard = acquireGuard(guardPath, name);
+        let handle;
+        try {
+          const state = inspectLock(lockPath);
+          if (!state.missing) {
+            requireReclaimable(state, name);
+            removeStaleLock(lockPath, state, name);
+          }
+          const token = randomToken();
+          const timestamp = now();
+          try {
+            writeExclusive(lockPath, ownerDocument(token, timestamp));
+          } catch (failure) {
+            if (isAlreadyPresent(failure, lockPath)) throw jobConflict(name);
+            throw failure;
+          }
+          handle = createHandle(name, lockPath, token);
+        } finally {
+          guard.release();
+        }
+        return handle;
+      }
+      function assertAvailable(name) {
+        const state = inspectLock(path.join(directory, `${name}.lock`));
+        if (!state.missing) requireReclaimable(state, name);
+      }
+      return { acquire, assertAvailable };
+    }
+    module2.exports = { createJobOperationLock };
+  }
+});
+
 // cgi-bin/src/db/server-store.js
 var require_server_store = __commonJS({
   "cgi-bin/src/db/server-store.js"(exports2, module2) {
@@ -863,6 +1349,7 @@ var require_server_store = __commonJS({
     var path = require("path");
     var { writeJsonAtomic } = require_atomic_json();
     var { error } = require_errors();
+    var { createJobOperationLock } = require_operation_lock();
     var SERVER_NAME = /^[A-Za-z0-9_][A-Za-z0-9_-]*$/;
     var JOB_NAME = /^[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?$/;
     var SQL_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -890,6 +1377,9 @@ var require_server_store = __commonJS({
       const directory = settings.directory || path.join(settings.cgiRoot, "conf.d", "db-servers");
       const jobDirectory = settings.jobDir || (settings.cgiRoot ? path.join(settings.cgiRoot, "conf.d", "jobs") : path.join(path.dirname(directory), "jobs"));
       const atomicWriter = settings.atomicWriter || writeJsonAtomic;
+      const operationLock = settings.operationLock || createJobOperationLock({
+        directory: settings.lockDirectory || path.join(directory, ".operation-locks")
+      });
       function file(name) {
         return path.join(directory, `${validateName(name)}.json`);
       }
@@ -908,12 +1398,14 @@ var require_server_store = __commonJS({
           });
         }
         try {
-          return validateDocument(validName, {
+          const document = validateDocument(validName, {
             defaultTable: "",
             valueColumn: "",
             stringValueColumn: "",
             ...JSON.parse(source)
           });
+          if (document.defaultTable && !document.valueColumn) document.valueColumn = "VALUE";
+          return document;
         } catch (parseError) {
           if (parseError && parseError.code) throw parseError;
           throw error("DB_SERVER_INVALID", "\uB4F1\uB85D DB server JSON\uC744 \uC77D\uC744 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.", { name: validName });
@@ -938,6 +1430,7 @@ var require_server_store = __commonJS({
           throw error("DB_SERVER_INVALID", "DB server \uC694\uCCAD\uC740 \uAC1D\uCCB4\uC5EC\uC57C \uD569\uB2C8\uB2E4.");
         }
         const name = validateName(current ? current.name : payload.name);
+        const defaultTable = typeof payload.defaultTable === "string" ? payload.defaultTable.toUpperCase() : "";
         return validateDocument(name, {
           schemaVersion: 1,
           name,
@@ -945,8 +1438,8 @@ var require_server_store = __commonJS({
           port: Number(payload.port),
           user: payload.user,
           password: payload.password,
-          defaultTable: typeof payload.defaultTable === "string" ? payload.defaultTable.toUpperCase() : "",
-          valueColumn: typeof payload.valueColumn === "string" ? payload.valueColumn.toUpperCase() : "",
+          defaultTable,
+          valueColumn: typeof payload.valueColumn === "string" && payload.valueColumn.trim() ? payload.valueColumn.toUpperCase() : defaultTable ? "VALUE" : "",
           stringValueColumn: typeof payload.stringValueColumn === "string" ? payload.stringValueColumn.toUpperCase() : ""
         });
       }
@@ -962,7 +1455,7 @@ var require_server_store = __commonJS({
           user: "sys",
           password: "manager",
           defaultTable: "DEFAULT_DBUS",
-          valueColumn: "",
+          valueColumn: "VALUE",
           stringValueColumn: ""
         }));
       }
@@ -1012,40 +1505,29 @@ var require_server_store = __commonJS({
           return result;
         }, []);
       }
-      function lockFile(name) {
-        return path.join(directory, `.${validateName(name)}.lock`);
-      }
-      function acquireCreateLock(name) {
-        fs.mkdirSync(directory, { recursive: true });
-        const target = lockFile(name);
-        let descriptor;
-        try {
-          descriptor = fs.openSync(target, "wx");
-        } catch (failure) {
-          if (failure && failure.code === "EEXIST") {
-            throw error("DB_SERVER_CREATE_LOCKED", "\uAC19\uC740 \uC774\uB984\uC758 DB server \uC0DD\uC131\uC774 \uC774\uBBF8 \uC9C4\uD589 \uC911\uC774\uAC70\uB098 \uC774\uC804 \uC7A0\uAE08\uC774 \uB0A8\uC544 \uC788\uC2B5\uB2C8\uB2E4.", {
-              name,
-              staleLockRequiresManualReview: true
-            });
-          }
-          throw failure;
-        }
-        try {
-          fs.writeSync(descriptor, `${JSON.stringify({ schemaVersion: 1, name, createdAt: (/* @__PURE__ */ new Date()).toISOString() })}
-`);
-          if (typeof fs.fsyncSync === "function") fs.fsyncSync(descriptor);
-        } finally {
-          try {
-            fs.closeSync(descriptor);
-          } catch (_) {
-          }
-        }
-        return target;
-      }
       function complete(callback, operation) {
         try {
           callback(null, operation());
         } catch (failure) {
+          callback(failure);
+        }
+      }
+      function withLock(name, callback, operation) {
+        let handle;
+        try {
+          handle = operationLock.acquire(`db-server-${validateName(name)}`);
+          const value = operation(handle);
+          handle.release();
+          handle = null;
+          callback(null, value);
+        } catch (failure) {
+          if (handle) {
+            try {
+              handle.release();
+            } catch (cleanupError) {
+              failure.cleanupError = cleanupError;
+            }
+          }
           callback(failure);
         }
       }
@@ -1074,37 +1556,42 @@ var require_server_store = __commonJS({
           });
         },
         create(payload, callback) {
-          complete(callback, () => {
-            const document = documentFrom(payload, null);
-            let reservation = null;
-            try {
-              reservation = acquireCreateLock(document.name);
-              if (fs.existsSync(file(document.name))) {
-                throw error("DB_SERVER_ALREADY_EXISTS", "\uAC19\uC740 \uC774\uB984\uC758 DB server\uAC00 \uC774\uBBF8 \uC788\uC2B5\uB2C8\uB2E4.", { name: document.name });
-              }
-              atomicWriter(file(document.name), document);
-              return publicValue(document);
-            } finally {
-              if (reservation) {
-                try {
-                  fs.unlinkSync(reservation);
-                } catch (_) {
-                }
-              }
+          let document;
+          try {
+            document = documentFrom(payload, null);
+          } catch (failure) {
+            callback(failure);
+            return;
+          }
+          withLock(document.name, (failure, value) => {
+            if (failure && failure.code === "JOB_CONFLICT") {
+              callback(error("DB_SERVER_CREATE_LOCKED", "\uAC19\uC740 \uC774\uB984\uC758 DB server \uC0DD\uC131\uC774 \uC774\uBBF8 \uC9C4\uD589 \uC911\uC785\uB2C8\uB2E4.", {
+                name: document.name
+              }));
+              return;
             }
+            callback(failure, value);
+          }, (handle) => {
+            if (fs.existsSync(file(document.name))) {
+              throw error("DB_SERVER_ALREADY_EXISTS", "\uAC19\uC740 \uC774\uB984\uC758 DB server\uAC00 \uC774\uBBF8 \uC788\uC2B5\uB2C8\uB2E4.", { name: document.name });
+            }
+            handle.assertOwned();
+            atomicWriter(file(document.name), document);
+            return publicValue(document);
           });
         },
         update(name, payload, callback) {
-          complete(callback, () => {
+          withLock(name, callback, (handle) => {
             const current = read(name);
             if (!current) throw error("DB_SERVER_NOT_FOUND", "\uB4F1\uB85D DB server\uB97C \uCC3E\uC744 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.", { name });
             const document = documentFrom(payload, current);
+            handle.assertOwned();
             writeJsonAtomic(file(name), document);
             return publicValue(document);
           });
         },
         setDefaultTableColumns(name, table, valueColumn, stringValueColumn, callback) {
-          complete(callback, () => {
+          withLock(name, callback, (handle) => {
             const current = read(name);
             if (!current) throw error("DB_SERVER_NOT_FOUND", "\uB4F1\uB85D DB server\uB97C \uCC3E\uC744 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.", { name });
             const normalizedTable = String(table || "").trim().toUpperCase();
@@ -1119,12 +1606,13 @@ var require_server_store = __commonJS({
               valueColumn: normalizedValue,
               stringValueColumn: normalizedStringValue
             });
+            handle.assertOwned();
             writeJsonAtomic(file(current.name), document);
             return publicValue(document);
           });
         },
         remove(name, callback) {
-          complete(callback, () => {
+          withLock(name, callback, (handle) => {
             const current = read(name);
             if (!current) throw error("DB_SERVER_NOT_FOUND", "\uB4F1\uB85D DB server\uB97C \uCC3E\uC744 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.", { name });
             const jobs = referencedJobs(current.name);
@@ -1134,6 +1622,7 @@ var require_server_store = __commonJS({
                 jobs
               });
             }
+            handle.assertOwned();
             fs.unlinkSync(file(current.name));
             return { name: current.name };
           });
@@ -1487,8 +1976,27 @@ var require_data_viewer = __commonJS({
         if (!document || typeof document !== "object" || Array.isArray(document) || document.schemaVersion !== 1 || document.name !== name || !document.database || typeof document.database !== "object" || Array.isArray(document.database) || !Array.isArray(document.methodCalls) || document.methodCalls.length < 1) {
           invalidJob(name);
         }
-        const database = document.database;
+        let database = document.database;
         if (typeof database.server !== "string" || !database.server || typeof database.table !== "string" || typeof database.valueColumn !== "string" || typeof database.stringValueColumn !== "string") invalidJob(name);
+        if (jobScopedTags) {
+          let called = false;
+          let storeError = null;
+          let server = null;
+          store.get(database.server, (failure, value) => {
+            called = true;
+            storeError = failure;
+            server = value;
+          });
+          if (!called) invalidJob(name, "\uB4F1\uB85D DB server \uC77D\uAE30\uB294 \uB3D9\uAE30 \uC644\uB8CC\uB418\uC5B4\uC57C \uD569\uB2C8\uB2E4.");
+          if (storeError) throw storeError;
+          if (!server) invalidJob(name, "\uC800\uC7A5\uB41C Job\uC758 Database Server\uB97C \uCC3E\uC744 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.");
+          database = {
+            ...database,
+            ...server.defaultTable ? { table: server.defaultTable } : {},
+            ...server.valueColumn ? { valueColumn: server.valueColumn } : {},
+            stringValueColumn: server.stringValueColumn || ""
+          };
+        }
         let table;
         let valueColumn;
         let stringValueColumn;
@@ -2241,7 +2749,8 @@ var require_settings_validator = __commonJS({
       if (value === void 0) return null;
       const interval = value?.interval;
       const writer = value?.writer;
-      if (!value || typeof value !== "object" || Array.isArray(value) || !interval || typeof interval !== "object" || Array.isArray(interval) || typeof interval.useTaskCycle !== "boolean" || !writer || typeof writer !== "object" || Array.isArray(writer) || !positiveInteger(writer.queueCapacity) || writer.queueCapacity > 1024 || !positiveInteger(writer.flushMaxRows) || writer.flushMaxRows > 65535 || !positiveInteger(writer.flushIntervalMs) || writer.flushIntervalMs > 60 * 60 * 1e3) {
+      const performance = value?.performance;
+      if (!value || typeof value !== "object" || Array.isArray(value) || !interval || typeof interval !== "object" || Array.isArray(interval) || typeof interval.useTaskCycle !== "boolean" || !writer || typeof writer !== "object" || Array.isArray(writer) || !positiveInteger(writer.queueCapacity) || writer.queueCapacity > 1024 || !positiveInteger(writer.flushMaxRows) || writer.flushMaxRows > 65535 || !positiveInteger(writer.flushIntervalMs) || writer.flushIntervalMs > 60 * 60 * 1e3 || !performance || typeof performance !== "object" || Array.isArray(performance) || typeof performance.enabled !== "boolean" || !positiveInteger(performance.jobSampleCount) || !positiveInteger(performance.writerSummaryIntervalMs)) {
         throw error("SETTINGS_INVALID", "LS interval \uC124\uC815\uC774 \uC798\uBABB\uB418\uC5C8\uC2B5\uB2C8\uB2E4.");
       }
       return {
@@ -2251,6 +2760,14 @@ var require_settings_validator = __commonJS({
           queueCapacity: writer.queueCapacity,
           flushMaxRows: writer.flushMaxRows,
           flushIntervalMs: writer.flushIntervalMs
+        },
+        // Go applies the operational floors and records a correction in the Job
+        // log. Preserve the requested values here so that audit message can show
+        // both the configured and applied values.
+        performance: {
+          enabled: performance.enabled,
+          jobSampleCount: performance.jobSampleCount,
+          writerSummaryIntervalMs: performance.writerSummaryIntervalMs
         }
       };
     }
@@ -2308,10 +2825,11 @@ var require_settings_loader = __commonJS({
           summaryIntervalMs: 60 * 60 * 1e3
         },
         // LS writer tuning is intentionally an internal deployment setting. It
-        // is copied into the Go collector snapshot but is not exposed in the UI.
+        // is copied into the Go collector policy file but is not exposed in the UI.
         ls: {
           interval: { useTaskCycle: true },
-          writer: { queueCapacity: 64, flushMaxRows: 1024, flushIntervalMs: 1e3 }
+          writer: { queueCapacity: 64, flushMaxRows: 1024, flushIntervalMs: 1e3 },
+          performance: { enabled: true, jobSampleCount: 1e3, writerSummaryIntervalMs: 3e4 }
         }
       };
     }
@@ -2341,7 +2859,8 @@ var require_settings_loader = __commonJS({
           ...base.ls,
           ...value.ls && typeof value.ls === "object" && !Array.isArray(value.ls) ? value.ls : {},
           interval: { ...base.ls.interval, ...value.ls?.interval && typeof value.ls.interval === "object" && !Array.isArray(value.ls.interval) ? value.ls.interval : {} },
-          writer: { ...base.ls.writer, ...value.ls?.writer && typeof value.ls.writer === "object" && !Array.isArray(value.ls.writer) ? value.ls.writer : {} }
+          writer: { ...base.ls.writer, ...value.ls?.writer && typeof value.ls.writer === "object" && !Array.isArray(value.ls.writer) ? value.ls.writer : {} },
+          performance: { ...base.ls.performance, ...value.ls?.performance && typeof value.ls.performance === "object" && !Array.isArray(value.ls.performance) ? value.ls.performance : {} }
         }
       });
     }
@@ -2601,7 +3120,6 @@ var require_ls_runtime = __commonJS({
       const settings = options || {};
       const cgiRoot = settings.cgiRoot;
       const controller = settings.controller;
-      const repository = settings.repository;
       const serverStore = settings.serverStore || createServerStore({ cgiRoot });
       const processApi = settings.process || process;
       const files = runtimePaths(cgiRoot);
@@ -2615,12 +3133,7 @@ var require_ls_runtime = __commonJS({
         fs.chmodSync(files.launcher, 493);
         fs.chmodSync(files.control, 493);
       }
-      function snapshot() {
-        const jobs = repository.list().map((record) => record.document).filter(Boolean).map((document) => {
-          const value = { ...document };
-          delete value.revision;
-          return value;
-        });
+      function syncConfig() {
         const settings2 = loadSettings(path.join(cgiRoot, "conf.d", "settings.json"));
         const profileName = settings2.defaults.database.server;
         const source = syncCallback((callback) => serverStore.get(profileName, callback));
@@ -2630,33 +3143,19 @@ var require_ls_runtime = __commonJS({
           host: source.host,
           port: source.port,
           user: source.user,
-          password: source.password
+          password: source.password,
+          defaultTable: source.defaultTable || "",
+          valueColumn: source.valueColumn || "",
+          stringValueColumn: source.stringValueColumn || ""
         };
-        jobs.forEach((job) => {
-          job.database = {
-            ...job.database,
-            server: profileName,
-            table: source.defaultTable || job.database.table,
-            valueColumn: source.valueColumn || job.database.valueColumn,
-            stringValueColumn: source.stringValueColumn || job.database.stringValueColumn
-          };
-        });
-        const jobNames = new Set(jobs.map((job) => job.name));
-        const active = readActiveJobs(files.active).filter((name) => jobNames.has(name));
         writeJsonAtomic(files.snapshot, {
-          schemaVersion: 1,
-          jobs,
+          schemaVersion: 2,
           logging: settings2.logging,
-          writer: settings2.ls.writer
+          writer: settings2.ls.writer,
+          performance: settings2.ls.performance
         });
         writeSecretAtomic(files.secret, { schemaVersion: 1, servers });
-        writeJsonAtomic(files.active, { schemaVersion: 1, names: active });
-      }
-      function setActive(name, active) {
-        const names = new Set(readActiveJobs(files.active));
-        if (active) names.add(name);
-        else names.delete(name);
-        writeJsonAtomic(files.active, { schemaVersion: 1, names: [...names].sort() });
+        if (!fs.existsSync(files.active)) writeJsonAtomic(files.active, { schemaVersion: 1, names: [] });
       }
       function execControl(action, name) {
         ensureExecutable();
@@ -2753,12 +3252,29 @@ var require_ls_runtime = __commonJS({
             return;
           }
           const job = runtime.jobs && runtime.jobs[name];
-          const running = job && job.state === "running";
+          const runtimeState = job && job.state;
+          const mappedState = runtimeState === "running" ? "RUNNING" : runtimeState === "starting" ? "STARTING" : runtimeState === "stopping" ? "STOPPING" : runtimeState === "failed" ? "FAILED" : "STOPPED";
           callback(null, {
-            controllerState: running ? "RUNNING" : service.controllerState === "FAILED" ? "FAILED" : "STOPPED",
-            controllerDetail: service.controllerDetail,
+            controllerState: mappedState,
+            controllerDetail: job && job.stateDetail || service.controllerDetail,
             statusError: null
           });
+        });
+      }
+      function overview(callback) {
+        controllerStatus(controller, (_unused, service) => {
+          if (service.statusError) {
+            callback(null, { service, runtime: { jobs: {} } });
+            return;
+          }
+          try {
+            callback(null, { service, runtime: readRuntime(files.runtime) });
+          } catch (runtimeError) {
+            callback(null, {
+              service: { controllerState: "UNKNOWN", controllerDetail: runtimeError.message, statusError: runtimeError },
+              runtime: { jobs: {} }
+            });
+          }
         });
       }
       function lastRun(name, callback) {
@@ -2766,6 +3282,10 @@ var require_ls_runtime = __commonJS({
           const runtime = readRuntime(files.runtime);
           const job = runtime.jobs && runtime.jobs[name];
           if (!job) {
+            callback(null, null);
+            return;
+          }
+          if (!job.lastReadAt && !job.lastStoredAt && !job.lastError) {
             callback(null, null);
             return;
           }
@@ -2804,14 +3324,14 @@ var require_ls_runtime = __commonJS({
       }
       return {
         serviceName: LS_SERVICE_NAME,
-        snapshot,
+        syncConfig,
         inspect,
         lastRun,
         install,
         daemonStatus,
         installPackage(callback) {
           try {
-            snapshot();
+            syncConfig();
           } catch (snapshotError) {
             callback(snapshotError);
             return;
@@ -2821,7 +3341,7 @@ var require_ls_runtime = __commonJS({
         ensureRunning,
         startDaemon(callback) {
           try {
-            snapshot();
+            syncConfig();
           } catch (snapshotError) {
             callback(snapshotError);
             return;
@@ -2830,29 +3350,17 @@ var require_ls_runtime = __commonJS({
         },
         start(name, callback) {
           try {
-            setActive(name, true);
             execControl("start", name);
             callback(null);
           } catch (controlError) {
-            try {
-              setActive(name, false);
-            } catch (_) {
-            }
             callback(controlError);
           }
         },
         stop(name, callback) {
-          let wasActive;
           try {
-            wasActive = readActiveJobs(files.active).includes(name);
-            setActive(name, false);
             execControl("stop", name);
             callback(null);
           } catch (controlError) {
-            try {
-              if (wasActive) setActive(name, true);
-            } catch (_) {
-            }
             callback(controlError);
           }
         },
@@ -2892,11 +3400,12 @@ var require_ls_runtime = __commonJS({
         activeNames() {
           return readActiveJobs(files.active);
         },
+        overview,
         reloadAllActive(callback) {
           let names;
           try {
             names = readActiveJobs(files.active);
-            this.snapshot();
+            this.syncConfig();
           } catch (snapshotError) {
             callback(snapshotError);
             return;
@@ -3068,7 +3577,7 @@ var require_db_api = __commonJS({
                 }
                 if (!active.length) {
                   try {
-                    runtime.snapshot();
+                    runtime.syncConfig();
                   } catch (snapshotError) {
                     fail(snapshotError);
                     return;
@@ -3560,6 +4069,7 @@ var require_validation_adapter = __commonJS({
       "numeric",
       "decimal"
     ]);
+    var INTEGER_TYPES = /* @__PURE__ */ new Set(["byte", "short", "ushort", "integer", "int", "uint", "long", "ulong"]);
     var STRING_TYPES = /* @__PURE__ */ new Set(["char", "varchar", "text", "clob", "string"]);
     function defaultDependencies(options) {
       const settings = options || {};
@@ -3605,6 +4115,52 @@ var require_validation_adapter = __commonJS({
     function typeOf(column) {
       return String(column && column.type || "").toLowerCase().replace(/\(.*/, "");
     }
+    function validatedExistingMapping(database, metadata, options) {
+      const columns = metadata && metadata.columns;
+      if (!metadata || String(metadata.tableType || "").toUpperCase() !== "TAG" || !Array.isArray(columns)) {
+        throw invalid("\uC120\uD0DD\uD55C table\uC740 TAG table\uC774\uC5B4\uC57C \uD569\uB2C8\uB2E4.", { table: database.table });
+      }
+      const primary = columns.find((column) => column && (column.primaryKey === true || column.primary === true));
+      const basetime = columns.find((column) => column && column.basetime === true);
+      const valueColumn = columnByName(columns, database.valueColumn);
+      const configuredStringColumn = String(database.stringValueColumn || "").trim();
+      const stringColumn = configuredStringColumn ? columnByName(columns, configuredStringColumn) : null;
+      if (!primary || !STRING_TYPES.has(typeOf(primary))) {
+        throw invalid("TAG name primary column\uC744 \uCC3E\uC744 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.", { table: database.table });
+      }
+      if (!basetime) {
+        throw invalid("TAG basetime column\uC744 \uCC3E\uC744 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.", { table: database.table });
+      }
+      if (!valueColumn || !NUMERIC_TYPES.has(typeOf(valueColumn))) {
+        throw invalid("database.valueColumn\uC740 \uC120\uD0DD\uD55C TAG table\uC758 \uC22B\uC790 column\uC774\uC5B4\uC57C \uD569\uB2C8\uB2E4.", {
+          problem: "value-column",
+          table: database.table,
+          valueColumn: database.valueColumn
+        });
+      }
+      if (INTEGER_TYPES.has(typeOf(valueColumn)) && options && options.fractionalValuePossible === true) {
+        throw invalid("\uC815\uC218 VALUE column\uC5D0\uB294 \uC18C\uC218 \uACB0\uACFC\uAC00 \uAC00\uB2A5\uD55C Tag Transform\uC744 \uC0AC\uC6A9\uD560 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.", {
+          problem: "fractional-value",
+          table: database.table,
+          valueColumn: database.valueColumn
+        });
+      }
+      if (configuredStringColumn && (!stringColumn || !STRING_TYPES.has(typeOf(stringColumn)))) {
+        throw invalid("database.stringValueColumn\uC740 \uBB38\uC790\uC5F4 column\uC774\uC5B4\uC57C \uD569\uB2C8\uB2E4.", {
+          problem: "string-value-column",
+          table: database.table,
+          stringValueColumn: database.stringValueColumn
+        });
+      }
+      return {
+        server: database.server,
+        table: database.table,
+        tagNameColumn: primary.name,
+        basetimeColumn: basetime.name,
+        valueColumn: valueColumn.name,
+        stringValueColumn: stringColumn ? stringColumn.name : null
+      };
+    }
     function createDatabaseValidationAdapter(options) {
       const settings = options || {};
       let dependencies = null;
@@ -3637,42 +4193,11 @@ var require_validation_adapter = __commonJS({
                 callback(unavailable(metadataError));
                 return;
               }
-              const columns = metadata && metadata.columns;
-              if (!metadata || String(metadata.tableType || "").toUpperCase() !== "TAG" || !Array.isArray(columns)) {
-                callback(invalid("\uC120\uD0DD\uD55C table\uC740 TAG table\uC774\uC5B4\uC57C \uD569\uB2C8\uB2E4.", { table: database.table }));
-                return;
+              try {
+                callback(null, validatedExistingMapping(database, metadata));
+              } catch (validationError) {
+                callback(validationError);
               }
-              const primary = columns.find((column) => column && (column.primaryKey === true || column.primary === true));
-              const basetime = columns.find((column) => column && column.basetime === true);
-              const valueColumn = columnByName(columns, database.valueColumn);
-              const configuredStringColumn = String(database.stringValueColumn || "").trim();
-              const stringColumn = configuredStringColumn ? columnByName(columns, configuredStringColumn) : null;
-              if (!primary || !STRING_TYPES.has(typeOf(primary))) {
-                callback(invalid("TAG name primary column\uC744 \uCC3E\uC744 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.", { table: database.table }));
-                return;
-              }
-              if (!basetime) {
-                callback(invalid("TAG basetime column\uC744 \uCC3E\uC744 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.", { table: database.table }));
-                return;
-              }
-              if (!valueColumn || !NUMERIC_TYPES.has(typeOf(valueColumn))) {
-                callback(invalid("database.valueColumn\uC740 \uC22B\uC790 column\uC774\uC5B4\uC57C \uD569\uB2C8\uB2E4.", { valueColumn: database.valueColumn }));
-                return;
-              }
-              if (configuredStringColumn && (!stringColumn || !STRING_TYPES.has(typeOf(stringColumn)))) {
-                callback(invalid("database.stringValueColumn\uC740 \uBB38\uC790\uC5F4 column\uC774\uC5B4\uC57C \uD569\uB2C8\uB2E4.", {
-                  stringValueColumn: database.stringValueColumn
-                }));
-                return;
-              }
-              callback(null, {
-                server: database.server,
-                table: database.table,
-                tagNameColumn: primary.name,
-                basetimeColumn: basetime.name,
-                valueColumn: valueColumn.name,
-                stringValueColumn: stringColumn ? stringColumn.name : null
-              });
             });
           });
         },
@@ -3703,12 +4228,11 @@ var require_validation_adapter = __commonJS({
                 database.table = String(database.table).trim().toUpperCase();
                 database.valueColumn = String(database.valueColumn).trim().toUpperCase();
                 database.stringValueColumn = String(database.stringValueColumn || "").trim().toUpperCase();
-                callback(null, {
-                  server: database.server,
-                  table: database.table,
-                  valueColumn: database.valueColumn,
-                  stringValueColumn: database.stringValueColumn
-                });
+                try {
+                  callback(null, validatedExistingMapping(database, metadata, options2));
+                } catch (validationError) {
+                  callback(validationError);
+                }
                 return;
               }
               if (!dependencies.tableCreator) {
@@ -3730,6 +4254,20 @@ var require_validation_adapter = __commonJS({
                   callback(createError);
                   return;
                 }
+                if (createError) {
+                  callDependency(dependencies.metadataReader, "columns", [server, request.table], (raceReadError, raceMetadata) => {
+                    if (raceReadError) {
+                      callback(unavailable(raceReadError));
+                      return;
+                    }
+                    try {
+                      callback(null, validatedExistingMapping(database, raceMetadata, options2));
+                    } catch (validationError) {
+                      callback(validationError);
+                    }
+                  });
+                  return;
+                }
                 database.table = String(created && created.table || request.table).trim().toUpperCase();
                 const complete = () => callback(null, {
                   server: database.server,
@@ -3737,7 +4275,7 @@ var require_validation_adapter = __commonJS({
                   valueColumn: database.valueColumn,
                   stringValueColumn: database.stringValueColumn
                 });
-                if (createError || typeof dependencies.serverStore.setDefaultTableColumns !== "function" || String(server.defaultTable || "").trim().toUpperCase() !== database.table) {
+                if (typeof dependencies.serverStore.setDefaultTableColumns !== "function" || String(server.defaultTable || "").trim().toUpperCase() !== database.table) {
                   complete();
                   return;
                 }
@@ -3793,7 +4331,28 @@ var require_storage_policy = __commonJS({
         ) === "string");
       });
     }
-    module2.exports = { jobNeedsStringValueColumn, selectionStorageType };
+    function tagMayProduceFractionalValue(tag) {
+      const source = tag || {};
+      const bias = source.bias === void 0 ? 0 : Number(source.bias);
+      const multiplier = source.multiplier === void 0 ? 1 : Number(source.multiplier);
+      if (!Number.isFinite(bias) || !Number.isFinite(multiplier)) return true;
+      if (!Number.isInteger(multiplier)) return true;
+      const order = Array.isArray(source.transformOrder) ? source.transformOrder : ["bias", "multiplier"];
+      const constant = order[0] === "multiplier" ? bias : bias * multiplier;
+      return !Number.isInteger(constant);
+    }
+    function jobMayProduceFractionalValue(config) {
+      return (config && Array.isArray(config.methodCalls) ? config.methodCalls : []).some((call) => {
+        const selections = Array.isArray(call && call.outputSelections) ? call.outputSelections : [{ tags: Array.isArray(call && call.tags) ? call.tags : [] }];
+        return selections.some((selection) => (Array.isArray(selection && selection.tags) ? selection.tags : []).some(tagMayProduceFractionalValue));
+      });
+    }
+    module2.exports = {
+      jobMayProduceFractionalValue,
+      jobNeedsStringValueColumn,
+      selectionStorageType,
+      tagMayProduceFractionalValue
+    };
   }
 });
 
@@ -4172,504 +4731,124 @@ var require_defaults = __commonJS({
   }
 });
 
-// cgi-bin/src/jobs/operation-lock.js
-var require_operation_lock = __commonJS({
-  "cgi-bin/src/jobs/operation-lock.js"(exports2, module2) {
+// cgi-bin/src/jobs/index-repository.js
+var require_index_repository = __commonJS({
+  "cgi-bin/src/jobs/index-repository.js"(exports2, module2) {
     "use strict";
     var fs = require("fs");
     var path = require("path");
-    var process = require("process");
+    var { writeJsonAtomic } = require_atomic_json();
     var { error } = require_errors();
-    var DEFAULT_LEASE_MS = 30 * 1e3;
-    var DEFAULT_HEARTBEAT_MS = 5 * 1e3;
-    function defaultToken() {
-      return `${process.pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
-    }
-    function jobConflict(name) {
-      return error("JOB_CONFLICT", "\uB2E4\uB978 \uC694\uCCAD\uC774 \uAC19\uC740 Job\uC744 \uBCC0\uACBD\uD558\uACE0 \uC788\uC2B5\uB2C8\uB2E4.", { name });
-    }
-    function defaultIsProcessAlive(pid) {
-      try {
-        const result = process.kill(pid, 0);
-        if (result && result.code === "ESRCH") return false;
-        return true;
-      } catch (failure) {
-        return !(failure && failure.code === "ESRCH");
+    var { validateJobName } = require_validator();
+    var INDEX_SCHEMA_VERSION = 1;
+    function tagsForCall(call) {
+      if (Array.isArray(call && call.outputSelections)) {
+        return call.outputSelections.flatMap((selection) => Array.isArray(selection.tags) ? selection.tags : []);
       }
+      return Array.isArray(call && call.tags) ? call.tags : [];
     }
-    function isConfirmedMissingProcess(result) {
-      return result === false || Boolean(result && result.code === "ESRCH");
+    function fromDocument(document) {
+      const calls = Array.isArray(document && document.methodCalls) ? document.methodCalls : [];
+      return {
+        schemaVersion: INDEX_SCHEMA_VERSION,
+        name: document.name,
+        profileId: document.profileId || "",
+        revision: document.revision,
+        intervalMs: document.schedule && document.schedule.intervalMs,
+        methodCallCount: calls.length,
+        tagCount: calls.reduce((total, call) => total + tagsForCall(call).length, 0),
+        interfaceIds: [...new Set(calls.map((call) => call.interfaceId).filter(Boolean))].sort(),
+        methodReferences: calls.map((call) => ({
+          interfaceId: call.interfaceId,
+          methodId: call.methodId,
+          callId: call.id
+        })),
+        database: {
+          server: document.database && document.database.server,
+          table: document.database && document.database.table,
+          valueColumn: document.database && document.database.valueColumn,
+          stringValueColumn: document.database && document.database.stringValueColumn || ""
+        },
+        execution: {
+          savePolicy: document.execution && document.execution.savePolicy,
+          onMethodError: document.execution && document.execution.onMethodError
+        },
+        logLevel: document.log && document.log.level || "info"
+      };
     }
-    function createJobOperationLock(options) {
-      const settings = options || {};
-      const fileSystem = settings.fs || fs;
-      const directory = settings.directory || path.join(settings.cgiRoot, "conf.d", ".job-operation-locks");
-      const now = settings.now || Date.now;
-      const randomToken = settings.randomToken || defaultToken;
-      const randomReclaimToken = settings.randomReclaimToken || defaultToken;
-      const startTimer = settings.setInterval || setInterval;
-      const stopTimer = settings.clearInterval || clearInterval;
-      const isProcessAlive = settings.isProcessAlive || defaultIsProcessAlive;
-      const leaseMs = settings.leaseMs === void 0 ? DEFAULT_LEASE_MS : settings.leaseMs;
-      const heartbeatMs = settings.heartbeatMs === void 0 ? DEFAULT_HEARTBEAT_MS : settings.heartbeatMs;
-      fileSystem.mkdirSync(directory, { recursive: true });
-      function ownerFile(lockDirectory) {
-        return path.join(lockDirectory, "owner.json");
+    function validateIndex(name, value) {
+      if (!value || typeof value !== "object" || Array.isArray(value) || value.schemaVersion !== INDEX_SCHEMA_VERSION || value.name !== name || !Number.isSafeInteger(value.revision) || value.revision < 1 || !Number.isInteger(value.methodCallCount) || value.methodCallCount < 0 || !Number.isInteger(value.tagCount) || value.tagCount < 0 || typeof value.profileId !== "string" || !Number.isSafeInteger(value.intervalMs) || value.intervalMs < 1 || !Array.isArray(value.interfaceIds) || !Array.isArray(value.methodReferences) || value.interfaceIds.some((item) => typeof item !== "string" || !item) || value.methodReferences.length !== value.methodCallCount || value.methodReferences.some((item) => !item || typeof item !== "object" || Array.isArray(item) || typeof item.interfaceId !== "string" || !item.interfaceId || typeof item.methodId !== "string" || !item.methodId || typeof item.callId !== "string" || !item.callId) || !value.database || typeof value.database !== "object" || Array.isArray(value.database) || ["server", "table", "valueColumn", "stringValueColumn"].some((field) => typeof value.database[field] !== "string") || !value.execution || typeof value.execution !== "object" || Array.isArray(value.execution) || typeof value.execution.savePolicy !== "string" || typeof value.execution.onMethodError !== "string" || typeof value.logLevel !== "string" || !value.logLevel) {
+        throw error("JOB_INVALID_CONFIG", "Job summary\uB97C \uC77D\uC744 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4. Job\uC744 \uB2E4\uC2DC \uC800\uC7A5\uD558\uC2ED\uC2DC\uC624.", {
+          name,
+          summaryUnavailable: true
+        });
       }
-      function heartbeatFile(lockDirectory, token) {
-        return path.join(lockDirectory, `heartbeat-${encodeURIComponent(token)}`);
+      return value;
+    }
+    var JobIndexRepository = class {
+      constructor(options) {
+        const settings = options || {};
+        this.directory = settings.directory || path.join(settings.cgiRoot, "conf.d", "job-index");
+        this.jobDirectory = settings.jobDirectory || path.join(settings.cgiRoot, "conf.d", "jobs");
+        fs.mkdirSync(this.directory, { recursive: true });
       }
-      function isValidOwner(owner) {
-        return Boolean(owner) && typeof owner.token === "string" && owner.token.length > 0 && Number.isSafeInteger(owner.pid) && owner.pid > 0 && Number.isFinite(owner.acquiredAt) && Number.isFinite(owner.heartbeatAt) && owner.heartbeatAt >= owner.acquiredAt;
+      file(name) {
+        return path.join(this.directory, `${validateJobName(name)}.json`);
       }
-      function cleanupDetachedDirectory(detachedDirectory) {
-        let entries;
+      jobFile(name) {
+        return path.join(this.jobDirectory, `${validateJobName(name)}.json`);
+      }
+      exists(name) {
+        return fs.existsSync(this.file(name));
+      }
+      registered(name) {
+        return fs.existsSync(this.jobFile(name)) && this.exists(name);
+      }
+      read(name) {
+        validateJobName(name);
+        let value;
         try {
-          entries = fileSystem.readdirSync(detachedDirectory);
+          value = JSON.parse(fs.readFileSync(this.file(name), "utf8"));
         } catch (failure) {
-          if (failure && failure.code === "ENOENT") return;
-          throw failure;
-        }
-        for (const entry of entries) {
-          if (entry === "." || entry === "..") continue;
-          try {
-            fileSystem.unlinkSync(path.join(detachedDirectory, entry));
-          } catch (failure) {
-            if (!failure || failure.code !== "ENOENT") throw failure;
+          if (failure && failure.code === "ENOENT") {
+            throw error("JOB_NOT_FOUND", "Job summary\uB97C \uCC3E\uC744 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.", { name, summaryUnavailable: true });
           }
+          throw error("JOB_INVALID_CONFIG", "Job summary\uB97C \uC77D\uC744 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4. Job\uC744 \uB2E4\uC2DC \uC800\uC7A5\uD558\uC2ED\uC2DC\uC624.", {
+            name,
+            summaryUnavailable: true
+          });
         }
+        return validateIndex(name, value);
+      }
+      write(document) {
+        validateJobName(document && document.name);
+        const value = validateIndex(document.name, fromDocument(document));
+        writeJsonAtomic(this.file(document.name), value);
+        return value;
+      }
+      remove(name) {
+        const target = this.file(name);
         try {
-          fileSystem.rmdirSync(detachedDirectory);
+          fs.unlinkSync(target);
         } catch (failure) {
           if (!failure || failure.code !== "ENOENT") throw failure;
         }
       }
-      function writeOwnerDocument(ownerPath, owner, name) {
-        const temporaryPath = `${ownerPath}.tmp-${defaultToken()}`;
-        let remaining = `${JSON.stringify(owner)}
-`;
-        let descriptor;
-        try {
-          descriptor = fileSystem.openSync(temporaryPath, "wx");
-          while (remaining.length > 0) {
-            const count = fileSystem.writeSync(descriptor, remaining);
-            if (!Number.isInteger(count) || count <= 0 || count > remaining.length) {
-              const failure = new Error("owner \uBB38\uC11C\uB97C \uB05D\uAE4C\uC9C0 \uAE30\uB85D\uD558\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.");
-              failure.code = "EIO";
-              throw failure;
-            }
-            remaining = remaining.slice(count);
-          }
-          if (typeof fileSystem.fsyncSync === "function") fileSystem.fsyncSync(descriptor);
-          fileSystem.closeSync(descriptor);
-          descriptor = void 0;
-          if (fileSystem.existsSync(ownerPath)) throw jobConflict(name);
-          fileSystem.renameSync(temporaryPath, ownerPath);
-        } catch (failure) {
-          if (descriptor !== void 0) {
-            try {
-              fileSystem.closeSync(descriptor);
-            } catch (closeFailure) {
-              failure.closeError = closeFailure;
-            }
-          }
+      list() {
+        if (!fs.existsSync(this.directory)) return [];
+        return fs.readdirSync(this.directory).filter((entry) => entry.endsWith(".json")).sort().flatMap((entry) => {
+          const name = entry.slice(0, -5);
           try {
-            fileSystem.unlinkSync(temporaryPath);
-          } catch (cleanupFailure) {
-            if (!cleanupFailure || cleanupFailure.code !== "ENOENT") failure.cleanupError = cleanupFailure;
-          }
-          throw failure;
-        }
-      }
-      function readCanonicalOwner(lockDirectory, name) {
-        let entries;
-        try {
-          entries = fileSystem.readdirSync(lockDirectory);
-        } catch (failure) {
-          if (failure && failure.code === "ENOENT") return void 0;
-          throw jobConflict(name);
-        }
-        const finalFiles = entries.filter((entry) => /^owner.*\.json$/.test(entry));
-        const hasOwner = entries.includes("owner.json");
-        const temporaryFiles = entries.filter((entry) => /^owner\.json\.tmp-/.test(entry));
-        if (!hasOwner) return finalFiles.length === 0 ? { incomplete: true } : { ambiguous: true };
-        if (finalFiles.length !== 1 || temporaryFiles.length !== 0) return { ambiguous: true };
-        let owner;
-        try {
-          owner = JSON.parse(fileSystem.readFileSync(ownerFile(lockDirectory), "utf8"));
-        } catch (_) {
-          return { incomplete: true };
-        }
-        if (!isValidOwner(owner)) return { incomplete: true };
-        return owner;
-      }
-      function readOwner(lockDirectory, name) {
-        const owner = readCanonicalOwner(lockDirectory, name);
-        if (!owner || owner.incomplete || owner.ambiguous) throw jobConflict(name);
-        return owner;
-      }
-      function writeOwner(lockDirectory, owner, name) {
-        writeOwnerDocument(ownerFile(lockDirectory), owner, name);
-      }
-      function writeHeartbeat(lockDirectory, token, timestamp) {
-        fileSystem.writeFileSync(heartbeatFile(lockDirectory, token), `${timestamp}
-`);
-      }
-      function heartbeatAt(lockDirectory, owner) {
-        try {
-          const value = Number(String(fileSystem.readFileSync(heartbeatFile(lockDirectory, owner.token), "utf8")).trim());
-          if (Number.isFinite(value) && value >= owner.acquiredAt) return value;
-        } catch (_) {
-        }
-        return owner.heartbeatAt;
-      }
-      function modifiedAt(target) {
-        const stat = fileSystem.statSync(target);
-        if (stat.mtime && typeof stat.mtime.unixMilli === "function") {
-          const value = stat.mtime.unixMilli();
-          if (Number.isFinite(value)) return value;
-        }
-        if (stat.mtime && typeof stat.mtime.getTime === "function") {
-          const value = stat.mtime.getTime();
-          if (Number.isFinite(value)) return value;
-        }
-        return null;
-      }
-      function cleanupQuarantine(reclaimedDirectory) {
-        cleanupDetachedDirectory(reclaimedDirectory);
-      }
-      function discardCanonical(lockDirectory, name, token, suffix) {
-        if (readOwner(lockDirectory, name).token !== token) throw jobConflict(name);
-        const detachedDirectory = `${lockDirectory}.${suffix}-${token}`;
-        fileSystem.renameSync(lockDirectory, detachedDirectory);
-        cleanupDetachedDirectory(detachedDirectory);
-      }
-      function discardUnownedCanonical(lockDirectory, token) {
-        const detachedDirectory = `${lockDirectory}.failed-${token}`;
-        fileSystem.renameSync(lockDirectory, detachedDirectory);
-        cleanupDetachedDirectory(detachedDirectory);
-      }
-      function reclaimOwnerFile(reclaimMutex, token) {
-        return path.join(reclaimMutex, `owner-${encodeURIComponent(token)}.json`);
-      }
-      function writeReclaimOwner(reclaimMutex, token) {
-        const timestamp = now();
-        const ownerPath = reclaimOwnerFile(reclaimMutex, token);
-        writeOwnerDocument(ownerPath, {
-          token,
-          pid: process.pid,
-          acquiredAt: timestamp,
-          heartbeatAt: timestamp
-        }, "reclaim-mutex");
-      }
-      function readReclaimOwner(reclaimMutex, name) {
-        let entries;
-        try {
-          entries = fileSystem.readdirSync(reclaimMutex);
-        } catch (failure) {
-          if (failure && failure.code === "ENOENT") return void 0;
-          throw jobConflict(name);
-        }
-        const ownerFiles = entries.filter((entry) => /^owner-.*\.json$/.test(entry));
-        const temporaryFiles = entries.filter((entry) => /^owner-.*\.tmp-/.test(entry));
-        if (ownerFiles.length === 0) return temporaryFiles.length === 0 ? null : { incomplete: true };
-        if (ownerFiles.length !== 1 || temporaryFiles.length !== 0) return { ambiguous: true };
-        let owner;
-        try {
-          owner = JSON.parse(fileSystem.readFileSync(path.join(reclaimMutex, ownerFiles[0]), "utf8"));
-        } catch (_) {
-          return { incomplete: true };
-        }
-        if (!isValidOwner(owner) || ownerFiles[0] !== path.basename(reclaimOwnerFile(reclaimMutex, owner.token))) {
-          return { incomplete: true };
-        }
-        return owner;
-      }
-      function mayReclaimMutex(reclaimMutex, name) {
-        let fallbackModifiedAt;
-        try {
-          fallbackModifiedAt = modifiedAt(reclaimMutex);
-        } catch (failure) {
-          if (failure && failure.code === "ENOENT") return void 0;
-          throw jobConflict(name);
-        }
-        let owner;
-        try {
-          owner = readReclaimOwner(reclaimMutex, name);
-        } catch (failure) {
-          if (failure && failure.code === "ENOENT") return void 0;
-          throw jobConflict(name);
-        }
-        let lastActivity;
-        if (owner && !owner.incomplete && !owner.ambiguous) lastActivity = owner.heartbeatAt;
-        else {
-          lastActivity = fallbackModifiedAt;
-        }
-        if (!Number.isFinite(lastActivity) || now() - lastActivity < leaseMs) throw jobConflict(name);
-        if (owner === null) return null;
-        if (owner === void 0) return void 0;
-        if (owner.incomplete) return null;
-        if (owner.ambiguous) throw jobConflict(name);
-        let alive = true;
-        try {
-          alive = isProcessAlive(owner.pid);
-        } catch (_) {
-          alive = true;
-        }
-        if (!isConfirmedMissingProcess(alive)) throw jobConflict(name);
-        return owner;
-      }
-      function quarantineStaleReclaimMutex(reclaimMutex, name) {
-        if (mayReclaimMutex(reclaimMutex, name) === void 0) return false;
-        const quarantineToken = randomReclaimToken();
-        const detachedMutex = `${reclaimMutex}.reclaimed-${quarantineToken}`;
-        try {
-          fileSystem.renameSync(reclaimMutex, detachedMutex);
-        } catch (renameFailure) {
-          if (renameFailure && renameFailure.code === "ENOENT") return false;
-          throw jobConflict(name);
-        }
-        cleanupDetachedDirectory(detachedMutex);
-        return true;
-      }
-      function acquireReclaimMutex(reclaimMutex, name) {
-        for (let attempt = 0; attempt < 3; attempt += 1) {
-          if (fileSystem.existsSync(reclaimMutex)) {
-            quarantineStaleReclaimMutex(reclaimMutex, name);
-            continue;
-          }
-          const token = randomReclaimToken();
-          const pendingMutex = `${reclaimMutex}.pending-${encodeURIComponent(token)}`;
-          try {
-            fileSystem.mkdirSync(pendingMutex);
+            validateJobName(name);
+            if (!fs.existsSync(this.jobFile(name))) return [];
+            return [{ name, index: this.read(name), error: null }];
           } catch (failure) {
-            if (failure && failure.code === "EEXIST") throw jobConflict(name);
-            throw failure;
+            return [{ name, index: null, error: failure }];
           }
-          try {
-            writeReclaimOwner(pendingMutex, token);
-          } catch (failure) {
-            try {
-              cleanupDetachedDirectory(pendingMutex);
-            } catch (cleanupFailure) {
-              failure.cleanupError = cleanupFailure;
-            }
-            if (failure && failure.code === "ENOENT") throw jobConflict(name);
-            throw failure;
-          }
-          if (fileSystem.existsSync(reclaimMutex)) {
-            cleanupDetachedDirectory(pendingMutex);
-            quarantineStaleReclaimMutex(reclaimMutex, name);
-            continue;
-          }
-          try {
-            fileSystem.renameSync(pendingMutex, reclaimMutex);
-          } catch (failure) {
-            let cleanupFailure;
-            try {
-              cleanupDetachedDirectory(pendingMutex);
-            } catch (pendingCleanupFailure) {
-              cleanupFailure = pendingCleanupFailure;
-            }
-            if (cleanupFailure) {
-              cleanupFailure.publishError = failure;
-              throw cleanupFailure;
-            }
-            if (failure && failure.code === "ENOENT") throw jobConflict(name);
-            if (failure && (failure.code === "EEXIST" || failure.code === "ENOTEMPTY")) continue;
-            throw failure;
-          }
-          return token;
-        }
-        throw jobConflict(name);
+        });
       }
-      function releaseReclaimMutex(reclaimMutex, name, token) {
-        const owner = readReclaimOwner(reclaimMutex, name);
-        if (!owner || owner.token !== token) return;
-        try {
-          fileSystem.unlinkSync(reclaimOwnerFile(reclaimMutex, token));
-        } catch (failure) {
-          if (failure && failure.code === "ENOENT") return;
-          throw failure;
-        }
-        try {
-          fileSystem.rmdirSync(reclaimMutex);
-        } catch (failure) {
-          if (failure && (failure.code === "ENOENT" || failure.code === "ENOTEMPTY")) return;
-          throw failure;
-        }
-      }
-      function createHandle(name, lockDirectory, token) {
-        function assertOwned() {
-          if (readOwner(lockDirectory, name).token !== token) throw jobConflict(name);
-        }
-        let timer;
-        try {
-          timer = startTimer(() => {
-            try {
-              assertOwned();
-              writeHeartbeat(lockDirectory, token, now());
-            } catch (_) {
-            }
-          }, heartbeatMs);
-        } catch (failure) {
-          try {
-            discardCanonical(lockDirectory, name, token, "failed");
-          } catch (cleanupFailure) {
-            failure.cleanupError = cleanupFailure;
-          }
-          throw failure;
-        }
-        function release() {
-          stopTimer(timer);
-          let owner;
-          try {
-            owner = readOwner(lockDirectory, name);
-          } catch (_) {
-            return;
-          }
-          if (owner.token !== token) return;
-          const releasedDirectory = `${lockDirectory}.released-${token}`;
-          fileSystem.renameSync(lockDirectory, releasedDirectory);
-          cleanupDetachedDirectory(releasedDirectory);
-        }
-        return { token, assertOwned, release };
-      }
-      function installOwnerDocument(lockDirectory, name, token) {
-        const timestamp = now();
-        try {
-          writeOwner(lockDirectory, {
-            token,
-            pid: process.pid,
-            acquiredAt: timestamp,
-            heartbeatAt: timestamp
-          }, name);
-        } catch (failure) {
-          if (failure && failure.code === "ENOENT") throw jobConflict(name);
-          throw failure;
-        }
-      }
-      function mayReclaim(lockDirectory, name) {
-        let fallbackModifiedAt;
-        try {
-          fallbackModifiedAt = modifiedAt(lockDirectory);
-        } catch (failure) {
-          if (failure && failure.code === "ENOENT") return null;
-          throw jobConflict(name);
-        }
-        let owner;
-        try {
-          owner = readCanonicalOwner(lockDirectory, name);
-        } catch (failure) {
-          if (failure && failure.code === "ENOENT") return null;
-          throw jobConflict(name);
-        }
-        let lastActivity;
-        if (owner && !owner.incomplete && !owner.ambiguous) lastActivity = heartbeatAt(lockDirectory, owner);
-        else {
-          lastActivity = fallbackModifiedAt;
-        }
-        if (!Number.isFinite(lastActivity) || now() - lastActivity < leaseMs) throw jobConflict(name);
-        if (owner === void 0 || owner === null) return null;
-        if (owner.incomplete) return owner;
-        if (owner.ambiguous) throw jobConflict(name);
-        let alive = true;
-        try {
-          alive = isProcessAlive(owner.pid);
-        } catch (_) {
-          alive = true;
-        }
-        if (!isConfirmedMissingProcess(alive)) throw jobConflict(name);
-        return owner;
-      }
-      function acquire(name) {
-        const lockDirectory = path.join(directory, `${name}.lock`);
-        const reclaimMutex = `${lockDirectory}.reclaim`;
-        for (let attempt = 0; attempt < 3; attempt += 1) {
-          if (fileSystem.existsSync(reclaimMutex)) {
-            quarantineStaleReclaimMutex(reclaimMutex, name);
-            continue;
-          }
-          try {
-            fileSystem.mkdirSync(lockDirectory);
-          } catch (failure) {
-            if (!failure || failure.code !== "EEXIST") throw failure;
-            const mutexToken = acquireReclaimMutex(reclaimMutex, name);
-            let mutexHeld = true;
-            let reclaimedDirectory = null;
-            let installedToken = null;
-            let replacementDirectoryCreated = false;
-            let replacementToken = null;
-            let cleanupStarted = false;
-            try {
-              if (mayReclaim(lockDirectory, name) === null) continue;
-              const token2 = randomToken();
-              replacementToken = token2;
-              reclaimedDirectory = `${lockDirectory}.reclaimed-${token2}`;
-              try {
-                fileSystem.renameSync(lockDirectory, reclaimedDirectory);
-              } catch (renameFailure) {
-                if (renameFailure && renameFailure.code === "ENOENT") continue;
-                throw jobConflict(name);
-              }
-              fileSystem.mkdirSync(lockDirectory);
-              replacementDirectoryCreated = true;
-              installOwnerDocument(lockDirectory, name, token2);
-              installedToken = token2;
-              cleanupStarted = true;
-              cleanupQuarantine(reclaimedDirectory);
-              reclaimedDirectory = null;
-              mutexHeld = false;
-              releaseReclaimMutex(reclaimMutex, name, mutexToken);
-              return createHandle(name, lockDirectory, token2);
-            } catch (reclaimFailure) {
-              if (installedToken !== null) {
-                try {
-                  discardCanonical(lockDirectory, name, installedToken, "failed");
-                } catch (cleanupFailure) {
-                  reclaimFailure.cleanupError = cleanupFailure;
-                }
-              } else if (replacementDirectoryCreated && fileSystem.existsSync(lockDirectory)) {
-                try {
-                  discardUnownedCanonical(lockDirectory, replacementToken);
-                } catch (cleanupFailure) {
-                  reclaimFailure.cleanupError = cleanupFailure;
-                }
-              }
-              if (reclaimedDirectory !== null && !cleanupStarted && !fileSystem.existsSync(lockDirectory)) {
-                try {
-                  fileSystem.renameSync(reclaimedDirectory, lockDirectory);
-                  reclaimedDirectory = null;
-                } catch (restoreFailure) {
-                  reclaimFailure.restoreError = restoreFailure;
-                }
-              }
-              throw reclaimFailure;
-            } finally {
-              if (mutexHeld) {
-                mutexHeld = false;
-                releaseReclaimMutex(reclaimMutex, name, mutexToken);
-              }
-            }
-          }
-          let token;
-          try {
-            token = randomToken();
-            installOwnerDocument(lockDirectory, name, token);
-          } catch (failure) {
-            throw failure;
-          }
-          return createHandle(name, lockDirectory, token);
-        }
-        throw jobConflict(name);
-      }
-      function assertAvailable(name) {
-        const lockDirectory = path.join(directory, `${name}.lock`);
-        mayReclaim(lockDirectory, name);
-      }
-      return { acquire, assertAvailable };
-    }
-    module2.exports = { createJobOperationLock };
+    };
+    module2.exports = { INDEX_SCHEMA_VERSION, JobIndexRepository, fromDocument, validateIndex };
   }
 });
 
@@ -4683,7 +4862,7 @@ var require_manager = __commonJS({
     var { loadProductPolicy } = require_product_policy();
     var { resolveIntervalPolicy } = require_interval_policy();
     var { createDatabaseValidationAdapter } = require_validation_adapter();
-    var { jobNeedsStringValueColumn } = require_storage_policy();
+    var { jobMayProduceFractionalValue, jobNeedsStringValueColumn } = require_storage_policy();
     var { InterfaceStore } = require_store();
     var { profileLockKey: interfaceLockKey } = require_profile_lock_key();
     var { classifyControllerState } = require_controller_state();
@@ -4692,6 +4871,7 @@ var require_manager = __commonJS({
     var { createServerStore } = require_server_store();
     var { jobDefaults } = require_defaults();
     var { createJobOperationLock } = require_operation_lock();
+    var { JobIndexRepository, fromDocument: indexFromDocument } = require_index_repository();
     var { JobRepository, revisionOf } = require_repository();
     var { deepMerge, validateJobConfig, validateJobName } = require_validator();
     var SERVICE_PREFIX = "_dbu_";
@@ -4717,6 +4897,9 @@ var require_manager = __commonJS({
       delete config.name;
       delete config.revision;
       return config;
+    }
+    function sameConfig(left, right) {
+      return JSON.stringify(left) === JSON.stringify(right);
     }
     function tagsForCall(call) {
       if (Array.isArray(call && call.outputSelections)) {
@@ -4774,6 +4957,11 @@ var require_manager = __commonJS({
         this.productPolicy = settings.productPolicy || loadProductPolicy(this.cgiRoot);
         this.dbusFactory = settings.dbusFactory;
         this.isLs = this.productPolicy.target === "ls";
+        this.indexRepository = settings.indexRepository || (this.isLs ? new JobIndexRepository({
+          cgiRoot: this.cgiRoot,
+          jobDirectory: this.repository.directory,
+          directory: settings.jobIndexDir
+        }) : null);
         this.serverStore = settings.serverStore || createServerStore({ cgiRoot: this.cgiRoot });
         this.lsRuntime = this.isLs ? settings.lsRuntime || createLsRuntime({
           cgiRoot: this.cgiRoot,
@@ -4859,7 +5047,8 @@ var require_manager = __commonJS({
       }
       databaseOptions(config) {
         return {
-          needsStringValueColumn: jobNeedsStringValueColumn(config, this.interfaceStore)
+          needsStringValueColumn: jobNeedsStringValueColumn(config, this.interfaceStore),
+          fractionalValuePossible: jobMayProduceFractionalValue(config)
         };
       }
       callback(callback, operation) {
@@ -5139,6 +5328,97 @@ var require_manager = __commonJS({
           });
         }
       }
+      readIndex(name) {
+        if (!this.indexRepository.registered(name)) {
+          throw error("JOB_NOT_FOUND", "Job\uC744 \uCC3E\uC744 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.", { name });
+        }
+        return this.indexRepository.read(name);
+      }
+      syncIndex(document) {
+        if (!this.isLs) return null;
+        const expected = indexFromDocument(document);
+        let current = null;
+        try {
+          current = this.indexRepository.read(document.name);
+        } catch (_) {
+        }
+        if (!current || JSON.stringify(current) !== JSON.stringify(expected)) {
+          return this.indexRepository.write(document);
+        }
+        return current;
+      }
+      configFromIndex(index, databaseCache) {
+        const cache = databaseCache || {};
+        let database = cache[index.database.server];
+        if (!database) {
+          let called = false;
+          let readError = null;
+          let server = null;
+          this.serverStore.get(index.database.server, (failure, value) => {
+            called = true;
+            readError = failure;
+            server = value;
+          });
+          if (!called) throw new Error("LS Database profile read must complete synchronously.");
+          if (readError) throw readError;
+          database = {
+            ...index.database,
+            ...server && server.defaultTable ? { table: server.defaultTable } : {},
+            ...server && server.valueColumn ? { valueColumn: server.valueColumn } : {},
+            ...server ? { stringValueColumn: server.stringValueColumn || "" } : {}
+          };
+          cache[index.database.server] = database;
+        }
+        return {
+          schedule: { intervalMs: index.intervalMs },
+          methodCalls: index.methodReferences.map((reference) => ({
+            id: reference.callId,
+            interfaceId: reference.interfaceId,
+            methodId: reference.methodId
+          })),
+          database: { ...database },
+          execution: { ...index.execution },
+          log: { level: index.logLevel }
+        };
+      }
+      lsState(overview, name) {
+        const service = overview && overview.service || {
+          controllerState: "UNKNOWN",
+          controllerDetail: null,
+          statusError: new Error("LS collector state is unavailable.")
+        };
+        if (service.statusError || service.controllerState === "NOT_INSTALLED") return service;
+        if (!["RUNNING", "STARTING"].includes(service.controllerState)) {
+          return {
+            controllerState: service.controllerState === "FAILED" ? "FAILED" : "STOPPED",
+            controllerDetail: service.controllerDetail,
+            statusError: null
+          };
+        }
+        const runtime = overview.runtime && overview.runtime.jobs && overview.runtime.jobs[name];
+        const runtimeState = runtime && runtime.state;
+        const controllerState = runtimeState === "running" ? "RUNNING" : runtimeState === "starting" ? "STARTING" : runtimeState === "stopping" ? "STOPPING" : runtimeState === "failed" ? "FAILED" : "STOPPED";
+        return {
+          controllerState,
+          controllerDetail: runtime && runtime.stateDetail || service.controllerDetail,
+          statusError: null
+        };
+      }
+      lsLastRun(runtimeJob) {
+        if (!runtimeJob) return null;
+        if (!runtimeJob.lastReadAt && !runtimeJob.lastStoredAt && !runtimeJob.lastError) return null;
+        return projectLastRun({
+          status: runtimeJob.lastError ? "failed" : "success",
+          lastRunAt: runtimeJob.lastReadAt || null,
+          lastSuccessfulRunAt: runtimeJob.lastError ? null : runtimeJob.lastReadAt || null,
+          lastStoredAt: runtimeJob.lastStoredAt || null,
+          lastError: runtimeJob.lastError || null,
+          overrunCount: Number.isSafeInteger(runtimeJob.overrunCount) && runtimeJob.overrunCount >= 0 ? runtimeJob.overrunCount : 0,
+          queueSkipped: Number.isSafeInteger(runtimeJob.queueSkipped) && runtimeJob.queueSkipped >= 0 ? runtimeJob.queueSkipped : 0,
+          lastOverrunAt: runtimeJob.lastOverrunAt || null,
+          methodCalls: []
+        });
+      }
       diagnostic(name, callback) {
         let value;
         try {
@@ -5160,7 +5440,54 @@ var require_manager = __commonJS({
       get(name, callback) {
         this.callback(callback, () => {
           this.validateName(name);
+          if (this.isLs && !this.indexRepository.exists(name)) {
+            if (!this.repository.exists(name)) {
+              throw error("JOB_NOT_FOUND", "Job\uC744 \uCC3E\uC744 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.", { name });
+            }
+            throw error("JOB_INVALID_CONFIG", "This Job configuration cannot be read. Recreate the Job before continuing.", {
+              name,
+              registrationMissing: true
+            });
+          }
+          if (this.isLs) this.readIndex(name);
           this.diagnostic(name, callback);
+        });
+      }
+      status(name, callback) {
+        if (!this.isLs) {
+          this.get(name, (getError, detail) => {
+            if (getError) {
+              callback(getError);
+              return;
+            }
+            this.lastRun(name, (lastRunError, value) => callback(lastRunError, {
+              job: detail,
+              lastRun: value && value.lastRun || null
+            }));
+          });
+          return;
+        }
+        let index;
+        try {
+          index = this.readIndex(this.validateName(name));
+        } catch (readError) {
+          callback(readError);
+          return;
+        }
+        this.lsRuntime.overview((_unused, overview) => {
+          try {
+            const state = this.lsState(overview, name);
+            const config = this.configFromIndex(index);
+            const job = this.view(name, config, state, null, index.revision);
+            job.methodCallCount = index.methodCallCount;
+            job.tagCount = index.tagCount;
+            callback(null, {
+              job,
+              lastRun: this.lsLastRun(overview.runtime && overview.runtime.jobs && overview.runtime.jobs[name])
+            });
+          } catch (statusError) {
+            callback(statusError);
+          }
         });
       }
       summary(detail, lastRun) {
@@ -5202,7 +5529,44 @@ var require_manager = __commonJS({
         }
         this.callController("details", [this.serviceName(name), "lastRun"], callback);
       }
+      listFromLsOverview(records, overview) {
+        const databaseCache = {};
+        return records.map((record) => {
+          if (record.error || !record.index) {
+            const state2 = { controllerState: "UNKNOWN", controllerDetail: record.error && record.error.message, statusError: null };
+            return this.summary(this.view(record.name, null, state2, record.error), null);
+          }
+          const state = this.lsState(overview, record.name);
+          const detail = this.view(record.name, this.configFromIndex(record.index, databaseCache), state, null, record.index.revision);
+          const runtimeJob = overview.runtime && overview.runtime.jobs && overview.runtime.jobs[record.name];
+          return {
+            ...this.summary(detail, this.lsLastRun(runtimeJob)),
+            tagCount: record.index.tagCount
+          };
+        });
+      }
       list(callback) {
+        if (this.isLs) {
+          let records2;
+          try {
+            records2 = this.indexRepository.list();
+          } catch (listError) {
+            callback(listError);
+            return;
+          }
+          if (!records2.length) {
+            callback(null, []);
+            return;
+          }
+          this.lsRuntime.overview((_unused, overview) => {
+            try {
+              callback(null, this.listFromLsOverview(records2, overview));
+            } catch (listError) {
+              callback(listError);
+            }
+          });
+          return;
+        }
         let records;
         try {
           records = this.repository.list();
@@ -5244,6 +5608,29 @@ var require_manager = __commonJS({
               if (pending === 0) callback(null, values);
             });
           });
+        });
+      }
+      health(callback) {
+        if (!this.isLs) {
+          this.list((listError, jobs) => callback(listError, { jobs: jobs || [], daemonState: null }));
+          return;
+        }
+        let records;
+        try {
+          records = this.indexRepository.list();
+        } catch (listError) {
+          callback(listError);
+          return;
+        }
+        this.lsRuntime.overview((_unused, overview) => {
+          try {
+            callback(null, {
+              jobs: this.listFromLsOverview(records, overview),
+              daemonState: overview.service
+            });
+          } catch (listError) {
+            callback(listError);
+          }
         });
       }
       create(payload, callback) {
@@ -5361,7 +5748,9 @@ var require_manager = __commonJS({
         config.methodCalls.forEach((call) => tagsForCall(call).forEach((tag) => currentTags.add(tag.name)));
         const jobs = [];
         const tags = /* @__PURE__ */ new Set();
+        const registeredNames = this.isLs ? new Set(this.indexRepository.list().filter((record) => record.index).map((record) => record.name)) : null;
         this.repository.list().forEach((record) => {
+          if (registeredNames && !registeredNames.has(record.name)) return;
           if (!record.document || record.name === name) return;
           const other = stripName(record.document);
           if (!other.database || other.database.server !== config.database.server || other.database.table !== config.database.table || !Array.isArray(other.methodCalls)) return;
@@ -5442,12 +5831,8 @@ var require_manager = __commonJS({
                 done(guardError);
                 return;
               }
-              if (!Number.isSafeInteger(patch.revision) || patch.revision < 1) {
-                done(error("JOB_REVISION_REQUIRED", "Job \uC218\uC815\uC5D0\uB294 GET\uC73C\uB85C \uBC1B\uC740 revision\uC774 \uD544\uC694\uD569\uB2C8\uB2E4.", { name }));
-                return;
-              }
               try {
-                const { revision, ...configPatch } = patch;
+                const { revision: _clientRevision, ...configPatch } = patch;
                 const existing = current.config;
                 holdInterfaces(existing);
                 const merged = deepMerge(deepMerge(jobDefaults(), existing), configPatch);
@@ -5460,7 +5845,24 @@ var require_manager = __commonJS({
                   }
                   try {
                     handle.assertOwned();
-                    const document = this.repository.save(name, { ...config, name, revision: revision + 1 }, revision);
+                    if (sameConfig(existing, config)) {
+                      this.syncIndex(current.document);
+                      this.inspect(name, (_unused, state) => done(null, this.view(
+                        name,
+                        existing,
+                        state,
+                        null,
+                        current.revision
+                      )));
+                      return;
+                    }
+                    const nextRevision = current.revision + 1;
+                    const document = this.repository.save(
+                      name,
+                      { ...config, name, revision: nextRevision },
+                      current.revision
+                    );
+                    this.syncIndex(document);
                     this.inspect(name, (_unused, state) => done(null, this.view(
                       name,
                       stripName(document),
@@ -5502,10 +5904,6 @@ var require_manager = __commonJS({
               done(readError);
               return;
             }
-            if (!Number.isSafeInteger(patch.revision) || patch.revision < 1) {
-              done(error("JOB_REVISION_REQUIRED", "Log Level \uBCC0\uACBD\uC5D0\uB294 GET\uC73C\uB85C \uBC1B\uC740 revision\uC774 \uD544\uC694\uD569\uB2C8\uB2E4.", { name }));
-              return;
-            }
             let config;
             try {
               config = this.validateConfig({
@@ -5524,8 +5922,32 @@ var require_manager = __commonJS({
               let document;
               try {
                 handle.assertOwned();
-                document = this.repository.save(name, { ...config, name, revision: patch.revision + 1 }, patch.revision);
-                this.lsRuntime.snapshot();
+                if (sameConfig(current.config, config)) {
+                  this.syncIndex(current.document);
+                  const completeUnchanged = () => done(
+                    null,
+                    this.view(name, current.config, before, null, current.revision)
+                  );
+                  if (before.controllerState !== "RUNNING") {
+                    completeUnchanged();
+                    return;
+                  }
+                  this.lsRuntime.refreshLog(name, (controlError) => {
+                    if (controlError) {
+                      done(controllerFailure("CONTROLLER_OPERATION_FAILED", "LS Job Log Level\uC744 \uC989\uC2DC \uBC18\uC601\uD558\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.", name, "RUNNING", controlError.message));
+                      return;
+                    }
+                    completeUnchanged();
+                  });
+                  return;
+                }
+                const nextRevision = current.revision + 1;
+                document = this.repository.save(
+                  name,
+                  { ...config, name, revision: nextRevision },
+                  current.revision
+                );
+                this.syncIndex(document);
               } catch (saveError) {
                 done(saveError);
                 return;
@@ -5558,7 +5980,7 @@ var require_manager = __commonJS({
           this.validateName(name);
           this.withMutation(name, callback, (handle, done) => {
             try {
-              this.readValidated(name);
+              this.readIndex(name);
             } catch (readError) {
               done(readError);
               return;
@@ -5980,6 +6402,20 @@ var require_manager = __commonJS({
               done(validationError);
               return;
             }
+            try {
+              handle.assertOwned();
+              const hasDocument = this.repository.exists(name);
+              const hasIndex = this.indexRepository.exists(name);
+              if (hasDocument && hasIndex) {
+                done(error("JOB_ALREADY_EXISTS", "\uAC19\uC740 \uC774\uB984\uC758 Job\uC774 \uC774\uBBF8 \uC788\uC2B5\uB2C8\uB2E4.", { name }));
+                return;
+              }
+              if (hasDocument) this.repository.discard(name);
+              if (hasIndex) this.indexRepository.remove(name);
+            } catch (cleanupError) {
+              done(cleanupError);
+              return;
+            }
             this.database.ensure(config.database, this.databaseOptions(config), (databaseError) => {
               if (databaseError) {
                 done(databaseError);
@@ -5988,8 +6424,9 @@ var require_manager = __commonJS({
               let document;
               try {
                 handle.assertOwned();
-                document = this.repository.create(name, config);
-                this.lsRuntime.snapshot();
+                document = this.repository.createAtomic(name, config);
+                this.indexRepository.write(document);
+                this.lsRuntime.syncConfig();
               } catch (createError) {
                 done(createError);
                 return;
@@ -5997,8 +6434,8 @@ var require_manager = __commonJS({
               this.lsRuntime.install((installError) => {
                 if (installError) {
                   try {
-                    this.repository.remove(name);
-                    this.lsRuntime.snapshot();
+                    this.repository.discard(name);
+                    this.indexRepository.remove(name);
                   } catch (_) {
                   }
                   done(controllerFailure("CONTROLLER_UNAVAILABLE", "LS collector daemon\uC744 \uC124\uCE58\uD558\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.", name, "NOT_INSTALLED", installError.message));
@@ -6019,12 +6456,11 @@ var require_manager = __commonJS({
       installLs(name, callback) {
         this.callback(callback, () => {
           this.validateName(name);
-          this.withMutation(name, callback, (handle, done, holdInterfaces) => {
-            let current;
+          this.withMutation(name, callback, (handle, done) => {
+            let index;
             try {
-              current = this.readValidated(name);
-              holdInterfaces(current.config);
-              this.lsRuntime.snapshot();
+              index = this.readIndex(name);
+              this.lsRuntime.syncConfig();
             } catch (readError) {
               done(readError);
               return;
@@ -6040,7 +6476,13 @@ var require_manager = __commonJS({
                 done(controllerFailure("CONTROLLER_UNAVAILABLE", "LS collector daemon\uC744 \uC124\uCE58\uD558\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.", name, "NOT_INSTALLED", installError.message));
                 return;
               }
-              this.inspect(name, (_unused, state) => done(state.statusError, this.view(name, current.config, state, null, current.revision)));
+              this.inspect(name, (_unused, state) => done(state.statusError, this.view(
+                name,
+                this.configFromIndex(index),
+                state,
+                null,
+                index.revision
+              )));
             });
           });
         });
@@ -6048,52 +6490,34 @@ var require_manager = __commonJS({
       startLs(name, callback) {
         this.callback(callback, () => {
           this.validateName(name);
-          this.withMutation(name, callback, (handle, done, holdInterfaces) => {
-            let current;
+          this.withMutation(name, callback, (handle, done) => {
+            let index;
             try {
-              current = this.readValidated(name);
-              holdInterfaces(current.config);
+              index = this.readIndex(name);
             } catch (readError) {
               done(readError);
               return;
             }
-            this.inspect(name, (_unused, before) => {
-              if (before.statusError) {
-                done(before.statusError);
+            try {
+              handle.assertOwned();
+            } catch (ownershipError) {
+              done(ownershipError);
+              return;
+            }
+            this.lsRuntime.ensureRunning((startError) => {
+              if (startError) {
+                done(controllerFailure("CONTROLLER_UNAVAILABLE", "LS collector daemon\uC744 \uC2DC\uC791\uD558\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.", name, "UNKNOWN", startError.message));
                 return;
               }
-              if (before.controllerState === "RUNNING") {
-                done(error("JOB_RUNNING", "\uC2E4\uD589 \uC911\uC778 Job\uC740 \uC2DC\uC791\uD560 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.", { name }));
-                return;
-              }
-              this.validateDatabase(current.config, (databaseError) => {
-                if (databaseError) {
-                  done(databaseError);
+              this.lsRuntime.start(name, (controlError) => {
+                if (controlError) {
+                  done(controllerFailure("CONTROLLER_OPERATION_FAILED", "LS Job \uC2DC\uC791 \uC81C\uC5B4\uC5D0 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4.", name, "STOPPED", controlError.message));
                   return;
                 }
-                try {
-                  handle.assertOwned();
-                  this.lsRuntime.snapshot();
-                } catch (snapshotError) {
-                  done(snapshotError);
-                  return;
-                }
-                this.lsRuntime.ensureRunning((startError) => {
-                  if (startError) {
-                    done(controllerFailure("CONTROLLER_UNAVAILABLE", "LS collector daemon\uC744 \uC2DC\uC791\uD558\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.", name, before.controllerState, startError.message));
-                    return;
-                  }
-                  this.lsRuntime.start(name, (controlError) => {
-                    if (controlError) {
-                      done(controllerFailure("CONTROLLER_OPERATION_FAILED", "LS Job \uC2DC\uC791 \uC81C\uC5B4\uC5D0 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4.", name, "STOPPED", controlError.message));
-                      return;
-                    }
-                    this.inspect(name, (_ignored, after) => {
-                      if (after.statusError || after.controllerState !== "RUNNING") {
-                        done(after.statusError || controllerFailure("CONTROLLER_OPERATION_FAILED", "LS Job \uC2DC\uC791 \uC0C1\uD0DC\uB97C \uD655\uC778\uD558\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.", name, after.controllerState, after.controllerDetail));
-                      } else done(null, this.view(name, current.config, after, null, current.revision));
-                    });
-                  });
+                this.inspect(name, (_ignored, after) => {
+                  if (after.statusError || !["STARTING", "RUNNING"].includes(after.controllerState)) {
+                    done(after.statusError || controllerFailure("CONTROLLER_OPERATION_FAILED", "LS Job \uC2DC\uC791 \uC0C1\uD0DC\uB97C \uD655\uC778\uD558\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.", name, after.controllerState, after.controllerDetail));
+                  } else done(null, this.view(name, this.configFromIndex(index), after, null, index.revision));
                 });
               });
             });
@@ -6104,35 +6528,31 @@ var require_manager = __commonJS({
         this.callback(callback, () => {
           this.validateName(name);
           this.withMutation(name, callback, (handle, done) => {
-            let current;
+            let index;
             try {
-              current = this.readValidated(name);
+              index = this.readIndex(name);
             } catch (readError) {
               done(readError);
               return;
             }
-            this.inspect(name, (_unused, before) => {
-              if (before.statusError) {
-                done(before.statusError);
+            try {
+              handle.assertOwned();
+            } catch (ownershipError) {
+              done(ownershipError);
+              return;
+            }
+            this.lsRuntime.stop(name, (stopError) => {
+              if (stopError) {
+                done(controllerFailure("CONTROLLER_OPERATION_FAILED", "LS Job \uC911\uC9C0 \uC81C\uC5B4\uC5D0 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4.", name, "RUNNING", stopError.message));
                 return;
               }
-              if (before.controllerState !== "RUNNING") {
-                done(error("SERVICE_NOT_RUNNING", "\uC2E4\uD589 \uC911\uC778 LS Job\uB9CC \uBA48\uCD9C \uC218 \uC788\uC2B5\uB2C8\uB2E4.", { name }));
-                return;
-              }
-              try {
-                handle.assertOwned();
-              } catch (ownershipError) {
-                done(ownershipError);
-                return;
-              }
-              this.lsRuntime.stop(name, (stopError) => {
-                if (stopError) {
-                  done(controllerFailure("CONTROLLER_OPERATION_FAILED", "LS Job \uC911\uC9C0 \uC81C\uC5B4\uC5D0 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4.", name, "RUNNING", stopError.message));
-                  return;
-                }
-                this.inspect(name, (_ignored, after) => done(after.statusError, this.view(name, current.config, after, null, current.revision)));
-              });
+              this.inspect(name, (_ignored, after) => done(after.statusError, this.view(
+                name,
+                this.configFromIndex(index),
+                after,
+                null,
+                index.revision
+              )));
             });
           });
         });
@@ -6141,9 +6561,9 @@ var require_manager = __commonJS({
         this.callback(callback, () => {
           this.validateName(name);
           this.withMutation(name, callback, (handle, done) => {
-            let current;
+            let index;
             try {
-              current = this.readValidated(name);
+              index = this.readIndex(name);
             } catch (readError) {
               done(readError);
               return;
@@ -6155,7 +6575,7 @@ var require_manager = __commonJS({
               }
               try {
                 handle.assertOwned();
-                done(null, this.view(name, current.config, before, null, current.revision));
+                done(null, this.view(name, this.configFromIndex(index), before, null, index.revision));
               } catch (ownershipError) {
                 done(ownershipError);
               }
@@ -6167,16 +6587,30 @@ var require_manager = __commonJS({
         this.callback(callback, () => {
           this.validateName(name);
           this.withMutation(name, callback, (handle, done) => {
-            this.guardMutable(name, (guardError) => {
-              if (guardError) {
-                done(guardError);
+            let index;
+            try {
+              index = this.readIndex(name);
+            } catch (readError) {
+              done(readError);
+              return;
+            }
+            this.inspect(name, (_unused, state) => {
+              if (state.statusError) {
+                done(state.statusError);
+                return;
+              }
+              if (["RUNNING", "STARTING", "STOPPING"].includes(state.controllerState)) {
+                done(error("JOB_RUNNING", "\uC2E4\uD589 \uC911\uC774\uAC70\uB098 \uC804\uD658 \uC911\uC778 Job\uC740 \uBC14\uAFB8\uAC70\uB098 \uC9C0\uC6B8 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.", {
+                  name,
+                  controllerState: state.controllerState
+                }));
                 return;
               }
               try {
                 handle.assertOwned();
-                const removed = this.repository.remove(name);
-                this.lsRuntime.snapshot();
-                done(null, removed);
+                this.repository.discard(name);
+                this.indexRepository.remove(name);
+                done(null, { name, revision: index.revision });
               } catch (deleteError) {
                 done(deleteError);
               }
@@ -6224,6 +6658,10 @@ var require_manager = __commonJS({
         this.lsRuntime.daemonStatus(callback);
       }
       lastRun(name, callback) {
+        if (this.isLs) {
+          this.status(name, (statusError, value) => callback(statusError, value && { lastRun: value.lastRun }));
+          return;
+        }
         let current;
         try {
           current = this.readValidated(name);
@@ -6526,6 +6964,7 @@ var require_references = __commonJS({
     "use strict";
     var fs = require("fs");
     var path = require("path");
+    var { JobIndexRepository } = require_index_repository();
     var JOB_NAME = /^[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?$/;
     var CALL_ID = /^[A-Za-z0-9](?:[A-Za-z0-9_-]*[A-Za-z0-9])?$/;
     var IDENTIFIER = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
@@ -6553,8 +6992,23 @@ var require_references = __commonJS({
     var InterfaceReferenceAnalyzer = class {
       constructor(options) {
         this.jobDir = path.join(options.cgiRoot, "conf.d", "jobs");
+        this.useIndex = options.useIndex === true;
+        this.indexes = this.useIndex ? new JobIndexRepository({ cgiRoot: options.cgiRoot, jobDirectory: this.jobDir }) : null;
       }
       find(interfaceId, methodId) {
+        if (this.indexes) {
+          return this.indexes.list().flatMap((record) => {
+            if (record.error || !record.index) return invalid(record.name, null);
+            const calls = record.index.methodReferences.filter((call) => call.interfaceId === interfaceId && (!methodId || call.methodId === methodId));
+            return calls.length ? [{
+              name: record.name,
+              documentName: record.name,
+              calls: calls.map((call) => call.callId),
+              methodIds: [...new Set(calls.map((call) => call.methodId))],
+              invalidConfig: false
+            }] : [];
+          });
+        }
         if (!fs.existsSync(this.jobDir)) return [];
         return fs.readdirSync(this.jobDir).filter((file) => file.endsWith(".json")).sort().flatMap((file) => {
           const name = file.slice(0, -5);
@@ -6584,6 +7038,7 @@ var require_manager2 = __commonJS({
     var { createJobOperationLock } = require_operation_lock();
     var { profileLockKey } = require_profile_lock_key();
     var { createDbusAdapter } = require_adapter();
+    var { loadProductPolicy } = require_product_policy();
     var { typeFromSignature } = require_types();
     var { InterfaceStore } = require_store();
     var { InterfaceReferenceAnalyzer } = require_references();
@@ -6606,8 +7061,9 @@ var require_manager2 = __commonJS({
       constructor(options) {
         const settings = options || {};
         this.cgiRoot = settings.cgiRoot;
+        const productPolicy = settings.productPolicy || loadProductPolicy(this.cgiRoot);
         this.store = settings.store || new InterfaceStore({ cgiRoot: this.cgiRoot });
-        this.references = settings.references || new InterfaceReferenceAnalyzer({ cgiRoot: this.cgiRoot });
+        this.references = settings.references || new InterfaceReferenceAnalyzer({ cgiRoot: this.cgiRoot, useIndex: productPolicy.target === "ls" });
         this.mutationLock = settings.mutationLock || createJobOperationLock({ directory: path.join(this.cgiRoot, "conf.d", ".interface-mutation-locks") });
         this.jobLock = settings.jobLock || createJobOperationLock({ directory: path.join(this.cgiRoot, "conf.d", ".job-operation-locks") });
         this.readerLock = settings.readerLock || createJobOperationLock({ directory: path.join(this.cgiRoot, "conf.d", ".interface-mutation-readers") });
@@ -7273,6 +7729,7 @@ var require_references2 = __commonJS({
     var path = require("path");
     var { classifyControllerState } = require_controller_state();
     var { isNotInstalled } = require_controller_adapter();
+    var { JobIndexRepository } = require_index_repository();
     var JOB_ID = /^[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?$/;
     var PROFILE_METHOD_ID = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
     function executionState(controllerState) {
@@ -7303,8 +7760,30 @@ var require_references2 = __commonJS({
         this.jobDir = path.join(options.cgiRoot, "conf.d", "jobs");
         this.controller = options.controller;
         this.stateInspector = options.stateInspector || null;
+        this.indexes = options.useIndex === true ? new JobIndexRepository({ cgiRoot: options.cgiRoot, jobDirectory: this.jobDir }) : null;
       }
       documents() {
+        if (this.indexes) {
+          return this.indexes.list().map((record) => {
+            if (record.error || !record.index) {
+              return invalidRecord(record.name, null, record.error && record.error.message, true);
+            }
+            return {
+              stem: record.name,
+              value: {
+                name: record.name,
+                profileId: record.index.profileId,
+                methodCalls: record.index.methodReferences.map((reference) => ({
+                  id: reference.callId,
+                  methodId: reference.methodId
+                }))
+              },
+              invalidConfig: false,
+              global: false,
+              reason: null
+            };
+          });
+        }
         if (!fs.existsSync(this.jobDir)) return [];
         const documents = [];
         fs.readdirSync(this.jobDir).filter((name) => name.endsWith(".json")).sort().forEach((file) => {
@@ -7464,7 +7943,8 @@ var require_manager3 = __commonJS({
         this.references = settings.references || new ReferenceAnalyzer({
           cgiRoot: settings.cgiRoot,
           controller: this.controller,
-          stateInspector: lsRuntime && lsRuntime.inspect
+          stateInspector: lsRuntime && lsRuntime.inspect,
+          useIndex: productPolicy.target === "ls"
         });
         this.profileMutationLock = settings.profileMutationLock || createJobOperationLock({
           directory: path.join(settings.cgiRoot, "conf.d", ".profile-mutation-locks")

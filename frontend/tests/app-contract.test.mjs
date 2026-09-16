@@ -123,6 +123,9 @@ test("Job 상세는 의미별 세 카드와 최신 실행 시각을 표시한다
   assert.match(styles, /\.neo-overview-card__overrun/);
   assert.match(source, /<th>Rows saved<\/th>/);
   assert.match(source, /setInterval\(\(\) => \{ void loaded\.reload\(\); \}, 5000\)/);
+  assert.match(source, /const \[monitorRefreshEpoch, setMonitorRefreshEpoch\] = useState\(0\)/);
+  assert.match(source, /\[job\?\.running, loaded\.reload, monitorRefreshEpoch\]/);
+  assert.match(source, /label="Refresh monitoring"[^>]*onClick=\{refreshMonitoring\}/);
   assert.match(styles, /\.neo-job-overview\s*\{[^}]*grid-template-columns:\s*repeat\(3,\s*minmax\(0,\s*1fr\)\)/s);
 });
 
@@ -173,6 +176,8 @@ test("초기 Job 선택, skip 초기화와 로그 파일 기본 읽기 UX를 제
   assert.match(styles, /\.neo-button\.is-active,[\s\S]*background: var\(--neo-primary\);[\s\S]*font-weight: 600;/);
   assert.match(styles, /\.neo-overview-card__overrun/);
   assert.match(styles, /border: 1px solid #ff9800/);
+  assert.match(styles, /\.neo-overview-card__overrun \.neo-icon-button \{[^}]*color: #ff6b6b;[^}]*background: rgba\(255, 71, 71, \.16\);/);
+  assert.match(styles, /\.neo-overview-card__overrun \.neo-icon-button:hover \{[^}]*background: #d84343;/);
 });
 
 test("Edit 경로 전환은 side Job 재선택 메시지로 되돌아가지 않는다", () => {
@@ -186,7 +191,7 @@ test("Edit 경로 전환은 side Job 재선택 메시지로 되돌아가지 않�
   assert.match(source, /channel\.ready\(surface\)/);
   assert.match(source, /locationPathRef\.current === "\/" && initialName/);
   assert.match(source, /\}, \[notify, surface\]\);/);
-  assert.match(source, /\}, \[refresh, surface\]\);/);
+  assert.match(source, /\}, \[clearJobSave, deferJobSelection, refresh, surface\]\);/);
   assert.doesNotMatch(source, /\}, \[navigate, refresh, surface\]\);/);
   assert.doesNotMatch(source, /\}, \[location\.pathname, navigate, notify, surface\]\);/);
 });
@@ -213,6 +218,159 @@ test("LS Job Configuration은 retry 입력을 숨기고 정해진 주기마다 �
   assert.doesNotMatch(collector, /func \(d \*daemon\) connectDBus\(ctx context\.Context, config jobConfig/);
 });
 
+test("Job 저장은 중복 제출과 경로 전환 취소를 막고 최신 revision을 계속 사용한다", () => {
+  const source = fs.readFileSync(new URL("../src/App.jsx", import.meta.url), "utf8");
+  assert.match(source, /if \(savingRef\.current\) return;/);
+  assert.match(source, /disabled=\{saving \|\| app\.jobSaving\}/);
+  assert.doesNotMatch(source, /disabled=\{formBlocked \|\| saving\}/);
+  assert.match(source, /useRouteMutation\(editing \? params\.name : "new", \{ abortOnRouteChange: false \}\)/);
+  assert.match(source, /const saveLease = app\.beginJobSave\(\);/);
+  assert.match(source, /const completion = app\.finishJobSave\(saveLease\.token\);/);
+  assert.match(source, /completion\.current && !completion\.pendingSelection/);
+  assert.match(source, /revision: editRevision/);
+  assert.match(source, /setEditRevision\(updated\.revision\)/);
+  assert.match(source, /setEditRevision\(latestJob\.revision\)/);
+  assert.match(source, /await app\.refresh\(\{ signal: submission\.signal, broadcast: true \}\);/);
+  assert.match(source, /completion\.current && !completion\.pendingSelection[\s\S]*app\.selectJob\(targetName\);/);
+});
+
+test("Job 저장 중 선택한 다른 Job은 저장 완료 뒤 열리고 PUT 요청은 abort되지 않는다", async () => {
+  const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  const originalBroadcastChannel = Object.getOwnPropertyDescriptor(globalThis, "BroadcastChannel");
+  const original = {
+    settingsGet: api.settings.get,
+    interfacesList: api.interfaces.list,
+    interfacesGet: api.interfaces.get,
+    jobsList: api.jobs.list,
+    jobsGet: api.jobs.get,
+    jobsStatus: api.jobs.status,
+    jobsValidate: api.jobs.validate,
+    jobsUpdate: api.jobs.update,
+    serversList: api.db.servers.list,
+    tablesList: api.db.tables.list,
+    tablesColumns: api.db.tables.columns,
+  };
+  const method = { id: "read", member: "Read", inputs: [], outputs: [{ name: "value", type: "double" }] };
+  const dbusInterface = {
+    id: "device", name: "Device", interface: "com.example.Device", busType: "system",
+    destination: "com.example.Device", objectPath: "/device", methods: [method],
+  };
+  const config = {
+    schemaVersion: 1,
+    schedule: { intervalMs: 1000 },
+    retry: { initialDelayMs: 1000, maximumDelayMs: 10000, multiplier: 2 },
+    execution: { savePolicy: "perMethod", onMethodError: "stop" },
+    methodCalls: [{
+      id: "read-a", name: "Read A", interfaceId: "device", methodId: "read", inputs: {},
+      outputSelections: [{
+        id: "value", sourceIndex: 0, interpretation: "native",
+        tags: [{ name: "TAG_A", bias: 0, multiplier: 1, transformOrder: ["bias", "multiplier"], signed: false }],
+      }],
+    }],
+    database: { server: "local", table: "TAG", valueColumn: "VALUE", stringValueColumn: "" },
+    log: { level: "info", maxFiles: 3 },
+  };
+  const jobs = ["job-a", "job-b"].map((name) => ({
+    name, statusKnown: true, configState: "installed", executionState: "stopped",
+    controllerState: "STOPPED", installed: true, running: false,
+  }));
+  const update = deferred();
+  let updateSignal = null;
+  let mainRenderer;
+  let sideRenderer;
+  try {
+    class TestBroadcastChannel {
+      static instances = new Set();
+      constructor(name) { this.name = name; this.onmessage = null; TestBroadcastChannel.instances.add(this); }
+      postMessage(data) {
+        for (const peer of TestBroadcastChannel.instances) {
+          if (peer !== this && peer.name === this.name) queueMicrotask(() => peer.onmessage?.({ data }));
+        }
+      }
+      close() { TestBroadcastChannel.instances.delete(this); }
+    }
+    Object.defineProperty(globalThis, "BroadcastChannel", { configurable: true, value: TestBroadcastChannel });
+    Object.defineProperty(globalThis, "window", { configurable: true, value: {
+      innerWidth: 1280, innerHeight: 720,
+      setTimeout: globalThis.setTimeout.bind(globalThis), clearTimeout: globalThis.clearTimeout.bind(globalThis),
+      addEventListener() {}, removeEventListener() {}, confirm() { return true; },
+      localStorage: { setItem() {}, removeItem() {} },
+    } });
+    Object.assign(api.settings, { get: async () => ({ provider: null, defaults: { database: { server: "local" } }, limits: { maxGeneratedTagsPerCall: 100, maxBufferedRowsPerCycle: 100 }, intervalPolicy: { cycleMs: 1 } }) });
+    Object.assign(api.interfaces, {
+      list: async () => [{ ...dbusInterface, methodCount: 1 }],
+      get: async () => ({ interface: dbusInterface, references: [] }),
+    });
+    Object.assign(api.jobs, {
+      list: async () => jobs,
+      get: async (name) => ({ ...jobs.find((job) => job.name === name), config, revision: 1 }),
+      status: async (name) => ({ job: { ...jobs.find((job) => job.name === name), config, revision: name === "job-a" ? 2 : 1 }, lastRun: null }),
+      validate: async () => ({ valid: true, warnings: [] }),
+      update: async (_name, _payload, options = {}) => {
+        updateSignal = options.signal;
+        return update.promise;
+      },
+    });
+    Object.assign(api.db.servers, { list: async () => [{ name: "local", defaultTable: "TAG", valueColumn: "VALUE", stringValueColumn: "" }] });
+    Object.assign(api.db.tables, {
+      list: async () => [{ name: "TAG" }],
+      columns: async () => ({ columns: [{ name: "VALUE", numeric: true, kind: "value" }] }),
+    });
+
+    await act(async () => {
+      sideRenderer = create(React.createElement(
+        MemoryRouter,
+        { initialEntries: ["/"] },
+        React.createElement(AppProvider, { surface: "side" }, React.createElement(ConnectedSide)),
+      ));
+      mainRenderer = create(React.createElement(
+        MemoryRouter,
+        { initialEntries: ["/jobs/job-a/edit"] },
+        React.createElement(AppProvider, { surface: "index" }, React.createElement(MainRoutes)),
+      ));
+    });
+    await flush();
+    await flush();
+    const form = mainRenderer.root.findAll((node) => node.type === "form" && node.props.id === "job-form")[0];
+    let savePromise;
+    await act(async () => { savePromise = form.props.onSubmit({ preventDefault() {} }); await Promise.resolve(); });
+    await flush();
+    assert.ok(updateSignal, "PUT Job 요청이 시작되어야 합니다.");
+
+    const jobB = sideRenderer.root.findAll((node) => node.props.className === "neo-job-row__select"
+      && node.findAll((child) => child.type === "span" && child.children.join("") === "job-b").length)[0];
+    await act(async () => { jobB.props.onClick(); });
+    await flush();
+    assert.equal(updateSignal.aborted, false, "Job 선택이 이미 시작한 PUT 요청을 abort하면 안 됩니다.");
+    assert.match(sideRenderer.root.findAll((node) => node.props.className === "neo-side__saving")[0].children.join(""), /NEXT job-b/);
+    assert.ok(mainRenderer.root.findAll((node) => node.type === "h1" && node.children.join("") === "Edit job-a").length,
+      "저장 중에는 기존 편집 경로를 유지해야 합니다.");
+
+    update.resolve({ name: "job-a", revision: 2 });
+    await act(async () => { await savePromise; });
+    await flush();
+    await flush();
+    assert.equal(updateSignal.aborted, false);
+    assert.ok(mainRenderer.root.findAll((node) => node.type === "h1" && node.children.join("") === "job-b").length,
+      "저장 완료 뒤 보류한 Job으로 이동해야 합니다.");
+  } finally {
+    if (sideRenderer) await act(async () => { sideRenderer.unmount(); });
+    if (mainRenderer) await act(async () => { mainRenderer.unmount(); });
+    if (originalWindow) Object.defineProperty(globalThis, "window", originalWindow);
+    else delete globalThis.window;
+    if (originalBroadcastChannel) Object.defineProperty(globalThis, "BroadcastChannel", originalBroadcastChannel);
+    else delete globalThis.BroadcastChannel;
+    Object.assign(api.settings, { get: original.settingsGet });
+    Object.assign(api.interfaces, { list: original.interfacesList, get: original.interfacesGet });
+    Object.assign(api.jobs, {
+      list: original.jobsList, get: original.jobsGet, status: original.jobsStatus,
+      validate: original.jobsValidate, update: original.jobsUpdate,
+    });
+    Object.assign(api.db.servers, { list: original.serversList });
+    Object.assign(api.db.tables, { list: original.tablesList, columns: original.tablesColumns });
+  }
+});
+
 test("LS Tag 표는 Signed 변환을 계산 Transform보다 먼저 표시한다", () => {
   const source = fs.readFileSync(new URL("../src/App.jsx", import.meta.url), "utf8");
   assert.match(source, /neo-fixed-tag-list__name" \/><col className="neo-fixed-tag-list__signed" \/><col className="neo-fixed-tag-list__transform"/);
@@ -224,6 +382,25 @@ test("Start와 Stop은 현재 Side 목록을 다시 읽지 않고 응답 Job 상
   assert.match(source, /jobName/);
   assert.match(source, /setJobs\(\(current\) => removeJob[\s\S]*current\.map/);
   assert.match(source, /\} else await refresh\(\{ signal \}\);/);
+});
+
+test("Start와 Stop 요청 중에는 모든 Job switch를 잠그고 중복 요청을 무시한다", async () => {
+  const source = fs.readFileSync(new URL("../src/App.jsx", import.meta.url), "utf8");
+  assert.match(source, /if \(togglePendingRef\.current\) return;/);
+  assert.match(source, /disabled=\{actions\.switchDisabled \|\| togglePending\}/);
+
+  let renderer;
+  await act(async () => { renderer = create(React.createElement(JobSide, {
+    jobs: [
+      { name: "line-a", statusKnown: true, configState: "installed", executionState: "stopped", controllerState: "STOPPED" },
+      { name: "line-b", statusKnown: true, configState: "installed", executionState: "running", controllerState: "RUNNING" },
+    ],
+    selected: "line-a", togglePending: true,
+    onSelect() {}, onNew() {}, onRefresh() {}, onToggle() {},
+  })); });
+  assert.equal(button(renderer.root, "line-a Start").props.disabled, true);
+  assert.equal(button(renderer.root, "line-b Stop").props.disabled, true);
+  await act(async () => { renderer.unmount(); });
 });
 
 test("새 Job의 Database Mapping은 빈 직접 입력 콤보박스로 시작한다", () => {
@@ -453,6 +630,7 @@ test("Data Viewer는 기본 notify에서도 Tag를 한 번만 불러온다", asy
     });
     await flush();
     assert.match(JSON.stringify(renderer.toJSON()), /TAG1/);
+    assert.match(JSON.stringify(renderer.toJSON()), /No data\. Check the time range\./);
     assert.equal(tagCalls, 1);
   } finally {
     if (renderer) await act(async () => { renderer.unmount(); });

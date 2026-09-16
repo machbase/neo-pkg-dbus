@@ -24,13 +24,18 @@ function lsPolicy(value) {
   if (value === undefined) return null;
   const interval = value?.interval;
   const writer = value?.writer;
+  const performance = value?.performance;
   if (!value || typeof value !== 'object' || Array.isArray(value)
     || !interval || typeof interval !== 'object' || Array.isArray(interval)
     || typeof interval.useTaskCycle !== 'boolean'
     || !writer || typeof writer !== 'object' || Array.isArray(writer)
     || !positiveInteger(writer.queueCapacity) || writer.queueCapacity > 1024
     || !positiveInteger(writer.flushMaxRows) || writer.flushMaxRows > 65535
-    || !positiveInteger(writer.flushIntervalMs) || writer.flushIntervalMs > 60 * 60 * 1000) {
+    || !positiveInteger(writer.flushIntervalMs) || writer.flushIntervalMs > 60 * 60 * 1000
+    || !performance || typeof performance !== 'object' || Array.isArray(performance)
+    || typeof performance.enabled !== 'boolean'
+    || !positiveInteger(performance.jobSampleCount)
+    || !positiveInteger(performance.writerSummaryIntervalMs)) {
     throw error('SETTINGS_INVALID', 'LS interval 설정이 잘못되었습니다.');
   }
   return {
@@ -40,6 +45,14 @@ function lsPolicy(value) {
       queueCapacity: writer.queueCapacity,
       flushMaxRows: writer.flushMaxRows,
       flushIntervalMs: writer.flushIntervalMs,
+    },
+    // Go applies the operational floors and records a correction in the Job
+    // log. Preserve the requested values here so that audit message can show
+    // both the configured and applied values.
+    performance: {
+      enabled: performance.enabled,
+      jobSampleCount: performance.jobSampleCount,
+      writerSummaryIntervalMs: performance.writerSummaryIntervalMs,
     },
   };
 }

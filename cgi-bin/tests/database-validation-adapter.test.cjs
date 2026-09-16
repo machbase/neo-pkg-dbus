@@ -99,10 +99,25 @@ async function run() {
     valueColumn: 'external_value',
     stringValueColumn: '',
   };
-  const existingAdapter = createDatabaseValidationAdapter(dependencies([], { tableType: 'TAG' }));
+  const existingAdapter = createDatabaseValidationAdapter(dependencies([
+    validColumns[0], validColumns[1], { name: 'EXTERNAL_VALUE', type: 'double' },
+  ], { tableType: 'TAG' }));
   assert.deepEqual(await ensure(existingAdapter, existingMapping, { needsStringValueColumn: false }), {
-    server: 'local-db', table: 'EXTERNAL_TAG', valueColumn: 'EXTERNAL_VALUE', stringValueColumn: '',
-  }, '기존 Table은 선택된 Column metadata를 다시 검증하지 않습니다.');
+    server: 'local-db', table: 'EXTERNAL_TAG', tagNameColumn: 'NAME', basetimeColumn: 'TIME',
+    valueColumn: 'EXTERNAL_VALUE', stringValueColumn: null,
+  }, '기존 Table도 저장 직전에 선택된 Column metadata를 검증합니다.');
+  await rejectsCode(ensure(createDatabaseValidationAdapter(dependencies(validColumns)), {
+    ...existingMapping, valueColumn: 'MISSING',
+  }, { needsStringValueColumn: false }), 'JOB_INVALID');
+  const integerColumns = validColumns.map((column) => (
+    column.name === 'VALUE' ? { ...column, type: 'long' } : column
+  ));
+  await rejectsCode(ensure(createDatabaseValidationAdapter(dependencies(integerColumns)), {
+    ...database, stringValueColumn: '',
+  }, { needsStringValueColumn: false, fractionalValuePossible: true }), 'JOB_INVALID');
+  assert.equal((await ensure(createDatabaseValidationAdapter(dependencies(integerColumns)), {
+    ...database, stringValueColumn: '',
+  }, { needsStringValueColumn: false, fractionalValuePossible: false })).valueColumn, 'VALUE');
   await rejectsCode(ensure(createDatabaseValidationAdapter(dependencies([], {
     emptyMetadata: true,
   })), { ...existingMapping }, { needsStringValueColumn: false }), 'DB_UNAVAILABLE');
@@ -173,16 +188,20 @@ async function run() {
   assert.deepEqual(stringCreated, [{ server: 'local-db', table: 'STRING_TAG', valueColumn: 'VALUE', stringValueColumn: 'STR_VALUE' }]);
 
   let createCalls = 0;
+  let racedTableExists = false;
   const racingProvisioning = createDatabaseValidationAdapter({
     serverStore: { get(name, callback) { callback(null, { name, host: 'localhost' }); } },
     metadataReader: {
       columns(_server, table, callback) {
-        callback(null, { table, tableType: 'NOT_FOUND', columns: [] });
+        callback(null, racedTableExists
+          ? { table, tableType: 'TAG', columns: validColumns }
+          : { table, tableType: 'NOT_FOUND', columns: [] });
       },
     },
     tableCreator: {
       createTable(request, callback) {
         createCalls += 1;
+        racedTableExists = true;
         callback(Object.assign(new Error('race'), { code: 'TABLE_ALREADY_EXISTS' }));
       },
     },
@@ -190,7 +209,8 @@ async function run() {
   assert.deepEqual(await ensure(racingProvisioning, {
     ...database, table: 'race_tag', valueColumn: 'VALUE', stringValueColumn: '',
   }, { needsStringValueColumn: false }), {
-    server: 'local-db', table: 'RACE_TAG', valueColumn: 'VALUE', stringValueColumn: '',
+    server: 'local-db', table: 'RACE_TAG', tagNameColumn: 'NAME', basetimeColumn: 'TIME',
+    valueColumn: 'VALUE', stringValueColumn: null,
   });
   assert.equal(createCalls, 1, '경쟁으로 먼저 생긴 Table은 다시 만들거나 변경하지 않습니다.');
 }

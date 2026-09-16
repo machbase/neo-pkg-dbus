@@ -30,6 +30,8 @@ class JobRepository {
     return path.join(this.directory, `${validateJobName(name)}.json`);
   }
 
+  exists(name) { return fs.existsSync(this.file(name)); }
+
   parse(name) {
     let document;
     try {
@@ -76,6 +78,18 @@ class JobRepository {
     return document;
   }
 
+  // LS holds the per-Job mutation lock before calling this method, so the
+  // canonical document can be committed with the same atomic file replacement
+  // used by Update. This avoids leaving a partially written 1MB Job after an
+  // interrupted CGI process.
+  createAtomic(name, config) {
+    validateJobName(name);
+    if (this.exists(name)) throw error('JOB_ALREADY_EXISTS', '같은 이름의 Job이 이미 있습니다.', { name });
+    const document = { ...config, name, revision: 1 };
+    writeJsonAtomic(this.file(name), document);
+    return document;
+  }
+
   save(name, document, expectedRevision) {
     validateJobName(name);
     const file = this.file(name);
@@ -96,6 +110,13 @@ class JobRepository {
   remove(name) {
     this.read(name);
     fs.unlinkSync(this.file(name));
+    return { name };
+  }
+
+  discard(name) {
+    const file = this.file(name);
+    try { fs.unlinkSync(file); }
+    catch (failure) { if (!failure || failure.code !== 'ENOENT') throw failure; }
     return { name };
   }
 

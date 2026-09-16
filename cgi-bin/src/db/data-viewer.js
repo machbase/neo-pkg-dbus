@@ -341,10 +341,29 @@ function createDataViewer(options) {
       || !Array.isArray(document.methodCalls) || document.methodCalls.length < 1) {
       invalidJob(name);
     }
-    const database = document.database;
+    let database = document.database;
     if (typeof database.server !== 'string' || !database.server
       || typeof database.table !== 'string' || typeof database.valueColumn !== 'string'
       || typeof database.stringValueColumn !== 'string') invalidJob(name);
+    if (jobScopedTags) {
+      let called = false;
+      let storeError = null;
+      let server = null;
+      store.get(database.server, (failure, value) => {
+        called = true;
+        storeError = failure;
+        server = value;
+      });
+      if (!called) invalidJob(name, '등록 DB server 읽기는 동기 완료되어야 합니다.');
+      if (storeError) throw storeError;
+      if (!server) invalidJob(name, '저장된 Job의 Database Server를 찾을 수 없습니다.');
+      database = {
+        ...database,
+        ...(server.defaultTable ? { table: server.defaultTable } : {}),
+        ...(server.valueColumn ? { valueColumn: server.valueColumn } : {}),
+        stringValueColumn: server.stringValueColumn || '',
+      };
+    }
     let table;
     let valueColumn;
     let stringValueColumn;

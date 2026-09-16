@@ -96,6 +96,10 @@ test('LS 제품은 고정 Call을 깊은 복사하고 새 Call도 독립적으�
   assert.deepEqual(ls.reconcileProductTags({ DataCount: 2, DeviceString: 'MB3' }, [], provider), []);
   assert.equal(ls.inputLabel('data-count'), 'DataCount');
   assert.equal(ls.inputLabel('memory_address'), 'DeviceString');
+  assert.deepEqual(Object.fromEntries(['X', 'B', 'W', 'D', 'L'].map((type) => [type, ls.dataCountLimit(`%M${type}1000`)])), {
+    X: 4096, B: 4096, W: 2048, D: 1024, L: 512,
+  });
+  assert.equal(ls.reconcileProductTags({ DataCount: 4096, DeviceString: '%MB1000' }, [], provider).at(-1).name, 'MB5095');
   assert.equal(lsBackend.target, 'ls');
 });
 

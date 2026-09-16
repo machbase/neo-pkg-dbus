@@ -1,9 +1,9 @@
 'use strict';
 
 // LS uses one Go data-plane service. This adapter keeps that implementation
-// detail behind the existing JobManager API: CGI still validates and owns Job
-// JSON, while Go receives an atomically replaced snapshot and a 0600 secret
-// file that is never returned by an API or copied into runtime state/logs.
+// detail behind the existing JobManager API. JSH owns canonical Job JSON and
+// small Job indexes; Go reads the canonical Job directly when it starts one.
+// This file therefore contains only deployment-wide policy and DB secrets.
 const fs = require('fs');
 const path = require('path');
 const process = require('process');
@@ -95,7 +95,6 @@ function createLsRuntime(options) {
   const settings = options || {};
   const cgiRoot = settings.cgiRoot;
   const controller = settings.controller;
-  const repository = settings.repository;
   const serverStore = settings.serverStore || createServerStore({ cgiRoot });
   const processApi = settings.process || process;
   const files = runtimePaths(cgiRoot);
@@ -116,12 +115,7 @@ function createLsRuntime(options) {
     fs.chmodSync(files.control, 0o755);
   }
 
-  function snapshot() {
-    const jobs = repository.list().map((record) => record.document).filter(Boolean).map((document) => {
-      const value = { ...document };
-      delete value.revision;
-      return value;
-    });
+  function syncConfig() {
     const settings = loadSettings(path.join(cgiRoot, 'conf.d', 'settings.json'));
     // The LS product has exactly one database profile.  Treat the configured
     // default server as authoritative even for pre-profile Job JSON that may
@@ -132,36 +126,18 @@ function createLsRuntime(options) {
     const servers = {};
     servers[profileName] = {
       host: source.host, port: source.port, user: source.user, password: source.password,
+      defaultTable: source.defaultTable || '',
+      valueColumn: source.valueColumn || '',
+      stringValueColumn: source.stringValueColumn || '',
     };
-    // LS has one database profile (the selected DB server's current default
-    // table/column mapping). Resolve it while producing the Go snapshot so a
-    // profile edit changes every referencing Job together without per-Job
-    // table copies drifting apart.
-    jobs.forEach((job) => {
-      job.database = {
-        ...job.database,
-        server: profileName,
-        table: source.defaultTable || job.database.table,
-        valueColumn: source.valueColumn || job.database.valueColumn,
-        stringValueColumn: source.stringValueColumn || job.database.stringValueColumn,
-      };
-    });
-    const jobNames = new Set(jobs.map((job) => job.name));
-    const active = readActiveJobs(files.active).filter((name) => jobNames.has(name));
     writeJsonAtomic(files.snapshot, {
-      schemaVersion: 1,
-      jobs,
+      schemaVersion: 2,
       logging: settings.logging,
       writer: settings.ls.writer,
+      performance: settings.ls.performance,
     });
     writeSecretAtomic(files.secret, { schemaVersion: 1, servers });
-    writeJsonAtomic(files.active, { schemaVersion: 1, names: active });
-  }
-
-  function setActive(name, active) {
-    const names = new Set(readActiveJobs(files.active));
-    if (active) names.add(name); else names.delete(name);
-    writeJsonAtomic(files.active, { schemaVersion: 1, names: [...names].sort() });
+    if (!fs.existsSync(files.active)) writeJsonAtomic(files.active, { schemaVersion: 1, names: [] });
   }
 
   function execControl(action, name) {
@@ -245,12 +221,35 @@ function createLsRuntime(options) {
         return;
       }
       const job = runtime.jobs && runtime.jobs[name];
-      const running = job && job.state === 'running';
+      const runtimeState = job && job.state;
+      const mappedState = runtimeState === 'running' ? 'RUNNING'
+        : runtimeState === 'starting' ? 'STARTING'
+          : runtimeState === 'stopping' ? 'STOPPING'
+            : runtimeState === 'failed' ? 'FAILED' : 'STOPPED';
       callback(null, {
-        controllerState: running ? 'RUNNING' : (service.controllerState === 'FAILED' ? 'FAILED' : 'STOPPED'),
-        controllerDetail: service.controllerDetail,
+        controllerState: mappedState,
+        controllerDetail: job && job.stateDetail || service.controllerDetail,
         statusError: null,
       });
+    });
+  }
+
+  function overview(callback) {
+    controllerStatus(controller, (_unused, service) => {
+      if (service.statusError) {
+        callback(null, { service, runtime: { jobs: {} } });
+        return;
+      }
+      // The checkpoint retains the latest run after a logical Job or package
+      // stop. Read it once even when the shared service is stopped; lsState()
+      // still derives execution state from the controller first.
+      try { callback(null, { service, runtime: readRuntime(files.runtime) }); }
+      catch (runtimeError) {
+        callback(null, {
+          service: { controllerState: 'UNKNOWN', controllerDetail: runtimeError.message, statusError: runtimeError },
+          runtime: { jobs: {} },
+        });
+      }
     });
   }
 
@@ -259,6 +258,7 @@ function createLsRuntime(options) {
       const runtime = readRuntime(files.runtime);
       const job = runtime.jobs && runtime.jobs[name];
       if (!job) { callback(null, null); return; }
+      if (!job.lastReadAt && !job.lastStoredAt && !job.lastError) { callback(null, null); return; }
       callback(null, {
         status: job.lastError ? 'failed' : 'success',
         lastRunAt: job.lastReadAt || null,
@@ -288,39 +288,33 @@ function createLsRuntime(options) {
 
   return {
     serviceName: LS_SERVICE_NAME,
-    snapshot,
+    syncConfig,
     inspect,
     lastRun,
     install,
     daemonStatus,
     installPackage(callback) {
-      try { snapshot(); } catch (snapshotError) { callback(snapshotError); return; }
+      try { syncConfig(); } catch (snapshotError) { callback(snapshotError); return; }
       install(callback);
     },
     ensureRunning,
     startDaemon(callback) {
-      try { snapshot(); } catch (snapshotError) { callback(snapshotError); return; }
+      try { syncConfig(); } catch (snapshotError) { callback(snapshotError); return; }
       ensureRunning(callback);
     },
     start(name, callback) {
       try {
-        setActive(name, true);
         execControl('start', name);
         callback(null);
       } catch (controlError) {
-        try { setActive(name, false); } catch (_) {}
         callback(controlError);
       }
     },
     stop(name, callback) {
-      let wasActive;
       try {
-        wasActive = readActiveJobs(files.active).includes(name);
-        setActive(name, false);
         execControl('stop', name);
         callback(null);
       } catch (controlError) {
-        try { if (wasActive) setActive(name, true); } catch (_) {}
         callback(controlError);
       }
     },
@@ -340,9 +334,10 @@ function createLsRuntime(options) {
       });
     },
     activeNames() { return readActiveJobs(files.active); },
+    overview,
     reloadAllActive(callback) {
       let names;
-      try { names = readActiveJobs(files.active); this.snapshot(); } catch (snapshotError) { callback(snapshotError); return; }
+      try { names = readActiveJobs(files.active); this.syncConfig(); } catch (snapshotError) { callback(snapshotError); return; }
       // A saved active-job checkpoint survives a package/service stop. In that
       // state there is no daemon to reload, and the new snapshot must merely
       // be ready for the next package start rather than causing an accidental

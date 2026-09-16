@@ -105,7 +105,7 @@ function createDbApi(options) {
           store.update(params.name, payload, (updateError, value) => {
             if (updateError) { fail(updateError); return; }
             if (!active.length) {
-              try { runtime.snapshot(); } catch (snapshotError) { fail(snapshotError); return; }
+              try { runtime.syncConfig(); } catch (snapshotError) { fail(snapshotError); return; }
               reply(200, value);
               return;
             }

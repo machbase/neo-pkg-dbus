@@ -20,10 +20,11 @@ function defaultSettings() {
       summaryIntervalMs: 60 * 60 * 1000,
     },
     // LS writer tuning is intentionally an internal deployment setting. It
-    // is copied into the Go collector snapshot but is not exposed in the UI.
+    // is copied into the Go collector policy file but is not exposed in the UI.
     ls: {
       interval: { useTaskCycle: true },
       writer: { queueCapacity: 64, flushMaxRows: 1024, flushIntervalMs: 1000 },
+      performance: { enabled: true, jobSampleCount: 1000, writerSummaryIntervalMs: 30000 },
     },
   };
 }
@@ -57,6 +58,7 @@ function loadSettings(file) {
       ...((value.ls && typeof value.ls === 'object' && !Array.isArray(value.ls)) ? value.ls : {}),
       interval: { ...base.ls.interval, ...((value.ls?.interval && typeof value.ls.interval === 'object' && !Array.isArray(value.ls.interval)) ? value.ls.interval : {}) },
       writer: { ...base.ls.writer, ...((value.ls?.writer && typeof value.ls.writer === 'object' && !Array.isArray(value.ls.writer)) ? value.ls.writer : {}) },
+      performance: { ...base.ls.performance, ...((value.ls?.performance && typeof value.ls.performance === 'object' && !Array.isArray(value.ls.performance)) ? value.ls.performance : {}) },
     },
   });
 }

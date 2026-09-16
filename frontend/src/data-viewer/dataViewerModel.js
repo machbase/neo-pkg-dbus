@@ -665,7 +665,7 @@ export function buildDataViewerGlobalTimeUpdate({
 }
 
 // Default query window. Leaving the range empty means there is no bounded window to query, so pagination has no fixed basis either.
-export const DEFAULT_DATA_VIEWER_TIME_RANGE = { from: "now-1h", to: "now" };
+export const DEFAULT_DATA_VIEWER_TIME_RANGE = { from: "now-10m", to: "now" };
 
 // The Data Viewer renders a JSON value column as a raw payload string: the chart cannot plot it,
 // the grid cannot size it, and none of the numeric paths apply. Until that is handled properly
@@ -1133,7 +1133,9 @@ const PANEL_MAIN_TOP_WITH_LEGEND = 40;
 const PANEL_MAIN_HEIGHT = 178;
 const PANEL_LEGEND_ROW_HEIGHT = 18;
 const PANEL_MAIN_SERIES_ID_PREFIX = "main-series-";
-const PANEL_COLORS = ["#5470c6", "#91cc75", "#fac858", "#ee6666", "#73c0de", "#3ba272", "#fc8452", "#9a60b4", "#ea7ccc"];
+// High-contrast colours for the fixed dark chart background. Keep every entry bright enough
+// to remain visible as a thin line, while preserving the stable tag-to-colour assignment.
+const PANEL_COLORS = ["#4fc3f7", "#ffd54f", "#81c784", "#ff6b6b", "#ba68c8", "#ff9f43", "#4dd0e1", "#f06292", "#dce775"];
 const PANEL_MOUSE_WHEEL_ZOOM_IN_FACTOR = 0.82;
 const PANEL_MOUSE_WHEEL_ZOOM_OUT_FACTOR = 1.22;
 
@@ -1419,17 +1421,6 @@ export function buildDataViewerDragRangeUpdate({
     return { startTime: nextStart, endTime: nextEnd };
 }
 
-function getRoundedAxisStep(axisRangeValue) {
-    const reference = Math.max(Math.abs(axisRangeValue) / 5, Number.MIN_VALUE);
-    const exponent = Math.floor(Math.log10(reference));
-    const magnitude = 10 ** exponent;
-    const fraction = reference / magnitude;
-    if (fraction <= 1) return magnitude;
-    if (fraction <= 2) return 2 * magnitude;
-    if (fraction <= 5) return 5 * magnitude;
-    return 10 * magnitude;
-}
-
 function getYAxisRange(series, panelRange) {
     let rawMin;
     let rawMax;
@@ -1444,12 +1435,15 @@ function getYAxisRange(series, panelRange) {
     if (rawMin === undefined || rawMax === undefined) return { min: undefined, max: undefined };
     const range = rawMax - rawMin;
     const fallback = Math.max(Math.abs(rawMax), Math.abs(rawMin), 1);
-    const step = getRoundedAxisStep(range > 0 ? range : fallback);
-    const min = Math.floor(rawMin / step) * step;
-    const max = Math.ceil(rawMax / step) * step;
+    // Keep extrema away from the chart edges. A constant series uses its value magnitude as the
+    // reference (and 1 around zero), so it also gets a small symmetric range rather than sitting
+    // directly on one boundary.
+    const padding = (range > 0 ? range : fallback) * 0.05;
+    const min = rawMin - padding;
+    const max = rawMax + padding;
     return {
         min: Number(min.toPrecision(12)),
-        max: Number((max > min ? max : min + step).toPrecision(12)),
+        max: Number(max.toPrecision(12)),
     };
 }
 
@@ -1719,7 +1713,7 @@ export function buildDataViewerEChartOption({
                 animation: false,
                 sampling: item.data?.length > 1000 ? "lttb" : undefined,
                 lineStyle: {
-                    width: 1,
+                    width: 1.5,
                     color: colorFor(item, index),
                     opacity: 1,
                 },
