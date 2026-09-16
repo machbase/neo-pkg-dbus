@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const { writeJsonAtomic } = require('../config/atomic-json.js');
 const { error } = require('../config/errors.js');
+const { createJobOperationLock } = require('../jobs/operation-lock.js');
 
 const SERVER_NAME = /^[A-Za-z0-9_][A-Za-z0-9_-]*$/;
 const JOB_NAME = /^[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?$/;
@@ -42,6 +43,9 @@ function createServerStore(options) {
     ? path.join(settings.cgiRoot, 'conf.d', 'jobs')
     : path.join(path.dirname(directory), 'jobs'));
   const atomicWriter = settings.atomicWriter || writeJsonAtomic;
+  const operationLock = settings.operationLock || createJobOperationLock({
+    directory: settings.lockDirectory || path.join(directory, '.operation-locks'),
+  });
 
   function file(name) {
     return path.join(directory, `${validateName(name)}.json`);
@@ -62,10 +66,16 @@ function createServerStore(options) {
       });
     }
     try {
-      return validateDocument(validName, {
+      const document = validateDocument(validName, {
         defaultTable: '', valueColumn: '', stringValueColumn: '',
         ...JSON.parse(source),
       });
+      // Profiles written by versions before 1.0.1 may contain only the table
+      // name. VALUE is the package convention for that incomplete mapping.
+      // Keep the fallback in memory so an existing standard table is usable
+      // immediately; the next profile save persists it through documentFrom().
+      if (document.defaultTable && !document.valueColumn) document.valueColumn = 'VALUE';
+      return document;
     } catch (parseError) {
       if (parseError && parseError.code) throw parseError;
       throw error('DB_SERVER_INVALID', '등록 DB server JSON을 읽을 수 없습니다.', { name: validName });
@@ -92,6 +102,7 @@ function createServerStore(options) {
       throw error('DB_SERVER_INVALID', 'DB server 요청은 객체여야 합니다.');
     }
     const name = validateName(current ? current.name : payload.name);
+    const defaultTable = typeof payload.defaultTable === 'string' ? payload.defaultTable.toUpperCase() : '';
     return validateDocument(name, {
       schemaVersion: 1,
       name,
@@ -99,8 +110,9 @@ function createServerStore(options) {
       port: Number(payload.port),
       user: payload.user,
       password: payload.password,
-      defaultTable: typeof payload.defaultTable === 'string' ? payload.defaultTable.toUpperCase() : '',
-      valueColumn: typeof payload.valueColumn === 'string' ? payload.valueColumn.toUpperCase() : '',
+      defaultTable,
+      valueColumn: typeof payload.valueColumn === 'string' && payload.valueColumn.trim()
+        ? payload.valueColumn.toUpperCase() : (defaultTable ? 'VALUE' : ''),
       stringValueColumn: typeof payload.stringValueColumn === 'string' ? payload.stringValueColumn.toUpperCase() : '',
     });
   }
@@ -111,7 +123,7 @@ function createServerStore(options) {
     fs.mkdirSync(directory, { recursive: true });
     atomicWriter(file(name), validateDocument(name, {
       schemaVersion: 1, name, host: '127.0.0.1', port: 5656, user: 'sys', password: 'manager',
-      defaultTable: 'DEFAULT_DBUS', valueColumn: '', stringValueColumn: '',
+      defaultTable: 'DEFAULT_DBUS', valueColumn: 'VALUE', stringValueColumn: '',
     }));
   }
 
@@ -157,36 +169,24 @@ function createServerStore(options) {
     }, []);
   }
 
-  function lockFile(name) {
-    return path.join(directory, `.${validateName(name)}.lock`);
-  }
-
-  function acquireCreateLock(name) {
-    fs.mkdirSync(directory, { recursive: true });
-    const target = lockFile(name);
-    let descriptor;
-    try {
-      descriptor = fs.openSync(target, 'wx');
-    } catch (failure) {
-      if (failure && failure.code === 'EEXIST') {
-        throw error('DB_SERVER_CREATE_LOCKED', '같은 이름의 DB server 생성이 이미 진행 중이거나 이전 잠금이 남아 있습니다.', {
-          name,
-          staleLockRequiresManualReview: true,
-        });
-      }
-      throw failure;
-    }
-    try {
-      fs.writeSync(descriptor, `${JSON.stringify({ schemaVersion: 1, name, createdAt: new Date().toISOString() })}\n`);
-      if (typeof fs.fsyncSync === 'function') fs.fsyncSync(descriptor);
-    } finally {
-      try { fs.closeSync(descriptor); } catch (_) {}
-    }
-    return target;
-  }
-
   function complete(callback, operation) {
     try { callback(null, operation()); } catch (failure) { callback(failure); }
+  }
+
+  function withLock(name, callback, operation) {
+    let handle;
+    try {
+      handle = operationLock.acquire(`db-server-${validateName(name)}`);
+      const value = operation(handle);
+      handle.release();
+      handle = null;
+      callback(null, value);
+    } catch (failure) {
+      if (handle) {
+        try { handle.release(); } catch (cleanupError) { failure.cleanupError = cleanupError; }
+      }
+      callback(failure);
+    }
   }
 
   return {
@@ -213,34 +213,37 @@ function createServerStore(options) {
       });
     },
     create(payload, callback) {
-      complete(callback, () => {
-        const document = documentFrom(payload, null);
-        let reservation = null;
-        try {
-          reservation = acquireCreateLock(document.name);
-          if (fs.existsSync(file(document.name))) {
-            throw error('DB_SERVER_ALREADY_EXISTS', '같은 이름의 DB server가 이미 있습니다.', { name: document.name });
-          }
-          atomicWriter(file(document.name), document);
-          return publicValue(document);
-        } finally {
-          if (reservation) {
-            try { fs.unlinkSync(reservation); } catch (_) {}
-          }
+      let document;
+      try { document = documentFrom(payload, null); } catch (failure) { callback(failure); return; }
+      withLock(document.name, (failure, value) => {
+        if (failure && failure.code === 'JOB_CONFLICT') {
+          callback(error('DB_SERVER_CREATE_LOCKED', '같은 이름의 DB server 생성이 이미 진행 중입니다.', {
+            name: document.name,
+          }));
+          return;
         }
+        callback(failure, value);
+      }, (handle) => {
+        if (fs.existsSync(file(document.name))) {
+          throw error('DB_SERVER_ALREADY_EXISTS', '같은 이름의 DB server가 이미 있습니다.', { name: document.name });
+        }
+        handle.assertOwned();
+        atomicWriter(file(document.name), document);
+        return publicValue(document);
       });
     },
     update(name, payload, callback) {
-      complete(callback, () => {
+      withLock(name, callback, (handle) => {
         const current = read(name);
         if (!current) throw error('DB_SERVER_NOT_FOUND', '등록 DB server를 찾을 수 없습니다.', { name });
         const document = documentFrom(payload, current);
+        handle.assertOwned();
         writeJsonAtomic(file(name), document);
         return publicValue(document);
       });
     },
     setDefaultTableColumns(name, table, valueColumn, stringValueColumn, callback) {
-      complete(callback, () => {
+      withLock(name, callback, (handle) => {
         const current = read(name);
         if (!current) throw error('DB_SERVER_NOT_FOUND', '등록 DB server를 찾을 수 없습니다.', { name });
         const normalizedTable = String(table || '').trim().toUpperCase();
@@ -256,12 +259,13 @@ function createServerStore(options) {
           valueColumn: normalizedValue,
           stringValueColumn: normalizedStringValue,
         });
+        handle.assertOwned();
         writeJsonAtomic(file(current.name), document);
         return publicValue(document);
       });
     },
     remove(name, callback) {
-      complete(callback, () => {
+      withLock(name, callback, (handle) => {
         const current = read(name);
         if (!current) throw error('DB_SERVER_NOT_FOUND', '등록 DB server를 찾을 수 없습니다.', { name });
         const jobs = referencedJobs(current.name);
@@ -270,6 +274,7 @@ function createServerStore(options) {
             name: current.name, jobs,
           });
         }
+        handle.assertOwned();
         fs.unlinkSync(file(current.name));
         return { name: current.name };
       });

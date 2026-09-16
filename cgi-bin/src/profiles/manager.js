@@ -33,6 +33,7 @@ class ProfileManager {
       cgiRoot: settings.cgiRoot,
       controller: this.controller,
       stateInspector: lsRuntime && lsRuntime.inspect,
+      useIndex: productPolicy.target === 'ls',
     });
     this.profileMutationLock = settings.profileMutationLock || createJobOperationLock({
       directory: path.join(settings.cgiRoot, 'conf.d', '.profile-mutation-locks'),

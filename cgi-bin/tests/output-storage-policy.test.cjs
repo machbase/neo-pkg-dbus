@@ -2,8 +2,10 @@
 
 const assert = require('node:assert/strict');
 const {
+  jobMayProduceFractionalValue,
   jobNeedsStringValueColumn,
   selectionStorageType,
+  tagMayProduceFractionalValue,
 } = require('../src/output/storage-policy.js');
 
 const method = {
@@ -52,5 +54,17 @@ assert.equal(jobNeedsStringValueColumn({
     tags: [{ name: 'LEGACY' }],
   }],
 }, interfaceStore), false, 'legacy tags는 첫 번째 output의 타입을 사용합니다.');
+
+assert.equal(tagMayProduceFractionalValue({ bias: 0, multiplier: 1 }), false);
+assert.equal(tagMayProduceFractionalValue({ bias: 0.5, multiplier: 1 }), true);
+assert.equal(tagMayProduceFractionalValue({ bias: 0.5, multiplier: 2, transformOrder: ['bias', 'multiplier'] }), false);
+assert.equal(tagMayProduceFractionalValue({ bias: 0.5, multiplier: 2, transformOrder: ['multiplier', 'bias'] }), true);
+assert.equal(tagMayProduceFractionalValue({ bias: 0, multiplier: 0.5 }), true);
+assert.equal(jobMayProduceFractionalValue({
+  methodCalls: [{ outputSelections: [{ tags: [{ bias: 0, multiplier: 1 }, { bias: 0.25, multiplier: 1 }] }] }],
+}), true);
+assert.equal(jobMayProduceFractionalValue({
+  methodCalls: [{ outputSelections: [{ tags: [{ bias: 0.5, multiplier: 2, transformOrder: ['bias', 'multiplier'] }] }] }],
+}), false);
 
 console.log('Output storage policy: ok');

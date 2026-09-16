@@ -58,6 +58,11 @@ DataCount `1`에 맞춰 자동 Tag `MB0` 한 개를 즉시 표시한다. 사용�
 팝오버의 `Apply`는 링크가 아니라 공통 Primary 버튼을 사용하며, 유효한 완성 주소가
 없을 때는 비활성화한다.
 
+LS DataCount의 화면 상한은 X/B 4,096, W 2,048, D 1,024, L 512다. 이 제한은
+DeviceString의 data type으로 결정하며, type 변경으로 현재 DataCount가 상한을 넘으면
+상한으로 줄이고 마지막 address와 Tag 목록을 다시 계산한다. Backend의 uint16 상한은
+바꾸지 않는다.
+
 데스크톱 LS Method Call 목록의 최대 높이는 고정 행 개수가 아니라 오른쪽 선택 Call
 상세의 실제 높이를 따른다. Call 행이 그 높이를 넘을 때만 목록 내부 세로 스크롤로
 탐색한다. Test Call 결과가 나타나거나 지워져 오른쪽 높이가 변하면 왼쪽 목록 영역도
@@ -103,7 +108,7 @@ DBus Collector
 - Job 생성 성공은 항상 `installed`다. `config-only`는 외부에서 service가 지워진 복구 대상일 뿐 생성 화면이 만드는 정상 상태가 아니다.
 - `installed`는 service가 설치된 상태다. `installed`와 `stopped`는 서로 다른 축이다.
 - `running`은 설치된 service가 실행 중인 상태다.
-- `STARTING`과 `STOPPING`은 전환 상태다. 시작·정지·삭제·저장 control을 모두 비활성화한다.
+- `STARTING`과 `STOPPING`은 전환 상태다. `STARTING`은 `STARTING — Preparing tags…`와 작은 spinner를 표시하고 Start·Edit·Delete·Save를 비활성화하되 Stop은 준비 취소를 위해 허용한다. `STOPPING`은 모든 lifecycle control을 비활성화한다. 전환 Job이 있으면 목록을 1초마다 다시 읽고 전환 종료 뒤 polling을 멈춘다.
 - Controller를 읽지 못하면 `controllerState: "UNKNOWN"`, `configState: null`, `executionState: null`, `statusKnown: false`로 표시하고 추측으로 설치 또는 실행 상태를 표시하지 않는다.
 - 저장 파일 이름과 document top-level name이 다르면 `JOB_INVALID_CONFIG`으로 표시한다. 이 경우 목록·상세는 진단만 보여 주고 Start, Stop, Edit 저장, Delete를 모두 비활성화한다.
 
@@ -113,10 +118,12 @@ Job 목록의 허용 동작은 아래와 같다.
 |---|---|---|
 | config-only (외부 service 삭제) | Start (내부 자동 설치 후 시작) | Edit, Delete |
 | installed + stopped/failed | Start | Edit, Delete |
-| installed + running/starting/stopping | Stop 또는 전환 대기 | Edit/Delete 불가 |
+| installed + running | Stop | Edit/Delete 불가 |
+| installed + starting | Stop (준비 취소) | Edit/Delete 불가 |
+| installed + stopping | 전환 대기 | Edit/Delete 불가 |
 | Controller UNKNOWN | 비활성화 | 모든 변경 불가 |
 
-`running`, `STARTING`, `STOPPING`인 Job은 Job Edit와 Delete를 차단한다. 이 규칙은 화면 편의가 아니라 Backend 규칙을 반영한다. 예외로 LS build의 Job 상세 Log Level은 CCR-074의 전용 mutation을 사용한다. 화면은 Job 상세 GET의 `revision`을 수정 PUT에 함께 보낸다. 다른 관리자가 먼저 저장하거나 같은 Job mutation이 진행 중이면 `JOB_CONFLICT`를 표시하고 최신 설정을 다시 읽은 뒤 사용자가 다시 수정하게 한다. 장기 화면 잠금은 제공하지 않는다.
+`running`, `STARTING`, `STOPPING`인 Job은 Job Edit와 Delete를 차단한다. 이 규칙은 화면 편의가 아니라 Backend 규칙을 반영한다. 예외로 LS build의 Job 상세 Log Level은 CCR-074의 전용 mutation을 사용한다. 화면은 호환을 위해 Job 상세 GET의 `revision`을 수정 PUT에 함께 보내지만 Backend는 이 값을 사용자 충돌 조건으로 쓰지 않는다. 같은 Job mutation이나 package lifecycle이 실제로 진행 중이면 lock의 `JOB_CONFLICT`를 표시하고 사용자가 다시 시도하게 한다. 장기 화면 잠금은 제공하지 않는다.
 
 ### 3.1 Job mutation 충돌 안내
 
@@ -150,6 +157,8 @@ Pause 중에는 요청 결과를 화면에 반영하지 않고 Resume 즉시 다
 
 Job은 공통 Profile이나 공통 DBus 주소를 고르지 않는다. Method Call마다 DBus Interface와 Method를 고르고, 실제 입력값을 넣는다. 실행 중 Job은 편집 화면으로 들어갈 수 없고 API도 변경을 거부한다.
 
+Save/Create를 제출하면 Main과 Side는 메모리에만 존재하는 15초 save lease를 공유한다. Save 버튼은 요청 중 비활성화하고, 그동안 Side에서 다른 Job을 누르면 즉시 화면을 바꾸지 않고 마지막 선택 한 건만 보관했다가 저장 성공·실패 종료 뒤 연다. 저장 요청은 편집 route 변경이나 form unmount로 abort하지 않으며, 이미 다른 화면으로 이동한 경우 늦은 응답의 화면 반영만 무시한다. 정상·오류 응답은 `finally`에서 lease를 해제한다. 응답이 15초를 넘으면 UI를 자동으로 풀고 Job 목록을 다시 읽으며, 이후 도착한 응답은 현재 화면을 강제로 바꾸지 않는다. 이 상태는 파일이나 브라우저 저장소에 기록하지 않는다. Side/Main 동기화와 Backend 중단 안전성은 `DBUS_SDD.md` CCR-086을 따른다.
+
 새 Job Name은 현재 화면이 이미 읽은 Job 목록에서 정규식 `^job-([1-9][0-9]*)$`와 일치하는 이름의 가장 큰 `N` 다음 번호로 한 번 제안한다. 그런 이름이 없으면 `job-1`이다. 다른 형식의 이름과 비어 있는 중간 번호는 계산에 영향을 주지 않으며 별도 목록 요청이나 Backend last counter는 만들지 않는다. 목록 refresh는 사용자가 수정한 이름을 덮어쓰지 않고 동시 생성 충돌은 기존 `JOB_ALREADY_EXISTS`로 처리한다.
 
 New/Edit Job의 Job Configuration은 항상 `JOB CONFIGURATION`, Job Name, Run Interval, Save Policy를 레이블이 있는 읽기 전용 summary 카드로 표시한다. 연필 버튼은 기존 Job Name, Run Interval, Retry Initial, Retry Maximum, Retry Multiplier, Save Policy control을 가진 `Edit Job Configuration` 모달을 연다. 새 Job Name만 수정할 수 있고 Edit Job Name은 계속 변경할 수 없다. 모달은 별도 draft를 사용하며 `Apply`만 Job draft에 반영하고 `Cancel`, 닫기, 바깥 영역 클릭, Esc는 변경을 버린다. 이 표시 상태는 payload에 저장하지 않는다. 이전 접힘 계약은 `DBUS_SDD.md` CCR-056, 대체 계약은 CCR-058을 따른다.
@@ -161,11 +170,11 @@ New/Edit Job의 Database도 항상 `DATABASE`, Database Server, Table을 레이�
 - 기본 Run Interval은 1,000ms다.
 - 실패 시 다음 cycle은 5초, 10초, 20초, 이후 30초 간격으로 재시도한다. 같은 cycle에서 Method를 반복하지 않는다.
 - `perMethod`는 성공한 Method마다 저장한다. `afterAllMethods`는 모든 Method 성공 뒤 한 번 저장을 시도한다. 둘 다 DB 트랜잭션 원자성을 약속하지 않는다.
-- 등록 DB Server를 고르고, `+`로 Database Servers 관리 모달을 열 수 있다. Server를 고르기 전에는 Table과 두 Column control을 비활성화한다. Table은 직접 입력하거나 발견된 후보를 고르는 콤보 박스이며, 입력·선택한 이름은 즉시 대문자로 표시한다. 기존 Table을 고르면 숫자 Value Column·선택 String Value Column은 `GET /db/table/columns`의 후보만 고르는 콤보 박스다. 서버 목록에 없는 Table 이름을 입력하면 `Table not found. It will be created automatically when the job is saved.`를 표시하고 두 Column control을 비활성화한다. Job 저장 시 숫자 출력만 있으면 `VALUE`만, 문자열·JSON·object·array 저장이 하나라도 있으면 `VALUE`와 `STR_VALUE`를 가진 새 TAG Table을 만든다. 기존 Table mapping은 Job 저장 때 metadata나 자료형을 다시 검사하지 않는다. String Value Column이 비어 있으면 문자열 계열 출력만 저장하지 않고 숫자 출력은 계속 저장한다. primary key와 basetime column의 이름은 고정하지 않는다. 이 규칙의 변경 근거와 승인 기록은 `DBUS_SDD.md` CCR-055를 따른다.
+- 등록 DB Server를 고르고, `+`로 Database Servers 관리 모달을 열 수 있다. Server를 고르기 전에는 Table과 두 Column control을 비활성화한다. Table은 직접 입력하거나 발견된 후보를 고르는 콤보 박스이며, 입력·선택한 이름은 즉시 대문자로 표시한다. 기존 Table을 고르면 숫자 Value Column·선택 String Value Column은 `GET /db/table/columns`의 후보만 고르는 콤보 박스다. 서버 목록에 없는 Table 이름을 입력하면 `Table not found. It will be created automatically when the job is saved.`를 표시하고 두 Column control을 비활성화한다. Job 저장 시 숫자 출력만 있으면 `VALUE`만, 문자열·JSON·object·array 저장이 하나라도 있으면 `VALUE`와 `STR_VALUE`를 가진 새 TAG Table을 만든다. 기존 Table mapping은 Job 저장 전 metadata와 자료형을 검사한다. 설정 column이 없거나 type이 다르면 안내 toast를 표시하고 해당 Database Server 편집 모달을 연다. String Value Column이 비어 있으면 문자열 계열 출력만 저장하지 않고 숫자 출력은 계속 저장한다. primary key와 basetime column의 이름은 고정하지 않는다. 이 규칙의 변경 근거와 승인 기록은 `DBUS_SDD.md` CCR-055·CCR-078을 따른다.
 
 ### DB Server 관리 흐름
 
-Main의 DB Server 관리 화면은 등록 DB Server를 목록으로 보여 주고 Create, Edit, Delete, Test Connection을 제공한다. Create/Edit에서는 `name`, `host`, `port`, `user`, `password`를 모두 필수로 입력하고 `POST` 또는 `PUT /db/server`로 저장한다. 비밀번호가 비어 있으면 저장 control을 비활성화하고, Backend의 `DB_SERVER_INVALID` 오류도 해당 입력에 표시한다. 비밀번호는 입력·전송에만 쓰며 Job config나 목록·오류·로그에 다시 보여 주지 않는다. 기본 `localhost`의 Default Table 이름은 `DEFAULT_DBUS`이고 두 기본 Column은 비어 있다. Database Server 저장은 Default Table을 만들지 않는다. `Connect and Load Tables` 뒤 기존 Table을 선택한 경우에만 두 Column control을 활성화하며, 목록에 없는 Table을 직접 입력하면 두 control을 비활성화한 채 Table 이름만 저장한다.
+Main의 DB Server 관리 화면은 등록 DB Server를 목록으로 보여 주고 Create, Edit, Delete, Test Connection을 제공한다. Create/Edit에서는 `name`, `host`, `port`, `user`, `password`를 모두 필수로 입력하고 `POST` 또는 `PUT /db/server`로 저장한다. 비밀번호가 비어 있으면 저장 control을 비활성화하고, Backend의 `DB_SERVER_INVALID` 오류도 해당 입력에 표시한다. 비밀번호는 입력·전송에만 쓰며 Job config나 목록·오류·로그에 다시 보여 주지 않는다. 기본 `localhost`의 Default Table 이름은 `DEFAULT_DBUS`, 기본 Value Column은 `VALUE`, 선택 String Value Column은 빈 문자열이다. Database Server 저장은 Default Table을 만들지 않는다. `Connect and Load Tables` 뒤 기존 Table을 선택한 경우에만 두 Column control을 활성화한다. 목록에 없는 Table 이름만 입력해도 저장 시 Value Column은 `VALUE`로 보완한다.
 
 Job form은 먼저 `GET /db/server/list`로 등록 서버를 고른다. 선택 후 `GET /db/table/list?server=...` 후보에서 Table을 고르거나 직접 입력한다. 목록에 없는 Table은 별도 `POST /db/table/create` 요청을 보내지 않고 Job Create/Save 요청에서 Output Mapping에 맞춰 자동 생성한다. 숫자 출력만 있으면 `VALUE`, 문자열 계열 저장이 있으면 `VALUE`와 `STR_VALUE`를 쓴다. 생성한 이름이 서버의 Default Table과 같으면 Backend가 서버 기본 Column도 생성 schema와 같은 값으로 저장하므로, 이후 새 Job은 `GET /db/server/list` 응답에서 해당 Column을 바로 복사한다. 이후 기존 Table만 `GET /db/table/columns?server=...&table=...`로 value/string value column 후보를 받아 두 Column 콤보박스에 보여 준다. FE는 기존 Table의 Column 이름을 직접 입력하게 하지 않으며, 새 Table의 Column control도 열지 않는다. Backend가 TAG primary key와 basetime column을 판별하므로 FE는 컬럼 이름을 가정하지 않는다.
 
@@ -189,6 +198,15 @@ UTF-8 CSV 파일은 별도 미리보기 없이 현재 Call의 Tag 배열에 즉�
 검증이 하나라도 실패하면 draft를 전혀 바꾸지 않고 오류를 표시한다. CSV import는
 적용한 이름을 수동 이름으로 표시하고 Tag 수와 DataCount를 변경하지 않으며 generic
 Method Call 화면에는 표시하지 않는다.
+선택된 LS Call의 Tag 배열은 DataCount 전체를 Job draft에 유지하되 화면에는 한 페이지당
+50개만 렌더링한다. pager는 Tag 수와 무관하게 항상 표시하고 First, Previous, 직접
+페이지 입력, Next, Last를 제공한다. 직접 입력은 Enter 또는 blur에서 적용하며 1보다
+작으면 첫 페이지, 마지막 페이지보다 크면 마지막 페이지로 보정한다. 화면의 행 번호와
+수정 인덱스는 전체 배열 기준이고, DataCount 감소로 현재 페이지가 사라지면 새 마지막
+페이지로 보정한다. 다른 Call을 선택하면 첫 페이지로 돌아가며 Tags를 접었다 다시 열면
+현재 Call의 페이지를 유지한다. CSV Import, 저장과 validation은 현재 페이지가 아니라
+항상 전체 Tag 배열에 적용하고, Import 뒤 현재 페이지를 새 배열에서 다시 표시한다.
+페이지 번호와 페이지 크기는 payload에 저장하지 않으며 generic 화면은 바꾸지 않는다.
 LS Test Call 결과는 가장 최근 실행한 Call ID와 함께 화면 상태로 보관한다. 선택된
 Call의 ID가 같을 때만 Tags 아래에 성공 여부, 소요 시간과 반환값을
 표시한다. 다른 Call을 선택하면 숨기고 원래 Call로 돌아오면 다시 표시한다. 다른
@@ -253,10 +271,12 @@ API base path는 `/cgi-bin/api`다. 모든 성공 응답은 `{ "ok": true, "data
 
 Discover는 Interface 선택 뒤 현재 편집 draft를 바꿀 뿐 저장하지 않는다. FE는 footer의 단일 `Create Interface` 또는 `Update Interface`로 현재 draft 하나만 보낸다. 새 Interface는 `POST`, 기존 Interface의 다시 Discover 결과는 `PUT /dbus-interface?discover=true`를 사용한다. `{interfaces:[...]}` 배열 wrapper, Save All, Discover 카드별 저장 control은 제공하지 않는다.
 
-Job 생성 form은 `POST /job`에 `{ name, config }`만 보낸다. `name`은 form의 Job Name이고 `config`에는 `name` 키를 넣지 않는다. Job 수정 form은 상세 GET으로 받은 `revision`과 바뀐 필드만 담은 부분 config patch를 `PUT /job?name=<현재 이름>`에 보낸다. 수정 body에는 `name`을 넣지 않고 Job Name 입력은 읽기 전용이다. Backend가 `defaults → existing config → patch`를 깊이 병합하며, Method Call·Tag 같은 배열은 FE가 보낸 배열 전체로 교체된다.
+Job 생성 form은 `POST /job`에 `{ name, config }`만 보낸다. `name`은 form의 Job Name이고 `config`에는 `name` 키를 넣지 않는다. Job 수정 form은 호환을 위해 상세 GET으로 받은 `revision`과 config patch를 `PUT /job?name=<현재 이름>`에 보낸다. 수정 body에는 `name`을 넣지 않고 Job Name 입력은 읽기 전용이다. Backend가 `defaults → existing config → patch`를 깊이 병합하며, Method Call·Tag 같은 배열은 FE가 보낸 배열 전체로 교체된다. client revision이 낮거나 없어도 server가 Job lock 안에서 읽은 최신 revision을 기준으로 저장한다.
 
-FE는 Job 상세 성공 data의 `name`, `config`, `revision`, `configState`, `executionState`, `statusKnown`, `controllerState`, `controllerDetail`을 모두 사용한다. `statusKnown: false`이면 `configState`·`executionState`가 `null`인 것을 정상으로 처리하고 모든 변경 control을 비활성화한다. LS Log Level Apply는 `PUT /job/log?name=<name>`에 정확히 `{revision, level}`을 보내며 다른 Job config를 함께 보내지 않는다. `JOB_INVALID`이면 create form의 잘못된 config를 표시하고, `JOB_NAME_IMMUTABLE`이면 이름이 수정 대상이 아님을 알린다. `JOB_CONFLICT`이면 다른 관리자의 저장 또는 같은 Job mutation 진행을 알리고 최신 설정을 다시 읽어 다시 수정하라고 안내한다. `JOB_INVALID_CONFIG`이면 파일명과 저장 name 불일치 진단을 보여 주며 어떤 lifecycle 또는 저장·삭제 요청도 보내지 않는다. `POST /job/validate` 성공의 `warnings[]`는 `code`, `reason`, `path`, `details`로 해당 입력과 함께 표시하며, `path`는 draft 안의 문제 위치를 가리키는 JSON Pointer다. warning만 있을 때 저장을 막지 않는다.
+Save/Create 버튼은 form이 열려 있을 때 항상 활성화하고, 요청을 시작한 즉시부터 종료될 때까지만 비활성화한다. 렌더 전 연속 클릭은 동기 guard로 무시하며, 요청이 실패하면 버튼을 다시 활성화한다. PUT 성공 응답의 revision을 즉시 보관한다.
+
+FE의 monitoring과 Data Viewer 진입은 `GET /job/status?name=`의 `{job,lastRun}`을 사용하며, 5초 polling마다 full Tag 설정을 다시 받지 않는다. Edit 진입만 `GET /job`의 canonical 전체 config를 사용한다. Job detail의 `name`, `config`, `revision`, `configState`, `executionState`, `statusKnown`, `controllerState`, `controllerDetail`을 모두 사용하고, `statusKnown: false`이면 `configState`·`executionState`가 `null`인 것을 정상으로 처리하며 모든 변경 control을 비활성화한다. LS Log Level Apply는 `PUT /job/log?name=<name>`에 정확히 `{revision, level}`을 보내며 다른 Job config를 함께 보내지 않는다. `JOB_INVALID`이면 create form의 잘못된 config를 표시하고, `JOB_NAME_IMMUTABLE`이면 이름이 수정 대상이 아님을 알린다. `JOB_CONFLICT`은 client revision 불일치가 아니라 같은 Job mutation·package lifecycle·interface mutation의 실제 lock 경쟁을 알린다. `JOB_INVALID_CONFIG`은 code 대신 `This Job configuration cannot be read. Recreate the Job before continuing.`으로 안내한다. `POST /job/validate` 성공의 `warnings[]`는 `code`, `reason`, `path`, `details`로 해당 입력과 함께 표시하며, `path`는 draft 안의 문제 위치를 가리키는 JSON Pointer다. warning만 있을 때 저장을 막지 않는다.
 
 브라우저 요청에는 인위적인 timeout을 두지 않는다. 사용자가 취소하거나 화면이 닫힐 때만 AbortSignal을 전달한다. `Request timed out` UI와 timeout 상수는 없다.
 
-사용 API는 settings, `dbus-interface/list`, `dbus-interface`, `dbus-interface/discover`, `dbus-method`, job, `job/log`, job/validate, job/start, job/stop, job/last-run, dbus/call, `db/server`, `db/server/list`, `db/connect`, `db/table/create`, `db/table/list`, `db/table/columns`, `db/table/tags`, `db/table/data`, `db/table/stat`, `db/table/chart`, `log/all`, `log/list`, `log/content`, `log/content/all`, `log/tail`이며, 각 요청·응답 필드와 공개 오류 코드는 `DBUS_SDD.md` 4.1을 따른다.
+사용 API는 settings, `dbus-interface/list`, `dbus-interface`, `dbus-interface/discover`, `dbus-method`, job, `job/status`, `job/log`, job/validate, job/start, job/stop, job/last-run, dbus/call, `db/server`, `db/server/list`, `db/connect`, `db/table/create`, `db/table/list`, `db/table/columns`, `db/table/tags`, `db/table/data`, `db/table/stat`, `db/table/chart`, `log/all`, `log/list`, `log/content`, `log/content/all`, `log/tail`이며, 각 요청·응답 필드와 공개 오류 코드는 `DBUS_SDD.md` 4.1을 따른다.

@@ -150,11 +150,20 @@ function run() {
     assert.equal(response.payload.data.controllerState, 'STOPPED');
     assert.equal(response.payload.data.revision, 1);
 
+    response = runCgi(path.join(cgiRoot, 'api', 'job', 'status.js'), moduleRoot, stateFile, {
+      method: 'GET', query: 'name=alpha',
+    });
+    assertEnvelope(response, 200, true);
+    assert.equal(response.payload.data.job.name, 'alpha');
+    assert.equal(response.payload.data.job.revision, 1);
+    assert.equal(response.payload.data.lastRun, null);
+
     response = runCgi(jobScript, moduleRoot, stateFile, {
       method: 'PUT', query: 'name=alpha', body: JSON.stringify({ schedule: { intervalMs: 2000 } }),
     });
-    assertEnvelope(response, 400, false);
-    assert.equal(response.payload.code, 'JOB_REVISION_REQUIRED');
+    assertEnvelope(response, 200, true);
+    assert.equal(response.payload.data.revision, 2);
+    assert.equal(response.payload.data.config.schedule.intervalMs, 2000);
 
     response = runCgi(jobScript, moduleRoot, stateFile, {
       method: 'PUT', query: 'name=alpha', body: JSON.stringify({ revision: 1, schedule: { intervalMs: 2000 } }),
@@ -166,11 +175,9 @@ function run() {
     response = runCgi(jobScript, moduleRoot, stateFile, {
       method: 'PUT', query: 'name=alpha', body: JSON.stringify({ revision: 1, schedule: { intervalMs: 3000 } }),
     });
-    assertEnvelope(response, 409, false);
-    assert.equal(response.payload.code, 'JOB_CONFLICT');
-    assert.deepEqual(response.payload.details, {
-      name: 'alpha', expectedRevision: 1, currentRevision: 2,
-    });
+    assertEnvelope(response, 200, true);
+    assert.equal(response.payload.data.revision, 3);
+    assert.equal(response.payload.data.config.schedule.intervalMs, 3000);
 
     response = runCgi(jobScript, moduleRoot, stateFile, {
       method: 'PUT', query: 'name=alpha', body: JSON.stringify({ name: 'renamed' }),

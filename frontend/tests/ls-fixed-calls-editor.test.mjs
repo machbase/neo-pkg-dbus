@@ -30,6 +30,7 @@ const button = (root, label) => root.findAll((node) => node.type === "button" &&
 const input = (root, label) => root.findAllByProps({ "aria-label": label })[0];
 const tagsSummary = (root) => root.findAll((node) => node.type === "button" && String(node.props.className || "").includes("neo-fixed-tags__summary"))[0];
 const selectedCallButton = (root) => root.findAll((node) => node.type === "button" && String(node.props.className || "").includes("neo-fixed-calls__select") && node.props["aria-pressed"] === true)[0];
+const fixedTagRows = (root) => root.findAll((node) => node.type === "table" && node.props.className === "neo-fixed-tag-list")[0].findAllByType("tr").slice(1);
 
 function dragTransfer() {
   const values = new Map();
@@ -182,6 +183,19 @@ test("LS fixed 편집기는 Call을 추가하고 마지막 Call 한 개는 삭�
     }));
   });
   assert.equal(button(renderer.root, `${first.id} Remove`).props.disabled, true);
+  await act(async () => renderer.unmount());
+});
+
+test("LS DataCount는 DeviceString 타입별 화면 상한을 적용한다", async () => {
+  const harness = await renderCalls([fixedCall("get-device-data-1", "%MW1000", 2048)]);
+  const { renderer } = harness;
+  assert.equal(input(renderer.root, "DataCount").props.max, "2048");
+  assert.equal(button(renderer.root, "DataCount Increase").props.disabled, true);
+  await act(async () => button(renderer.root, "Toggle DeviceString address picker").props.onClick());
+  await act(async () => input(renderer.root, "DeviceString address preview").props.onChange({ target: { value: "%MD1000" } }));
+  await act(async () => buttonText(renderer.root, "Apply").props.onClick());
+  assert.equal(harness.calls()[0].inputs.DataCount, 1024);
+  assert.equal(harness.calls()[0].outputSelections[0].tags.at(-1).name, "MD2023");
   await act(async () => renderer.unmount());
 });
 
@@ -409,6 +423,97 @@ test("LS fixed 빈 Tags 요약은 0 tags로 표시한다", async () => {
   const { renderer } = await renderCalls([empty]);
 
   assert.match(JSON.stringify(renderer.toJSON()), /0 tags/);
+  await act(async () => tagsSummary(renderer.root).props.onClick());
+  assert.ok(renderer.root.findAllByProps({ "aria-label": "Tag pages" })[0]);
+  assert.equal(input(renderer.root, "Tag page").props.value, "1");
+  assert.equal(button(renderer.root, "First tag page").props.disabled, true);
+  assert.equal(button(renderer.root, "Last tag page").props.disabled, true);
+  assert.equal(fixedTagRows(renderer.root).length, 0);
+  await act(async () => renderer.unmount());
+});
+
+test("LS Tags pager는 전체 배열과 무관하게 현재 50개만 표시하고 절대 인덱스를 수정한다", async () => {
+  const harness = await renderCalls([fixedCall("get-device-data-1", "%MB0", 120)]);
+  const { renderer } = harness;
+
+  await act(async () => tagsSummary(renderer.root).props.onClick());
+  assert.equal(fixedTagRows(renderer.root).length, 50);
+  assert.equal(fixedTagRows(renderer.root)[0].findAllByType("td")[0].children.join(""), "1");
+  assert.equal(fixedTagRows(renderer.root).at(-1).findAllByType("td")[0].children.join(""), "50");
+  assert.equal(input(renderer.root, "Tag page").props.value, "1");
+  assert.match(JSON.stringify(renderer.toJSON()), /1–50 of 120 tags/);
+  assert.ok(input(renderer.root, "MB49 Tag Name"));
+  assert.equal(input(renderer.root, "MB50 Tag Name"), undefined);
+  assert.equal(harness.calls()[0].outputSelections[0].tags.length, 120);
+
+  await act(async () => button(renderer.root, "Next tag page").props.onClick());
+  assert.equal(input(renderer.root, "Tag page").props.value, "2");
+  assert.equal(fixedTagRows(renderer.root).length, 50);
+  assert.equal(fixedTagRows(renderer.root)[0].findAllByType("td")[0].children.join(""), "51");
+  assert.equal(fixedTagRows(renderer.root).at(-1).findAllByType("td")[0].children.join(""), "100");
+  assert.equal(input(renderer.root, "MB49 Tag Name"), undefined);
+
+  await act(async () => input(renderer.root, "MB50 Tag Name").props.onChange({ target: { value: "PAGE_TWO" } }));
+  await act(async () => input(renderer.root, "PAGE_TWO Signed").props.onChange({ target: { checked: true } }));
+  await act(async () => button(renderer.root, "PAGE_TWO Bias Increase").props.onClick());
+  const tags = harness.calls()[0].outputSelections[0].tags;
+  assert.equal(tags.length, 120);
+  assert.equal(tags[49].name, "MB49");
+  assert.equal(tags[50].name, "PAGE_TWO");
+  assert.equal(tags[50].signed, true);
+  assert.equal(tags[50].bias, 1);
+  assert.equal(tags[51].name, "MB51");
+
+  await act(async () => button(renderer.root, "Previous tag page").props.onClick());
+  await act(async () => button(renderer.root, "Next tag page").props.onClick());
+  assert.equal(input(renderer.root, "PAGE_TWO Tag Name").props.value, "PAGE_TWO");
+  await act(async () => renderer.unmount());
+});
+
+test("LS Tags pager는 직접 입력을 경계로 보정하고 DataCount 및 Call 변경에 맞춰 페이지를 조정한다", async () => {
+  const harness = await renderCalls([
+    fixedCall("get-device-data-1", "%MB0", 120),
+    fixedCall("get-device-data-2", "%MW10", 80),
+  ]);
+  const { renderer } = harness;
+
+  await act(async () => tagsSummary(renderer.root).props.onClick());
+  await act(async () => input(renderer.root, "Tag page").props.onChange({ target: { value: "999" } }));
+  let prevented = false;
+  await act(async () => input(renderer.root, "Tag page").props.onKeyDown({ key: "Enter", preventDefault() { prevented = true; } }));
+  assert.equal(prevented, true);
+  assert.equal(input(renderer.root, "Tag page").props.value, "3");
+  assert.equal(fixedTagRows(renderer.root).length, 20);
+  assert.equal(button(renderer.root, "Next tag page").props.disabled, true);
+
+  await act(async () => input(renderer.root, "Tag page").props.onChange({ target: { value: "0" } }));
+  await act(async () => input(renderer.root, "Tag page").props.onBlur());
+  assert.equal(input(renderer.root, "Tag page").props.value, "1");
+  assert.equal(button(renderer.root, "Previous tag page").props.disabled, true);
+
+  await act(async () => button(renderer.root, "Last tag page").props.onClick());
+  await act(async () => input(renderer.root, "DataCount").props.onChange({ target: { value: "10" } }));
+  assert.equal(input(renderer.root, "Tag page").props.value, "1");
+  assert.equal(fixedTagRows(renderer.root).length, 10);
+
+  await act(async () => selectedCallButton(renderer.root).props.onClick());
+  await act(async () => button(renderer.root, "get-device-data-2 Select").props.onClick());
+  await act(async () => tagsSummary(renderer.root).props.onClick());
+  assert.equal(input(renderer.root, "Tag page").props.value, "1");
+  assert.equal(fixedTagRows(renderer.root).length, 50);
+  await act(async () => renderer.unmount());
+});
+
+test("LS Tags pager는 4096보다 큰 배열도 50행만 렌더링한다", async () => {
+  const harness = await renderCalls([fixedCall("get-device-data-1", "%MB0", 10000)]);
+  const { renderer } = harness;
+
+  await act(async () => tagsSummary(renderer.root).props.onClick());
+  assert.equal(harness.calls()[0].outputSelections[0].tags.length, 10000);
+  assert.equal(fixedTagRows(renderer.root).length, 50);
+  const pagerText = renderer.root.findAllByProps({ "aria-label": "Tag pages" })[0].findAllByType("span").map((node) => node.children.join("")).join(" ");
+  assert.match(pagerText, /of 200/);
+  assert.match(JSON.stringify(renderer.toJSON()), /1–50 of 10,000 tags/);
   await act(async () => renderer.unmount());
 });
 
@@ -463,6 +568,32 @@ test("LS Import CSV는 접힌 Tags에서 선택 Call만 즉시 치환하고 부�
   assert.deepEqual(first[0].transformOrder, ["multiplier", "bias"]);
   assert.deepEqual(first.slice(1).map((tag) => tag.name), ["MB1", "MB2"]);
   assert.deepEqual(harness.calls()[1].outputSelections[0].tags.map((tag) => tag.name), ["MW10", "MW11"]);
+  assert.equal(target.value, "");
+  await act(async () => renderer.unmount());
+});
+
+test("LS Import CSV는 현재 페이지가 아니라 전체 Tag 배열에 적용하고 열린 페이지를 갱신한다", async () => {
+  const harness = await renderCalls([fixedCall("get-device-data-1", "%MB0", 120)]);
+  const { renderer } = harness;
+  await act(async () => tagsSummary(renderer.root).props.onClick());
+  await act(async () => button(renderer.root, "Next tag page").props.onClick());
+
+  const csvRows = Array.from({ length: 60 }, (_, index) => `CSV_${index},${index},1,0`);
+  const target = {
+    files: [{ text: async () => `name,bias,multiplier,order\n${csvRows.join("\n")}\n` }],
+    value: "tags.csv",
+  };
+  await act(async () => input(renderer.root, "Import Tags CSV").props.onChange({ currentTarget: target, target }));
+
+  const tags = harness.calls()[0].outputSelections[0].tags;
+  assert.equal(tags.length, 120);
+  assert.equal(tags[0].name, "CSV_0");
+  assert.equal(tags[50].name, "CSV_50");
+  assert.equal(tags[59].name, "CSV_59");
+  assert.equal(tags[60].name, "MB60");
+  assert.equal(input(renderer.root, "Tag page").props.value, "2");
+  assert.ok(input(renderer.root, "CSV_50 Tag Name"));
+  assert.ok(input(renderer.root, "MB60 Tag Name"));
   assert.equal(target.value, "");
   await act(async () => renderer.unmount());
 });

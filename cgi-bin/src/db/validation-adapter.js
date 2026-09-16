@@ -6,6 +6,7 @@ const NUMERIC_TYPES = new Set([
   'byte', 'short', 'ushort', 'integer', 'int', 'uint', 'long', 'ulong',
   'float', 'double', 'number', 'numeric', 'decimal',
 ]);
+const INTEGER_TYPES = new Set(['byte', 'short', 'ushort', 'integer', 'int', 'uint', 'long', 'ulong']);
 const STRING_TYPES = new Set(['char', 'varchar', 'text', 'clob', 'string']);
 
 function defaultDependencies(options) {
@@ -58,6 +59,48 @@ function typeOf(column) {
   return String(column && column.type || '').toLowerCase().replace(/\(.*/, '');
 }
 
+function validatedExistingMapping(database, metadata, options) {
+  const columns = metadata && metadata.columns;
+  if (!metadata || String(metadata.tableType || '').toUpperCase() !== 'TAG' || !Array.isArray(columns)) {
+    throw invalid('선택한 table은 TAG table이어야 합니다.', { table: database.table });
+  }
+  const primary = columns.find((column) => column && (column.primaryKey === true || column.primary === true));
+  const basetime = columns.find((column) => column && column.basetime === true);
+  const valueColumn = columnByName(columns, database.valueColumn);
+  const configuredStringColumn = String(database.stringValueColumn || '').trim();
+  const stringColumn = configuredStringColumn ? columnByName(columns, configuredStringColumn) : null;
+  if (!primary || !STRING_TYPES.has(typeOf(primary))) {
+    throw invalid('TAG name primary column을 찾을 수 없습니다.', { table: database.table });
+  }
+  if (!basetime) {
+    throw invalid('TAG basetime column을 찾을 수 없습니다.', { table: database.table });
+  }
+  if (!valueColumn || !NUMERIC_TYPES.has(typeOf(valueColumn))) {
+    throw invalid('database.valueColumn은 선택한 TAG table의 숫자 column이어야 합니다.', {
+      problem: 'value-column', table: database.table, valueColumn: database.valueColumn,
+    });
+  }
+  if (INTEGER_TYPES.has(typeOf(valueColumn)) && options && options.fractionalValuePossible === true) {
+    throw invalid('정수 VALUE column에는 소수 결과가 가능한 Tag Transform을 사용할 수 없습니다.', {
+      problem: 'fractional-value', table: database.table, valueColumn: database.valueColumn,
+    });
+  }
+  if (configuredStringColumn && (!stringColumn || !STRING_TYPES.has(typeOf(stringColumn)))) {
+    throw invalid('database.stringValueColumn은 문자열 column이어야 합니다.', {
+      problem: 'string-value-column', table: database.table,
+      stringValueColumn: database.stringValueColumn,
+    });
+  }
+  return {
+    server: database.server,
+    table: database.table,
+    tagNameColumn: primary.name,
+    basetimeColumn: basetime.name,
+    valueColumn: valueColumn.name,
+    stringValueColumn: stringColumn ? stringColumn.name : null,
+  };
+}
+
 function createDatabaseValidationAdapter(options) {
   const settings = options || {};
   let dependencies = null;
@@ -84,42 +127,8 @@ function createDatabaseValidationAdapter(options) {
         }
         callDependency(dependencies.metadataReader, 'columns', [server, database.table], (metadataError, metadata) => {
           if (metadataError) { callback(unavailable(metadataError)); return; }
-          const columns = metadata && metadata.columns;
-          if (!metadata || String(metadata.tableType || '').toUpperCase() !== 'TAG' || !Array.isArray(columns)) {
-            callback(invalid('선택한 table은 TAG table이어야 합니다.', { table: database.table }));
-            return;
-          }
-          const primary = columns.find((column) => column && (column.primaryKey === true || column.primary === true));
-          const basetime = columns.find((column) => column && column.basetime === true);
-          const valueColumn = columnByName(columns, database.valueColumn);
-          const configuredStringColumn = String(database.stringValueColumn || '').trim();
-          const stringColumn = configuredStringColumn ? columnByName(columns, configuredStringColumn) : null;
-          if (!primary || !STRING_TYPES.has(typeOf(primary))) {
-            callback(invalid('TAG name primary column을 찾을 수 없습니다.', { table: database.table }));
-            return;
-          }
-          if (!basetime) {
-            callback(invalid('TAG basetime column을 찾을 수 없습니다.', { table: database.table }));
-            return;
-          }
-          if (!valueColumn || !NUMERIC_TYPES.has(typeOf(valueColumn))) {
-            callback(invalid('database.valueColumn은 숫자 column이어야 합니다.', { valueColumn: database.valueColumn }));
-            return;
-          }
-          if (configuredStringColumn && (!stringColumn || !STRING_TYPES.has(typeOf(stringColumn)))) {
-            callback(invalid('database.stringValueColumn은 문자열 column이어야 합니다.', {
-              stringValueColumn: database.stringValueColumn,
-            }));
-            return;
-          }
-          callback(null, {
-            server: database.server,
-            table: database.table,
-            tagNameColumn: primary.name,
-            basetimeColumn: basetime.name,
-            valueColumn: valueColumn.name,
-            stringValueColumn: stringColumn ? stringColumn.name : null,
-          });
+          try { callback(null, validatedExistingMapping(database, metadata)); }
+          catch (validationError) { callback(validationError); }
         });
       });
     },
@@ -141,12 +150,8 @@ function createDatabaseValidationAdapter(options) {
             database.table = String(database.table).trim().toUpperCase();
             database.valueColumn = String(database.valueColumn).trim().toUpperCase();
             database.stringValueColumn = String(database.stringValueColumn || '').trim().toUpperCase();
-            callback(null, {
-              server: database.server,
-              table: database.table,
-              valueColumn: database.valueColumn,
-              stringValueColumn: database.stringValueColumn,
-            });
+            try { callback(null, validatedExistingMapping(database, metadata, options)); }
+            catch (validationError) { callback(validationError); }
             return;
           }
           if (!dependencies.tableCreator) { callback(unavailable(new Error('DB table creator를 사용할 수 없습니다.'))); return; }
@@ -165,6 +170,14 @@ function createDatabaseValidationAdapter(options) {
           };
           callDependency(dependencies.tableCreator, 'createTable', [request], (createError, created) => {
             if (createError && createError.code !== 'TABLE_ALREADY_EXISTS') { callback(createError); return; }
+            if (createError) {
+              callDependency(dependencies.metadataReader, 'columns', [server, request.table], (raceReadError, raceMetadata) => {
+                if (raceReadError) { callback(unavailable(raceReadError)); return; }
+                try { callback(null, validatedExistingMapping(database, raceMetadata, options)); }
+                catch (validationError) { callback(validationError); }
+              });
+              return;
+            }
             database.table = String(created && created.table || request.table).trim().toUpperCase();
             const complete = () => callback(null, {
               server: database.server,
@@ -172,7 +185,7 @@ function createDatabaseValidationAdapter(options) {
               valueColumn: database.valueColumn,
               stringValueColumn: database.stringValueColumn,
             });
-            if (createError || typeof dependencies.serverStore.setDefaultTableColumns !== 'function'
+            if (typeof dependencies.serverStore.setDefaultTableColumns !== 'function'
               || String(server.defaultTable || '').trim().toUpperCase() !== database.table) {
               complete();
               return;

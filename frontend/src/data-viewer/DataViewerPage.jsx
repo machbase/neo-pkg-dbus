@@ -78,6 +78,7 @@ import "./opcua-data-viewer.css";
 const RAW_ROW_HEIGHT = 25;
 // The name cell's colour dot plus its margin, which the column has to fit alongside the text.
 const RAW_NAME_DOT_SPACE = 15;
+const DATA_VIEWER_NO_DATA_MESSAGE = "No data. Check the time range.";
 
 const WEEKDAY_LABELS = ["S", "M", "T", "W", "T", "F", "S"];
 const MONTH_LABELS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -518,7 +519,7 @@ function FormatTimezoneModal({ timeFormat, timeZone, onApply, onClose }) {
     );
 }
 
-function TagEChart({ series, timeFormat, timeZone, timeRange, displayRange, seriesColors, onDisplayRangeChange, onShiftMainRange }) {
+function TagEChart({ series, timeFormat, timeZone, timeRange, displayRange, seriesColors, showNoDataMessage = true, onDisplayRangeChange, onShiftMainRange }) {
     const containerRef = useRef(null);
     const chartRef = useRef(null);
     const rangeRef = useRef({ currentRange: {}, navigatorRange: {}, onDisplayRangeChange });
@@ -905,9 +906,9 @@ function TagEChart({ series, timeFormat, timeZone, timeRange, displayRange, seri
                     }}
                 />
             )}
-            {!hasChartData && (
+            {showNoDataMessage && !hasChartData && (
                 <div className="data-viewer-chart-empty-overlay" aria-live="polite">
-                    No chart data
+                    {DATA_VIEWER_NO_DATA_MESSAGE}
                 </div>
             )}
             {(navigatorLabels.start || navigatorLabels.end) && (
@@ -992,6 +993,9 @@ export default function DataViewerPage({ job = "", detail, embedded = false, not
     const [loading, setLoading] = useState(false);
     const [endLoading, setEndLoading] = useState(false);
     const [error, setError] = useState("");
+    // Kept separate from `result`: a new query clears only this notice, while existing real rows
+    // remain visible until a successful response replaces them.
+    const [showNoDataMessage, setShowNoDataMessage] = useState(false);
     const [rawRowsPerTag, setRawRowsPerTag] = useState(DEFAULT_DATA_VIEWER_ROWS_PER_TAG);
     const [result, setResult] = useState({ rows: [], total: 0, page: 1, pageSize: getDataViewerRawPageSize([]) });
     const [rawPageBounds, setRawPageBounds] = useState(null);
@@ -1421,6 +1425,7 @@ export default function DataViewerPage({ job = "", detail, embedded = false, not
         const requestId = rowsRequestRef.current + 1;
         rowsRequestRef.current = requestId;
         if (!canQuery) {
+            setShowNoDataMessage(false);
             setResult({ rows: [], total: 0, page: 1, pageSize: rawPageSize });
             setRawPageBounds(null);
             setLoading(false);
@@ -1430,9 +1435,11 @@ export default function DataViewerPage({ job = "", detail, embedded = false, not
         // in flight. Querying now would use the previous window and then immediately re-query,
         // so wait; the pin effect re-runs this with a matching key.
         if (pinnedRange?.key !== pinKey) {
+            setShowNoDataMessage(false);
             setLoading(true);
             return;
         }
+        setShowNoDataMessage(false);
         setLoading(true);
         setError("");
         try {
@@ -1440,6 +1447,7 @@ export default function DataViewerPage({ job = "", detail, embedded = false, not
             if (!queryFrom || !queryTo) {
                 if (rowsRequestRef.current !== requestId) return;
                 setError("Please check the entered time.");
+                setShowNoDataMessage(false);
                 setResult({ rows: [], total: 0, page: resultPage, pageSize: rawPageSize });
                 setRawPageBounds(null);
                 return;
@@ -1467,11 +1475,13 @@ export default function DataViewerPage({ job = "", detail, embedded = false, not
             const nextRows = data?.rows || [];
             const nextBounds = buildDataViewerRawPageBounds(nextRows);
             setResult(data || { rows: [], total: 0, page: resultPage, pageSize: rawPageSize });
+            setShowNoDataMessage(nextRows.length === 0);
             setRawPageBounds(nextBounds);
         } catch (e) {
             if (rowsRequestRef.current !== requestId) return;
             const message = e.reason || e.message || "Failed to load data";
             setError("");
+            setShowNoDataMessage(false);
             notify(message, "error");
             setResult({ rows: [], total: 0, page: resultPage, pageSize: rawPageSize });
             setRawPageBounds(null);
@@ -2228,7 +2238,7 @@ export default function DataViewerPage({ job = "", detail, embedded = false, not
                                             {rawTableBody}
                                         </table>
                                         {loading && <div className="empty-state">Loading...</div>}
-                                        {!loading && result.rows.length === 0 && <div className="empty-state">No data</div>}
+                                        {showNoDataMessage && <div className="empty-state" aria-live="polite">{DATA_VIEWER_NO_DATA_MESSAGE}</div>}
                                     </div>
                                     <ResultPagination page={resultPage} pageSize={rawPageSize} rowCount={result.rows.length} loading={loading} endLoading={endLoading} forceNextPage={Boolean(rawPageRequest?.boundedRange)} rowsPerTag={rawRowsPerTag} onRowsPerTagChange={handleRowsPerTagChange} onPage={moveRawPage} onEndPage={handleEndPage} />
                                 </div>
@@ -2367,6 +2377,7 @@ export default function DataViewerPage({ job = "", detail, embedded = false, not
                                                         timeZone={timeZone}
                                                         timeRange={chartData.range}
                                                         displayRange={chartViewRanges[group.id]}
+                                                        showNoDataMessage={group.id === "default" ? showNoDataMessage : true}
                                                         onDisplayRangeChange={(nextRange, nextNavigatorRange) => {
                                                             setChartViewRanges((current) => ({
                                                                 ...current,

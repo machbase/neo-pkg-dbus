@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { buildJobTree, createDefaultJobConfig, createMethodCall, hasCompleteNumericEvidence, hydrateJobConfig, jobNeedsStringValueColumn, nextDefaultJobName, serializeJobConfig, validateTags } from "../src/model.js";
+import { buildJobTree, createDefaultJobConfig, createMethodCall, hasCompleteNumericEvidence, hydrateJobConfig, jobActions, jobNeedsStringValueColumn, nextDefaultJobName, serializeJobConfig, validateJobTags, validateTags } from "../src/model.js";
 
 const dbusInterface = { id: "plc", busType: "system", destination: "com.example.Plc", methods: [{ id: "read", member: "Read", inputs: [{ name: "count", type: "uint16", required: true }], outputs: [] }] };
 const config = createDefaultJobConfig(dbusInterface, "local-db");
@@ -7,6 +7,9 @@ assert.equal(config.profileId, undefined);
 assert.equal(config.dbus, undefined);
 assert.deepEqual(config.methodCalls, []);
 assert.deepEqual(config.database, { server: "local-db", table: "", valueColumn: "", stringValueColumn: "" });
+assert.deepEqual(createDefaultJobConfig(dbusInterface, { name: "local-db", defaultTable: "TAG_DATA" }).database, {
+  server: "local-db", table: "TAG_DATA", valueColumn: "VALUE", stringValueColumn: "",
+});
 assert.deepEqual(serializeJobConfig(config).methodCalls, []);
 assert.deepEqual(buildJobTree("line-a", config)[0].calls, []);
 assert.equal(createMethodCall(dbusInterface.methods[0], "call-a", "plc").interfaceId, "plc");
@@ -31,6 +34,10 @@ const serializedTag = serializeJobConfig({ ...config, methodCalls: [{ ...typedCa
 assert.deepEqual(serializedTag, { name: "read-typed-1", bias: 0, multiplier: 1, transformOrder: ["bias", "multiplier"], signed: false });
 assert.doesNotMatch(JSON.stringify(serializedTag), /sourceAddress|calcOrder|outputIndex/);
 assert.deepEqual(validateTags([{ ...serializedTag, transformOrder: ["bias", "bias"] }]), ["Tag transform order is invalid."]);
+const oneTagCall = { outputSelections: [{ tags: [serializedTag] }] };
+assert.deepEqual(validateJobTags([oneTagCall], { maxGeneratedTagsPerCall: null }), []);
+assert.deepEqual(validateJobTags([oneTagCall], { maxGeneratedTagsPerCall: undefined }), []);
+assert.deepEqual(validateJobTags([oneTagCall], { maxGeneratedTagsPerCall: 0 }), ["Tag count exceeds the configured limit."]);
 const hydratedNativeScalar = hydrateJobConfig({
   ...config,
   methodCalls: [{ ...typedCall, outputSelections: [{
@@ -65,4 +72,12 @@ assert.equal(nextDefaultJobName([{ name: "job-9999999999999999999999999999999999
 assert.equal(nextDefaultJobName([
   { name: "collector-a" }, { name: "job-a" }, { name: "job-0" }, { name: "job-01" },
 ]), "job-1");
+assert.deepEqual(jobActions({
+  statusKnown: true, configState: "installed", executionState: "running", controllerState: "STARTING",
+}), {
+  start: false, stop: true, edit: false, remove: false, switchVisible: true, switchDisabled: false,
+});
+assert.equal(jobActions({
+  statusKnown: true, configState: "installed", executionState: "running", controllerState: "STOPPING",
+}).switchDisabled, true);
 console.log("model contract tests passed");

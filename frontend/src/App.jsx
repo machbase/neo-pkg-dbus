@@ -3,7 +3,7 @@ import { Link, MemoryRouter, Navigate, Route, Routes, useLocation, useNavigate, 
 import { api } from "./api";
 import { createPackageChannel } from "./package-channel";
 import { buildJobTree, chartEvidenceKey, createDefaultJobConfig, createMethodCall, displayGridRow, hasCompleteNumericEvidence, hydrateJobConfig, jobActions, jobNeedsStringValueColumn, nextDefaultJobName, parseSuccessValue, reorder, serializeJobConfig, validateJobTags } from "./model";
-import { appendProductMethodCall, createInitialMethodCalls, deviceStringBuilder as productDeviceStringBuilder, displayInputValue as productDisplayInputValue, inputLabel as productInputLabel, inputPrefix as productInputPrefix, minimumIntervalMs, reconcileProductTags as reconcileGeneratedTags, retryConfigurable as productRetryConfigurable, resolveJobFormMode as jobFormMode, showsInterfaceManagement, storeInputValue as productStoreInputValue, tagCsvImporter as productTagCsvImporter } from "@product";
+import { appendProductMethodCall, createInitialMethodCalls, dataCountLimit as productDataCountLimit, deviceStringBuilder as productDeviceStringBuilder, displayInputValue as productDisplayInputValue, inputLabel as productInputLabel, inputPrefix as productInputPrefix, minimumIntervalMs, reconcileProductTags as reconcileGeneratedTags, retryConfigurable as productRetryConfigurable, resolveJobFormMode as jobFormMode, showsInterfaceManagement, storeInputValue as productStoreInputValue, tagCsvImporter as productTagCsvImporter } from "@product";
 import Icon from "./components/Icon";
 import DataViewerPage from "./data-viewer/DataViewerPage";
 import LiveLogs from "./live-logs/LiveLogs";
@@ -11,6 +11,8 @@ import LiveLogs from "./live-logs/LiveLogs";
 const CHANNEL_NAME = "app:neo-pkg-dbus";
 const TRANSFORM_DRAG_TYPE = "application/x-neo-transform-index";
 const LS_CALL_DRAG_TYPE = "application/x-neo-ls-method-call-index";
+const FIXED_TAG_PAGE_SIZE = 50;
+const JOB_SAVE_LEASE_MS = 15000;
 const AppContext = createContext(null);
 
 const DEFAULT_CONFIG = createDefaultJobConfig(null, "");
@@ -26,6 +28,7 @@ function messageOf(error) {
     TABLE_ALREADY_EXISTS: "The table already exists.",
     JOB_NOT_FOUND: "Job was not found.",
     JOB_INVALID: "Job settings are invalid.",
+    JOB_INVALID_CONFIG: "This Job configuration cannot be read. Recreate the Job before continuing.",
     JOB_RUNNING: "Stop the job before changing it.",
   };
   if (code) return messages[code] || `Request failed (${code}).`;
@@ -102,14 +105,14 @@ function useLoad(loader, dependencies = []) {
   return { ...state, reload };
 }
 
-function useRouteMutation(name) {
+function useRouteMutation(name, { abortOnRouteChange = true } = {}) {
   const active = useRef(null);
   const currentName = useRef(name);
   currentName.current = name;
   useEffect(() => () => {
-    active.current?.controller.abort();
+    if (abortOnRouteChange) active.current?.controller.abort();
     active.current = null;
-  }, [name]);
+  }, [abortOnRouteChange, name]);
   return useCallback(() => {
     active.current?.controller.abort();
     const controller = new AbortController();
@@ -216,6 +219,11 @@ export function AppProvider({ children, surface }) {
   const navigateRef = useRef(navigate);
   const refreshGeneration = useRef(0);
   const toastSequence = useRef(0);
+  const jobSaveSequence = useRef(0);
+  const jobSaveRef = useRef({ active: false, token: "", startedAt: 0, expiresAt: 0 });
+  const pendingJobSelectionRef = useRef("");
+  const [jobSaveState, setJobSaveState] = useState(jobSaveRef.current);
+  const [deferredJobSelection, setDeferredJobSelection] = useState("");
 
   // `refresh` is also captured by the package-channel effect below. Keep the
   // current route in a ref so changing from Job detail to Job edit does not
@@ -232,9 +240,53 @@ export function AppProvider({ children, surface }) {
     setToasts((current) => [...current.slice(-2), { id, kind, message }]);
   }, []);
   const dismissToast = useCallback((id) => setToasts((current) => current.filter((toast) => toast.id !== id)), []);
+  const commitJobSelection = useCallback((name, { broadcast = true } = {}) => {
+    setSelected(name);
+    if (surface !== "side") navigateRef.current(`/jobs/${encodeURIComponent(name)}`);
+    if (broadcast) channelRef.current?.selectJob(name);
+  }, [surface]);
+  const deferJobSelection = useCallback((name) => {
+    pendingJobSelectionRef.current = name;
+    setDeferredJobSelection(name);
+  }, []);
+  const clearJobSave = useCallback((token, { broadcast = false } = {}) => {
+    const current = jobSaveRef.current;
+    if (!current.active || current.token !== token) return { current: false, pendingSelection: "" };
+    const inactive = { active: false, token, startedAt: current.startedAt, expiresAt: current.expiresAt };
+    jobSaveRef.current = inactive;
+    setJobSaveState(inactive);
+    if (broadcast) channelRef.current?.jobSaveState(inactive);
+    const pendingSelection = pendingJobSelectionRef.current;
+    pendingJobSelectionRef.current = "";
+    setDeferredJobSelection("");
+    if (pendingSelection) commitJobSelection(pendingSelection);
+    return { current: true, pendingSelection };
+  }, [commitJobSelection]);
+  const beginJobSave = useCallback(() => {
+    const now = Date.now();
+    const current = jobSaveRef.current;
+    if (current.active && current.expiresAt > now) return null;
+    jobSaveSequence.current += 1;
+    const state = {
+      active: true,
+      token: `${now}-${jobSaveSequence.current}`,
+      startedAt: now,
+      expiresAt: now + JOB_SAVE_LEASE_MS,
+    };
+    jobSaveRef.current = state;
+    setJobSaveState(state);
+    channelRef.current?.jobSaveState(state);
+    return state;
+  }, []);
+  const finishJobSave = useCallback((token) => clearJobSave(token, { broadcast: true }), [clearJobSave]);
 
-  const refresh = useCallback(async ({ signal } = {}) => {
+  const refresh = useCallback(async ({ signal, broadcast = false } = {}) => {
     if (signal?.aborted) return false;
+    // side.html and main.html own separate providers. A mutation completed in
+    // one document must make the other document fetch the canonical list too.
+    // Received refresh messages call this function with the default false, so
+    // the notification cannot bounce between documents.
+    if (broadcast) channelRef.current?.refresh();
     const requestGeneration = refreshGeneration.current + 1;
     refreshGeneration.current = requestGeneration;
     setLoading(true);
@@ -263,6 +315,23 @@ export function AppProvider({ children, surface }) {
   }, [notify, surface]);
 
   useEffect(() => { void refresh(); }, [refresh]);
+  useEffect(() => {
+    if (!jobs.some((job) => ["STARTING", "STOPPING"].includes(job.controllerState))) return undefined;
+    const timer = globalThis.setInterval(() => { void refresh(); }, 1000);
+    return () => globalThis.clearInterval(timer);
+  }, [jobs, refresh]);
+  useEffect(() => {
+    if (!jobSaveState.active) return undefined;
+    const remaining = Math.max(0, jobSaveState.expiresAt - Date.now());
+    const timer = globalThis.setTimeout(() => {
+      const expired = clearJobSave(jobSaveState.token, { broadcast: surface !== "side" });
+      if (expired.current && surface !== "side") {
+        notify("The Job save is taking longer than expected. Navigation was unlocked and the Job list was refreshed.", "warning");
+        void refresh();
+      }
+    }, remaining);
+    return () => globalThis.clearTimeout(timer);
+  }, [clearJobSave, jobSaveState.active, jobSaveState.expiresAt, jobSaveState.token, notify, refresh, surface]);
   useEffect(() => { selectedRef.current = selected; }, [selected]);
   useEffect(() => {
     const controller = new AbortController();
@@ -292,7 +361,26 @@ export function AppProvider({ children, surface }) {
         }
       }
       if (message.type === "refresh") void refresh();
+      if (message.type === "job-save-state") {
+        if (message.active) {
+          if (message.expiresAt <= Date.now()) return;
+          const current = jobSaveRef.current;
+          if (current.active && current.startedAt > message.startedAt) return;
+          const next = {
+            active: true,
+            token: message.token,
+            startedAt: message.startedAt,
+            expiresAt: message.expiresAt,
+          };
+          jobSaveRef.current = next;
+          setJobSaveState(next);
+        } else clearJobSave(message.token);
+      }
       if (message.type === "select-job") {
+        if (jobSaveRef.current.active && jobSaveRef.current.expiresAt > Date.now()) {
+          deferJobSelection(message.name);
+          return;
+        }
         const currentJob = surface !== "side" ? routeJobName(locationPathRef.current) : "";
         // Initial side synchronization must not overwrite an already-open
         // main detail/form. A real user click has no sync flag and still owns
@@ -310,7 +398,7 @@ export function AppProvider({ children, surface }) {
     channelRef.current = channel;
     channel.ready(surface);
     return () => { channel.close(); channelRef.current = null; };
-  }, [refresh, surface]);
+  }, [clearJobSave, deferJobSelection, refresh, surface]);
 
   // The initial list is loaded independently by side.html and main.html.
   // Publish the side's selection when it becomes available, rather than
@@ -320,10 +408,15 @@ export function AppProvider({ children, surface }) {
   }, [selected, surface]);
 
   const selectJob = useCallback((name) => {
-    setSelected(name);
-    if (surface !== "side") navigateRef.current(`/jobs/${encodeURIComponent(name)}`);
-    channelRef.current?.selectJob(name);
-  }, [surface]);
+    const save = jobSaveRef.current;
+    if (save.active && save.expiresAt > Date.now()) {
+      deferJobSelection(name);
+      return false;
+    }
+    if (save.active) clearJobSave(save.token);
+    commitJobSelection(name);
+    return true;
+  }, [clearJobSave, commitJobSelection, deferJobSelection]);
   const newJob = useCallback(() => { if (surface !== "side") navigateRef.current("/jobs/new"); channelRef.current?.newJob(); }, [surface]);
   const go = useCallback((path) => { if (surface !== "side") navigateRef.current(path); channelRef.current?.navigate(path); }, [surface]);
   const openCreateModal = useCallback((target) => { if (surface !== "side") setCreateModal(target); channelRef.current?.openCreateModal(target); }, [surface]);
@@ -352,17 +445,20 @@ export function AppProvider({ children, surface }) {
   }, [notify, refresh]);
 
   const provider = settingsLoading || settingsError || !settings ? undefined : settings.provider;
-  return <AppContext.Provider value={{ jobs, selected, loading, error, toasts, settings, settingsLoading, settingsError, provider, createModal, resourceRevision, jobRevision, refresh, selectJob, newJob, go, openCreateModal, closeCreateModal, resourceChanged, notify, dismissToast, run }}>{children}</AppContext.Provider>;
+  return <AppContext.Provider value={{ jobs, selected, loading, error, toasts, settings, settingsLoading, settingsError, provider, createModal, resourceRevision, jobRevision, jobSaving: jobSaveState.active, deferredJobSelection, beginJobSave, finishJobSave, refresh, selectJob, newJob, go, openCreateModal, closeCreateModal, resourceChanged, notify, dismissToast, run }}>{children}</AppContext.Provider>;
 }
 
 function useApp() {
-  return useContext(AppContext) || { jobs: [], selected: "", loading: false, error: null, toasts: [], settings: null, settingsLoading: false, settingsError: null, provider: null, createModal: "", resourceRevision: 0, jobRevision: 0, refresh() {}, selectJob() {}, newJob() {}, go() {}, openCreateModal() {}, closeCreateModal() {}, resourceChanged() {}, notify() {}, dismissToast() {}, run: async () => false };
+  return useContext(AppContext) || { jobs: [], selected: "", loading: false, error: null, toasts: [], settings: null, settingsLoading: false, settingsError: null, provider: null, createModal: "", resourceRevision: 0, jobRevision: 0, jobSaving: false, deferredJobSelection: "", beginJobSave() { return null; }, finishJobSave() { return { current: false, pendingSelection: "" }; }, refresh() {}, selectJob() {}, newJob() {}, go() {}, openCreateModal() {}, closeCreateModal() {}, resourceChanged() {}, notify() {}, dismissToast() {}, run: async () => false };
 }
 
 function StatusText({ job }) {
   const state = job?.controllerState || "UNKNOWN";
   const key = state.toLowerCase().replaceAll("_", "-");
-  return <span className={`neo-status neo-status--${key}`}>{state.replaceAll("_", " ")}</span>;
+  const detail = String(job?.controllerDetail || "").trim();
+  const label = state === "STARTING" ? `${state} — ${detail || "Preparing tags…"}`
+    : state === "FAILED" && detail ? `${state} — ${detail}` : state.replaceAll("_", " ");
+  return <span className={`neo-status neo-status--${key}`}>{state === "STARTING" ? <span className="neo-status__spinner" aria-hidden="true" /> : null}{label}</span>;
 }
 
 function IconButton({ icon, label, className = "", ...props }) {
@@ -379,23 +475,23 @@ function Modal({ title, ariaLabel = title, icon, variant = "", onClose, children
   return <div className="neo-modal" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section className={`neo-modal__dialog${variant ? ` neo-modal__dialog--${variant}` : ""}`} role="dialog" aria-modal="true" aria-label={ariaLabel}><header className="neo-modal__header"><div className="neo-modal__title">{icon ? <Icon name={icon} /> : null}<h2>{title}</h2></div><IconButton className="neo-modal__close" icon="close" label="Close" onClick={onClose} /></header><div className="neo-modal__body">{children}</div></section></div>;
 }
 
-export function JobSide({ jobs, selected, loading = false, error = null, settingsLoading = false, settingsError = null, provider = null, onSelect, onNew, onOpenModal = () => {}, onRefresh, onToggle }) {
+export function JobSide({ jobs, selected, loading = false, error = null, settingsLoading = false, settingsError = null, provider = null, togglePending = false, jobSaving = false, deferredJobSelection = "", onSelect, onNew, onOpenModal = () => {}, onRefresh, onToggle }) {
   const settingsBlocked = settingsLoading || Boolean(settingsError);
   const showDbusInterfaceManagement = showsInterfaceManagement(provider);
   return <aside className="neo-side" aria-label="DBus Collector jobs">
     <header className="neo-side__header"><span className="neo-package-mark"><Icon name="memory" /></span><strong title="neo-pkg-dbus">neo-pkg-dbus</strong><span className="neo-side__header-actions"><IconButton icon="add" label="New Job" onClick={onNew} /><IconButton icon="dns" label="New Database Server" onClick={() => onOpenModal("db-server")} />{showDbusInterfaceManagement && (!settingsBlocked && provider?.jobMode !== "fixed" ? <IconButton icon="account_tree" label="New DBus Interface" onClick={() => onOpenModal("dbus-interface")} /> : null)}</span></header>
-    <div className="neo-side__section"><span>JOBS</span><span className="neo-side__tools"><IconButton icon="refresh" label="Refresh" onClick={onRefresh} /></span></div>
+    <div className="neo-side__section"><span>JOBS</span>{jobSaving ? <span className="neo-side__saving" role="status">{deferredJobSelection ? `SAVING · NEXT ${deferredJobSelection}` : "SAVING…"}</span> : null}<span className="neo-side__tools"><IconButton icon="refresh" label="Refresh" onClick={onRefresh} /></span></div>
     {loading && jobs.length === 0 ? <p className="neo-message" aria-live="polite">Loading jobs…</p> : null}
     <Notice error={error || settingsError} />
     <div className="neo-job-list">
       {jobs.map((job) => {
         const actions = jobActions(job);
         const running = job.executionState === "running";
-        return <div className={`neo-job-row${selected === job.name ? " is-selected" : ""}`} key={job.name}>
-          <button className="neo-job-row__select" type="button" aria-pressed={selected === job.name} onClick={() => onSelect(job.name)} title={`${job.name} · ${job.controllerState || "UNKNOWN"}`}>
+        return <div className={`neo-job-row${selected === job.name ? " is-selected" : ""}${deferredJobSelection === job.name ? " is-deferred" : ""}`} key={job.name}>
+          <button className="neo-job-row__select" type="button" aria-pressed={selected === job.name} aria-busy={jobSaving || undefined} onClick={() => onSelect(job.name)} title={jobSaving ? `Saving current Job · open ${job.name} when finished` : `${job.name} · ${job.controllerState || "UNKNOWN"}`}>
             <span>{job.name}</span>
           </button>
-          {actions.switchVisible ? <button className={`neo-switch${running ? " is-on" : ""}`} type="button" aria-label={`${job.name} ${running ? "Stop" : "Start"}`} title={`${running ? "Stop" : "Start"} ${job.name}`} aria-pressed={running} disabled={actions.switchDisabled} onClick={() => onToggle(job, running ? "stop" : "start")}><span /></button>
+          {actions.switchVisible ? <button className={`neo-switch${running ? " is-on" : ""}`} type="button" aria-label={`${job.name} ${running ? "Stop" : "Start"}`} title={`${running ? "Stop" : "Start"} ${job.name}`} aria-pressed={running} disabled={actions.switchDisabled || togglePending} onClick={() => onToggle(job, running ? "stop" : "start")}><span /></button>
             : <span className="neo-install-required" aria-label={`${job.name} Install required`} title="Install required"><Icon name="download" /></span>}
         </div>;
       })}
@@ -408,15 +504,24 @@ export function ConnectedSide() {
   const app = useApp();
   const location = useLocation();
   const beginMutation = useRouteMutation(location.pathname);
+  const togglePendingRef = useRef(false);
+  const [togglePending, setTogglePending] = useState(false);
   const toggle = async (job, action) => {
+    // Starting the LS collector can take several seconds. A second switch click
+    // used to abort the first CGI request and could strand its operation lock.
+    if (togglePendingRef.current) return;
+    togglePendingRef.current = true;
+    setTogglePending(true);
     const mutation = beginMutation();
     try {
       await app.run(() => api.jobs[action](job.name, { signal: mutation.signal }), { signal: mutation.signal, isCurrent: mutation.isCurrent, jobName: job.name });
     } finally {
       mutation.finish();
+      togglePendingRef.current = false;
+      setTogglePending(false);
     }
   };
-  return <JobSide {...app} onSelect={app.selectJob} onNew={app.newJob} onOpenModal={app.openCreateModal} onRefresh={app.refresh} onToggle={toggle} />;
+  return <JobSide {...app} togglePending={togglePending} onSelect={app.selectJob} onNew={app.newJob} onOpenModal={app.openCreateModal} onRefresh={app.refresh} onToggle={toggle} />;
 }
 
 function MainHeader({ title, subtitle, onBack, children }) {
@@ -458,19 +563,9 @@ function JobDetail() {
   const [logLevel, setLogLevel] = useState("");
   const [logSaving, setLogSaving] = useState(false);
   const [overrunClearing, setOverrunClearing] = useState(false);
+  const [monitorRefreshEpoch, setMonitorRefreshEpoch] = useState(0);
   const lastJobRevision = useRef(app.jobRevision);
-  const loaded = useLoad(async (signal) => {
-    const [jobResult, lastRunResult] = await Promise.allSettled([
-      api.jobs.get(name, { signal }), api.jobs.lastRun(name, { signal }),
-    ]);
-    if (jobResult.status === "rejected") throw jobResult.reason;
-    if (lastRunResult.status === "rejected" && lastRunResult.reason?.name === "AbortError") throw lastRunResult.reason;
-    return {
-      job: jobResult.value,
-      lastRun: lastRunResult.status === "fulfilled" ? lastRunResult.value?.lastRun ?? null : null,
-      lastRunError: lastRunResult.status === "rejected" ? lastRunResult.reason : null,
-    };
-  }, [name]);
+  const loaded = useLoad((signal) => api.jobs.status(name, { signal }), [name]);
   useEffect(() => {
     if (isTransientRequestError(loaded.error)) app.notify(loaded.error);
   }, [app.notify, loaded.error]);
@@ -481,13 +576,13 @@ function JobDetail() {
   }, [app.jobRevision, loaded.reload]);
   const job = loaded.data?.job;
   const lastRun = loaded.data?.lastRun ?? null;
-  const lastRunError = loaded.data?.lastRunError ?? null;
+  const lastRunError = null;
   const hasSkippedCycles = Number(lastRun?.overrunCount || 0) > 0;
   useEffect(() => {
     if (!job?.running) return undefined;
     const timer = setInterval(() => { void loaded.reload(); }, 5000);
     return () => clearInterval(timer);
-  }, [job?.running, loaded.reload]);
+  }, [job?.running, loaded.reload, monitorRefreshEpoch]);
   const actions = jobActions(job);
   const config = job?.config || {};
   const loggingPolicy = app.settings?.logging || {};
@@ -496,6 +591,12 @@ function JobDetail() {
   useEffect(() => {
     setLogLevel(String(config.log?.level || "info").toLowerCase());
   }, [job?.revision, name]);
+  const refreshMonitoring = () => {
+    // Recreating the polling effect makes the next automatic refresh occur a
+    // full interval after this explicit operator refresh.
+    setMonitorRefreshEpoch((value) => value + 1);
+    void loaded.reload();
+  };
   const mutate = async (action) => {
     if (action === "remove" && !window.confirm(`Delete ${name}?`)) return;
     const mutation = beginMutation();
@@ -540,6 +641,7 @@ function JobDetail() {
   };
   return <main className="neo-main" aria-label="DBus Collector main">
     <MainHeader title={name || "Job"} subtitle={job ? `${new Set((config.methodCalls || []).map((call) => call.interfaceId).filter(Boolean)).size} DBus Interface · ${config.methodCalls?.length || 0} Method Call` : "Job detail"}>
+      <IconButton icon="refresh" label="Refresh monitoring" disabled={loaded.loading} onClick={refreshMonitoring} />
       <button className="neo-button" type="button" onClick={() => setLiveLogsOpen(true)}><Icon name="terminal" />Live Logs</button>
       <Link className="neo-button neo-button--primary-outline" to={`/data/${encodeURIComponent(name)}`}><Icon name="query_stats" />Data Viewer</Link>
       <Link className={`neo-button${!actions.edit ? " is-disabled" : ""}`} aria-disabled={!actions.edit} tabIndex={actions.edit ? 0 : -1} to={actions.edit ? `/jobs/${encodeURIComponent(name)}/edit` : "#"}><Icon name="edit" />Edit</Link>
@@ -714,16 +816,18 @@ function DeviceStringChoice({ label, value, options, open, onChange, onToggle, o
   return <div className="neo-device-string__choice"><span>{visibleLabel}</span><div className="neo-device-string__choice-control">{choiceInput}<IconButton icon={open ? "expand_less" : "expand_more"} label={`Toggle DeviceString ${label.toLowerCase()} options`} aria-expanded={open} onClick={onToggle} /></div>{open ? <div className="neo-device-string__options" role="listbox" aria-label={`DeviceString ${label.toLowerCase()} options`}>{options.map((option) => <button type="button" role="option" aria-selected={option === value} key={option} onClick={() => onSelect(option)}>{option}</button>)}</div> : null}</div>;
 }
 
-function NumberStepper({ label, value, min, step = 1, onChange, onBlur, nextValue, previousValue }) {
+function NumberStepper({ label, value, min, max, step = 1, onChange, onBlur, nextValue, previousValue }) {
   const hasMinimum = min !== undefined && min !== null;
+  const hasMaximum = max !== undefined && max !== null;
   const minimum = hasMinimum ? Number(min) : Number.NEGATIVE_INFINITY;
+  const maximum = hasMaximum ? Number(max) : Number.POSITIVE_INFINITY;
   const increment = Number(step);
   const numericValue = Number(value);
   const fallback = hasMinimum ? minimum : 0;
-  const update = (nextValue) => onChange(String(hasMinimum ? Math.max(minimum, Number.isFinite(nextValue) ? nextValue : fallback) : (Number.isFinite(nextValue) ? nextValue : fallback)));
+  const update = (nextValue) => onChange(String(Math.min(maximum, Math.max(minimum, Number.isFinite(nextValue) ? nextValue : fallback))));
   const current = Number.isFinite(numericValue) ? numericValue : fallback;
-  const input = Input({ "aria-label": label, type: "number", ...(hasMinimum ? { min: String(minimum) } : {}), step: String(increment), value, onChange: (nextValue) => update(Number(nextValue)), onBlur: () => { if (onBlur) onBlur(current); } });
-  return <div className="neo-number-stepper">{input}<span className="neo-number-stepper__actions"><IconButton icon="expand_less" label={`${label} Increase`} onClick={() => update(nextValue ? nextValue(current) : current + increment)} /><IconButton icon="expand_more" label={`${label} Decrease`} disabled={hasMinimum && current <= minimum} onClick={() => update(previousValue ? previousValue(current) : current - increment)} /></span></div>;
+  const input = Input({ "aria-label": label, type: "number", ...(hasMinimum ? { min: String(minimum) } : {}), ...(hasMaximum ? { max: String(maximum) } : {}), step: String(increment), value, onChange: (nextValue) => update(Number(nextValue)), onBlur: () => { if (onBlur) onBlur(current); } });
+  return <div className="neo-number-stepper">{input}<span className="neo-number-stepper__actions"><IconButton icon="expand_less" label={`${label} Increase`} disabled={hasMaximum && current >= maximum} onClick={() => update(nextValue ? nextValue(current) : current + increment)} /><IconButton icon="expand_more" label={`${label} Decrease`} disabled={hasMinimum && current <= minimum} onClick={() => update(previousValue ? previousValue(current) : current - increment)} /></span></div>;
 }
 
 function DeviceStringInput({ inputLabel, value, onChange, builder }) {
@@ -780,16 +884,45 @@ function DeviceStringInput({ inputLabel, value, onChange, builder }) {
   return <div className="neo-device-string" ref={rootRef}><div className="neo-device-string__control"><span aria-hidden="true">%</span>{mainInput}<IconButton icon={open ? "expand_less" : "expand_more"} label="Toggle DeviceString address picker" aria-expanded={open} onClick={toggle} /></div>{open ? <div className="neo-device-string__popover" role="dialog" aria-label="DeviceString address picker"><div className="neo-device-string__picker-grid"><DeviceStringChoice label="memory area" value={draft.area} options={builder.memoryAreas} open={choiceOpen === "area"} onChange={(area) => updateDraft({ area })} onToggle={() => setChoiceOpen((current) => current === "area" ? "" : "area")} onSelect={(area) => { updateDraft({ area }); setChoiceOpen(""); }} /><DeviceStringChoice label="data type" value={draft.type} options={builder.dataTypes} open={choiceOpen === "type"} onChange={(type) => updateDraft({ type })} onToggle={() => setChoiceOpen((current) => current === "type" ? "" : "type")} onSelect={(type) => { updateDraft({ type }); setChoiceOpen(""); }} /><div className="neo-device-string__address"><span>Address</span>{addressInput}</div></div>{directInput}<button type="button" className="neo-button neo-button--primary neo-device-string__apply" disabled={!directValid} onClick={apply}>Apply</button></div> : null}</div>;
 }
 
-function FixedProviderTagsEditor({ selection, onChange, bitAddress = false }) {
+function FixedProviderTagsEditor({ selection, onChange, bitAddress = false, page, onPageChange }) {
   const tags = selection?.tags || [];
-  const updateTag = (tagIndex, patch) => onChange({
-    ...selection,
-    tags: tags.map((tag, index) => index === tagIndex ? { ...tag, ...patch } : tag),
-  });
-  return <div className="neo-fixed-tags__editor neo-table-wrap"><table className="neo-fixed-tag-list"><colgroup><col className="neo-fixed-tag-list__index" /><col className="neo-fixed-tag-list__name" /><col className="neo-fixed-tag-list__signed" /><col className="neo-fixed-tag-list__transform" /></colgroup><thead><tr><th>#</th><th>TAG NAME</th><th>SIGNED</th><th>TRANSFORM</th></tr></thead><tbody>{tags.map((tag, tagIndex) => {
+  const totalPages = Math.max(1, Math.ceil(tags.length / FIXED_TAG_PAGE_SIZE));
+  const currentPage = Math.min(totalPages, Math.max(1, Number.isInteger(page) ? page : 1));
+  const pageStart = (currentPage - 1) * FIXED_TAG_PAGE_SIZE;
+  const pageEnd = Math.min(tags.length, pageStart + FIXED_TAG_PAGE_SIZE);
+  const visibleTags = tags.slice(pageStart, pageEnd);
+  const [pageInput, setPageInput] = useState(String(currentPage));
+
+  useEffect(() => {
+    setPageInput(String(currentPage));
+    if (page !== currentPage) onPageChange(currentPage);
+  }, [currentPage, onPageChange, page]);
+
+  const goToPage = (nextPage) => {
+    const normalized = Math.min(totalPages, Math.max(1, Math.trunc(nextPage)));
+    onPageChange(normalized);
+    setPageInput(String(normalized));
+  };
+  const commitPageInput = () => {
+    const value = String(pageInput).trim();
+    const parsed = Number(value);
+    if (!value || !Number.isFinite(parsed)) {
+      setPageInput(String(currentPage));
+      return;
+    }
+    goToPage(parsed);
+  };
+  const updateTag = (tagIndex, patch) => {
+    const nextTags = tags.slice();
+    nextTags[tagIndex] = { ...nextTags[tagIndex], ...patch };
+    onChange({ ...selection, tags: nextTags });
+  };
+  const rangeLabel = tags.length ? `${pageStart + 1}–${pageEnd} of ${tags.length.toLocaleString()} tags` : "0 of 0 tags";
+  return <div className="neo-fixed-tags__editor"><nav className="neo-fixed-tags__pager" aria-label="Tag pages"><span className="neo-fixed-tags__range">{rangeLabel}</span><span className="neo-fixed-tags__page-controls"><IconButton icon="keyboard_double_arrow_left" label="First tag page" disabled={currentPage === 1} onClick={() => goToPage(1)} /><IconButton icon="chevron_left" label="Previous tag page" disabled={currentPage === 1} onClick={() => goToPage(currentPage - 1)} /><span>Page</span><input className="neo-fixed-tags__page-input" aria-label="Tag page" type="text" inputMode="numeric" pattern="[0-9]*" value={pageInput} onChange={(event) => setPageInput(event.target.value)} onBlur={commitPageInput} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); commitPageInput(); } }} /><span>of {totalPages.toLocaleString()}</span><IconButton icon="chevron_right" label="Next tag page" disabled={currentPage === totalPages} onClick={() => goToPage(currentPage + 1)} /><IconButton icon="keyboard_double_arrow_right" label="Last tag page" disabled={currentPage === totalPages} onClick={() => goToPage(totalPages)} /></span></nav><div className="neo-table-wrap"><table className="neo-fixed-tag-list"><colgroup><col className="neo-fixed-tag-list__index" /><col className="neo-fixed-tag-list__name" /><col className="neo-fixed-tag-list__signed" /><col className="neo-fixed-tag-list__transform" /></colgroup><thead><tr><th>#</th><th>TAG NAME</th><th>SIGNED</th><th>TRANSFORM</th></tr></thead><tbody>{visibleTags.map((tag, visibleIndex) => {
+    const tagIndex = pageStart + visibleIndex;
     const transformOrder = tag.transformOrder || ["bias", "multiplier"];
     return <tr key={tagIndex}><td>{tagIndex + 1}</td><td><FixedProviderInput input={{ type: "string" }} label={`${tag.name} Tag Name`} value={tag.name} onChange={(name) => updateTag(tagIndex, { name, nameMode: "manual" })} /></td><td><input aria-label={`${tag.name} Signed`} type="checkbox" checked={tag.signed === true} disabled={bitAddress} title={bitAddress ? "Signed conversion does not apply to Bit values." : "Interpret this PLC value as signed."} onChange={(event) => updateTag(tagIndex, { signed: event.target.checked })} /></td><td><div className="neo-tag-transform"><span>(</span><strong>value</strong>{transformOrder.map((operation, transformIndex) => { const label = `${tag.name} ${operation === "bias" ? "Bias" : "Multiplier"}`; return <span className="neo-tag-transform__part" key={operation}><span className="neo-tag-transform__operand" draggable onDragStart={(event) => { event.stopPropagation(); event.dataTransfer.setData(TRANSFORM_DRAG_TYPE, String(transformIndex)); event.dataTransfer.effectAllowed = "move"; }} onDragOver={(event) => { event.stopPropagation(); if (event.dataTransfer.types.includes(TRANSFORM_DRAG_TYPE)) event.preventDefault(); }} onDrop={(event) => { event.preventDefault(); event.stopPropagation(); const draggedTransform = Number(event.dataTransfer.getData(TRANSFORM_DRAG_TYPE)); if (!Number.isInteger(draggedTransform)) return; updateTag(tagIndex, { transformOrder: reorder(transformOrder, draggedTransform, transformIndex) }); }} onDragEnd={(event) => event.stopPropagation()}><Icon name="drag_indicator" /><span>{operation === "bias" ? "+" : "×"}</span><NumberStepper label={label} step={1} value={tag[operation]} onChange={(value) => updateTag(tagIndex, { [operation]: Number(value) })} /></span>{transformIndex === 0 ? <span>)</span> : null}</span>; })}</div></td></tr>;
-  })}</tbody></table></div>;
+  })}</tbody></table></div></div>;
 }
 
 function TestCallResult({ result, onClear, ariaLabel }) {
@@ -804,6 +937,7 @@ function TestCallResult({ result, onClear, ariaLabel }) {
 export function FixedProviderCallsEditor({ calls, methodsByInterface, provider, testResult, setCalls, onTest, onClearTest }) {
   const [selectedCallId, setSelectedCallId] = useState(calls[0]?.id || "");
   const [tagsOpen, setTagsOpen] = useState(false);
+  const [tagPage, setTagPage] = useState(1);
   const [tagCsvError, setTagCsvError] = useState(null);
   const tagCsvInputRef = useRef(null);
   const selectedCallRef = useRef(null);
@@ -814,7 +948,10 @@ export function FixedProviderCallsEditor({ calls, methodsByInterface, provider, 
   const selection = call?.outputSelections?.[selectionIndex];
 
   useEffect(() => {
-    if (!calls.some((item) => item.id === selectedCallId)) setSelectedCallId(calls[0]?.id || "");
+    if (!calls.some((item) => item.id === selectedCallId)) {
+      setSelectedCallId(calls[0]?.id || "");
+      setTagPage(1);
+    }
   }, [calls, selectedCallId]);
 
   useEffect(() => {
@@ -822,6 +959,7 @@ export function FixedProviderCallsEditor({ calls, methodsByInterface, provider, 
   }, [selectedCallId, calls.length]);
 
   const selectCall = (id) => {
+    if (id !== selectedCallId) setTagPage(1);
     setSelectedCallId(id);
     setTagsOpen(false);
     setTagCsvError(null);
@@ -831,6 +969,7 @@ export function FixedProviderCallsEditor({ calls, methodsByInterface, provider, 
     const next = appendProductMethodCall(calls, provider);
     setCalls(next);
     setSelectedCallId(next.at(-1)?.id || "");
+    setTagPage(1);
     setTagsOpen(false);
     setTagCsvError(null);
   };
@@ -840,11 +979,16 @@ export function FixedProviderCallsEditor({ calls, methodsByInterface, provider, 
     const nextSelectedId = calls[selectedIndex - 1]?.id || calls[selectedIndex + 1]?.id || "";
     setCalls((current) => current.filter((item) => item.id !== call.id));
     setSelectedCallId(nextSelectedId);
+    setTagPage(1);
     setTagsOpen(false);
     setTagCsvError(null);
   };
   const updateInputs = (key, value) => {
     const inputs = { ...(call.inputs || {}), [key]: value };
+    const countLimit = productDataCountLimit(inputs.DeviceString);
+    if (Number.isInteger(countLimit)) {
+      inputs.DataCount = Math.min(countLimit, Math.max(1, Number(inputs.DataCount) || 1));
+    }
     const outputSelections = (call.outputSelections || []).map((currentSelection, index) => {
       if (index !== selectionIndex) return currentSelection;
       const generatedBefore = reconcileGeneratedTags(call.inputs, [], provider);
@@ -886,8 +1030,8 @@ export function FixedProviderCallsEditor({ calls, methodsByInterface, provider, 
       <span className="neo-drag" draggable onDragStart={(event) => { const row = event.currentTarget.closest(".neo-fixed-calls__item"); if (row && event.dataTransfer.setDragImage) { const bounds = row.getBoundingClientRect(); event.dataTransfer.setDragImage(row, event.clientX - bounds.left, event.clientY - bounds.top); } event.dataTransfer.setData(LS_CALL_DRAG_TYPE, String(index)); event.dataTransfer.effectAllowed = "move"; }} title="Drag to reorder method call" aria-label={`${item.id} Drag to reorder`}><Icon name="drag_indicator" /></span><button type="button" className="neo-fixed-calls__select" aria-label={`${item.id} Select`} aria-pressed={item.id === call.id} onClick={() => selectCall(item.id)}><strong>{productInputPrefix("DeviceString")}{productDisplayInputValue("DeviceString", fixedCallInput(item, "DeviceString")) || "—"}</strong><span>DataCount <b>{fixedCallInput(item, "DataCount") || "—"}</b></span></button>
     </article>)}</div></div>
     <div className="neo-fixed-calls__detail"><div className="neo-fixed-calls__detail-header"><p className="neo-fixed-calls__method neo-mono">{call.interfaceId} · {call.methodId}</p><span className="neo-actions"><button type="button" className="neo-button" onClick={() => onTest(call, method)}>Test Call</button><IconButton icon="delete" label={`${call.id} Remove`} disabled={calls.length === 1} onClick={removeSelected} /></span></div>
-      <div className="neo-fixed-calls__inputs">{sortedInputs.map((input) => { const key = input.id || input.name; const label = productInputLabel(key); const prefix = productInputPrefix(key); const value = productDisplayInputValue(key, call.inputs?.[key]); const onChange = (value) => updateInputs(key, productStoreInputValue(key, value)); const builder = productDeviceStringBuilder(key); const editor = builder ? <DeviceStringInput inputLabel={label} value={value} onChange={onChange} builder={builder} /> : label === "DataCount" ? <NumberStepper label={label} min={1} step={1} value={value || 1} onChange={(nextValue) => onChange(Number(nextValue))} /> : <FixedProviderInput input={{ ...input, id: key }} label={label} value={value} onChange={onChange} />; return <Field label={label} key={`${call.id}-${key}`}>{prefix && !builder ? <div className="neo-input-prefix"><span aria-hidden="true">{prefix}</span>{editor}</div> : editor}</Field>; })}</div>
-      <section className={`neo-fixed-tags${tagsOpen ? " is-open" : ""}`}><div className="neo-fixed-tags__header"><button type="button" className="neo-fixed-tags__summary" aria-expanded={tagsOpen} onClick={() => setTagsOpen((open) => !open)}><strong>TAGS</strong><span>{tagSummary(selection?.tags || [])}</span></button>{productTagCsvImporter ? <><input ref={tagCsvInputRef} className="neo-visually-hidden" aria-label="Import Tags CSV" type="file" accept=".csv,text/csv" onChange={importTags} /><button type="button" className="neo-button" onClick={() => tagCsvInputRef.current?.click()}>Import CSV</button></> : null}<button type="button" className="neo-icon-button neo-fixed-tags__toggle" aria-label="Toggle Tags" aria-expanded={tagsOpen} onClick={() => setTagsOpen((open) => !open)}><Icon name={tagsOpen ? "expand_less" : "expand_more"} /></button></div>{tagCsvError ? <p className="neo-message neo-message--error neo-fixed-tags__error" role="alert">{tagCsvError.message}</p> : null}{tagsOpen && selection ? <FixedProviderTagsEditor selection={selection} onChange={updateSelection} bitAddress={/^%.[Xx]/.test(String(call?.inputs?.DeviceString || ""))} /> : null}</section>
+      <div className="neo-fixed-calls__inputs">{sortedInputs.map((input) => { const key = input.id || input.name; const label = productInputLabel(key); const prefix = productInputPrefix(key); const value = productDisplayInputValue(key, call.inputs?.[key]); const onChange = (value) => updateInputs(key, productStoreInputValue(key, value)); const builder = productDeviceStringBuilder(key); const editor = builder ? <DeviceStringInput inputLabel={label} value={value} onChange={onChange} builder={builder} /> : label === "DataCount" ? <NumberStepper label={label} min={1} max={productDataCountLimit(call.inputs?.DeviceString)} step={1} value={value || 1} onChange={(nextValue) => onChange(Number(nextValue))} /> : <FixedProviderInput input={{ ...input, id: key }} label={label} value={value} onChange={onChange} />; return <Field label={label} key={`${call.id}-${key}`}>{prefix && !builder ? <div className="neo-input-prefix"><span aria-hidden="true">{prefix}</span>{editor}</div> : editor}</Field>; })}</div>
+      <section className={`neo-fixed-tags${tagsOpen ? " is-open" : ""}`}><div className="neo-fixed-tags__header"><button type="button" className="neo-fixed-tags__summary" aria-expanded={tagsOpen} onClick={() => setTagsOpen((open) => !open)}><strong>TAGS</strong><span>{tagSummary(selection?.tags || [])}</span></button>{productTagCsvImporter ? <><input ref={tagCsvInputRef} className="neo-visually-hidden" aria-label="Import Tags CSV" type="file" accept=".csv,text/csv" onChange={importTags} /><button type="button" className="neo-button" onClick={() => tagCsvInputRef.current?.click()}>Import CSV</button></> : null}<button type="button" className="neo-icon-button neo-fixed-tags__toggle" aria-label="Toggle Tags" aria-expanded={tagsOpen} onClick={() => setTagsOpen((open) => !open)}><Icon name={tagsOpen ? "expand_less" : "expand_more"} /></button></div>{tagCsvError ? <p className="neo-message neo-message--error neo-fixed-tags__error" role="alert">{tagCsvError.message}</p> : null}{tagsOpen && selection ? <FixedProviderTagsEditor selection={selection} onChange={updateSelection} bitAddress={/^%.[Xx]/.test(String(call?.inputs?.DeviceString || ""))} page={tagPage} onPageChange={setTagPage} /> : null}</section>
       {testResult?.callId === call.id ? <TestCallResult result={testResult} onClear={onClearTest} ariaLabel={`${call.id} Test Call result`} /> : null}
     </div>
   </div></section>;
@@ -952,7 +1096,7 @@ function JobForm({ mode }) {
   const previousInterval = (value) => Math.max(intervalCycleMs, (Math.ceil((Number(value) || 0) / intervalCycleMs) - 1) * intervalCycleMs);
   const currentEditName = useRef(params.name || "");
   currentEditName.current = params.name || "";
-  const beginSubmission = useRouteMutation(editing ? params.name : "new");
+  const beginSubmission = useRouteMutation(editing ? params.name : "new", { abortOnRouteChange: false });
   const beginTestCall = useRouteMutation(editing ? params.name : "new");
   const loaded = useLoad((signal) => Promise.all([api.interfaces.list({ signal }), api.db.servers.list({ signal }), editing ? api.jobs.get(params.name, { signal }) : Promise.resolve(null)]), [editing, params.name]);
   const [name, setName] = useState("");
@@ -970,6 +1114,9 @@ function JobForm({ mode }) {
   const [databaseDraft, setDatabaseDraft] = useState(null);
   const [validationWarnings, setValidationWarnings] = useState([]);
   const [warningApprovalKey, setWarningApprovalKey] = useState("");
+  const [saving, setSaving] = useState(false);
+  const savingRef = useRef(false);
+  const [editRevision, setEditRevision] = useState(null);
   const defaultNameApplied = useRef(false);
   const nameEdited = useRef(false);
   const activeDatabase = databaseModalOpen && databaseDraft ? databaseDraft : config.database;
@@ -990,6 +1137,9 @@ function JobForm({ mode }) {
     setDatabaseDraft(null);
     setValidationWarnings([]);
     setWarningApprovalKey("");
+    savingRef.current = false;
+    setSaving(false);
+    setEditRevision(null);
   }, [editing, params.name]);
   useEffect(() => {
     if (editing || app.loading || app.error || defaultNameApplied.current || nameEdited.current) return;
@@ -1004,6 +1154,7 @@ function JobForm({ mode }) {
       if (job?.name !== params.name) return;
       setName(job.name);
       setConfig(hydrateJobConfig({ ...DEFAULT_CONFIG, ...job.config }));
+      setEditRevision(job.revision);
     } else {
       const databaseServer = settings?.defaults?.database?.server || servers?.[0]?.name || "";
       const server = (servers || []).find((item) => item.name === databaseServer);
@@ -1120,8 +1271,18 @@ function JobForm({ mode }) {
   };
   const save = async (event) => {
     event.preventDefault();
+    if (savingRef.current) return;
+    savingRef.current = true;
+    setSaving(true);
     const targetName = editing ? params.name : name;
+    const saveLease = app.beginJobSave();
+    if (!saveLease) {
+      savingRef.current = false;
+      setSaving(false);
+      return;
+    }
     const submission = beginSubmission();
+    let saved = false;
     try {
       if (formBlocked) {
         if (!editRoutePending) setErrors([formMode === "blocked" ? "Settings must be loaded before editing a Job." : editBlockMessage || "Job status must be checked before editing."]);
@@ -1141,8 +1302,17 @@ function JobForm({ mode }) {
       if (!configForSave.database.server) validation.push("Select a Database Server.");
       if (!configForSave.database.table) validation.push("Select or enter a Table.");
       if (!configForSave.database.valueColumn) validation.push("Select a Value Column.");
+      if (provider?.jobMode === "fixed") {
+        configForSave.methodCalls.forEach((call) => {
+          const count = Number(call.inputs?.DataCount);
+          const limit = productDataCountLimit(call.inputs?.DeviceString);
+          if (Number.isInteger(limit) && (!Number.isInteger(count) || count < 1 || count > limit)) {
+            validation.push(`${call.name || call.id}: DataCount must be between 1 and ${limit}.`);
+          }
+        });
+      }
       validation.push(...validateJobTags(configForSave.methodCalls.map((call) => ({ ...call, method: (interfaceDetails[call.interfaceId]?.interface?.methods || []).find((method) => method.id === call.methodId) })), {
-        maxGeneratedTagsPerCall: app.settings?.limits?.maxGeneratedTagsPerCall,
+        maxGeneratedTagsPerCall: provider?.jobMode === "fixed" ? null : app.settings?.limits?.maxGeneratedTagsPerCall,
       }));
       setErrors(validation);
       if (validation.length) return;
@@ -1159,11 +1329,14 @@ function JobForm({ mode }) {
         return;
       }
       setValidationWarnings([]);
-      if (editing) await api.jobs.update(targetName, { ...payload, revision: editJob.revision }, { signal: submission.signal }); else await api.jobs.create(targetName, payload, { signal: submission.signal });
+      if (editing) {
+        const updated = await api.jobs.update(targetName, { ...payload, revision: editRevision }, { signal: submission.signal });
+        if (Number.isSafeInteger(updated?.revision)) setEditRevision(updated.revision);
+      } else await api.jobs.create(targetName, payload, { signal: submission.signal });
       if (!submission.isCurrent()) return;
-      await app.refresh({ signal: submission.signal });
+      saved = true;
+      await app.refresh({ signal: submission.signal, broadcast: true });
       if (!submission.isCurrent()) return;
-      app.go(`/jobs/${encodeURIComponent(targetName)}`); navigate(`/jobs/${encodeURIComponent(targetName)}`);
     } catch (failure) {
       if (!submission.isCurrent() || failure?.name === "AbortError") return;
       if (failure?.code === "JOB_CONFLICT") {
@@ -1175,11 +1348,25 @@ function JobForm({ mode }) {
         if (latestJob?.name === targetName) {
           setName(latestJob.name);
           setConfig(hydrateJobConfig({ ...DEFAULT_CONFIG, ...latestJob.config }));
+          setEditRevision(latestJob.revision);
           app.notify("Another user saved this Job. The latest setting was reloaded. Review and save again.");
         } else app.notify("Another user saved this Job. The latest setting could not be reloaded. Refresh and try again.");
+      } else if (failure?.code === "JOB_INVALID" && ["value-column", "string-value-column"].includes(failure?.details?.problem)) {
+        app.notify(`The ${failure.details.problem === "value-column" ? "Value Column" : "String Value Column"} mapping does not match table ${failure.details.table || configForSave.database.table}. Update the Database Server table mapping.`);
+        app.openCreateModal(`db-server:${configForSave.database.server}`);
       } else app.notify(failure);
     } finally {
+      const routeIsCurrent = submission.isCurrent();
       submission.finish();
+      const completion = app.finishJobSave(saveLease.token);
+      savingRef.current = false;
+      setSaving(false);
+      if (saved && routeIsCurrent && completion.current && !completion.pendingSelection) {
+        // selectJob updates this provider and broadcasts the new selection to
+        // the Side provider. This keeps its highlight aligned with the detail
+        // route after a newly created Job first appears in the refreshed list.
+        app.selectJob(targetName);
+      }
     }
   };
   const testCall = async (call, selectedMethod) => {
@@ -1214,7 +1401,7 @@ function JobForm({ mode }) {
     ? "Job status is unknown. Refresh the page after the controller is available."
     : "Stop this Job before editing, then refresh the page.";
   const formBlocked = formMode === "blocked" || editBlocked;
-  return <main className="neo-main neo-main--job-form" aria-label="DBus Collector main"><MainHeader title={editing ? `Edit ${params.name}` : "New Job"} onBack={() => navigate(-1)}><button className="neo-button neo-button--primary" type="submit" form="job-form" disabled={formBlocked} title={editBlockMessage || undefined}>{editing ? "Save" : "Create"}</button></MainHeader>
+  return <main className="neo-main neo-main--job-form" aria-label="DBus Collector main"><MainHeader title={editing ? `Edit ${params.name}` : "New Job"} onBack={() => navigate(-1)}><button className="neo-button neo-button--primary" type="submit" form="job-form" disabled={saving || app.jobSaving} title={editBlockMessage || undefined}>{saving ? "Saving…" : editing ? "Save" : "Create"}</button></MainHeader>
     {loaded.loading || app.settingsLoading ? <p className="neo-message" aria-live="polite">Loading form…</p> : null}<Notice error={loaded.error || app.settingsError} /><Notice status>{editBlockMessage}</Notice>{errors.length ? <div className="neo-message neo-message--error" role="alert">{errors.map((error) => <p key={error}>{error}</p>)}</div> : null}{validationWarnings.length ? <div className="neo-message neo-message--warning" role="status"><p>Validation warnings found. Review them, then press {editing ? "Save" : "Create"} again to continue.</p>{validationWarnings.map((warning) => <p key={`${warning.code}-${JSON.stringify(warning.details || {})}`}>{warning.code}: {[...(warning.details?.jobs || []), ...(warning.details?.tags || [])].join(", ")}</p>)}</div> : null}
     <form id="job-form" className="neo-page-body" onSubmit={save}>
       <fieldset className="neo-form-lock" aria-label="Job editing controls" disabled={formBlocked}>
@@ -1359,7 +1546,7 @@ function DbServersPage() {
 function CreateModalLayer() {
   const app = useApp();
   if (app.createModal === "dbus-interface") return <DbusInterfacesModal />;
-  if (app.createModal === "db-server") return <DatabaseServersModal />;
+  if (app.createModal === "db-server" || app.createModal.startsWith("db-server:")) return <DatabaseServersModal initialEdit={app.createModal.split(":")[1] || ""} />;
   return null;
 }
 
@@ -1644,7 +1831,7 @@ function DatabaseServerDeleteConfirmModal({ name, onCancel, onConfirm }) {
   return <div className="neo-modal neo-modal--confirm" onMouseDown={(event) => { if (event.target === event.currentTarget) onCancel(); }}><section className="neo-modal__dialog neo-modal__dialog--database-confirm" role="dialog" aria-modal="true" aria-label="Delete Server"><header className="neo-modal__header"><div className="neo-modal__title"><Icon name="warning" /><h2>Delete Server</h2></div><IconButton className="neo-modal__close" icon="close" label="Close" onClick={onCancel} /></header><div className="neo-modal__body"><p>Are you sure you want to delete server &quot;{name}&quot;?</p></div><footer className="neo-modal__footer"><button className="neo-button" onClick={onCancel}>Cancel</button><button className="neo-button neo-button--danger" onClick={onConfirm}>Delete</button></footer></section></div>;
 }
 
-function DatabaseServersModal() {
+function DatabaseServersModal({ initialEdit = "" }) {
   const app = useApp();
   const fixedProvider = app.provider?.jobMode === "fixed";
   const loaded = useLoad((signal) => Promise.all([api.db.servers.list({ signal }), api.settings.get({ signal })]), [app.resourceRevision]);
@@ -1660,10 +1847,18 @@ function DatabaseServersModal() {
   const [defaultColumns, setDefaultColumns] = useState([]);
   const [defaultTablesReady, setDefaultTablesReady] = useState(false);
   const [defaultTableListOpen, setDefaultTableListOpen] = useState(false);
+  const initialEditHandled = useRef(false);
   const resetForm = () => { setMode("list"); setEditing(""); setDraft(emptyDraft); setDefaultTables([]); setDefaultColumns([]); setDefaultTablesReady(false); setDefaultTableListOpen(false); setError(null); };
   const openCreate = () => { setEditing(""); setDraft(emptyDraft); setDefaultTables([]); setDefaultColumns([]); setDefaultTablesReady(false); setError(null); setMode("form"); };
   const openEdit = (server) => { setEditing(server.name); setDraft({ ...server, password: "" }); setError(null); setMode("form"); };
   useEffect(() => { setDefaultServer(loaded.data?.[1]?.defaults?.database?.server || ""); }, [loaded.data]);
+  useEffect(() => {
+    if (!initialEdit || initialEditHandled.current || !loaded.data?.[0]) return;
+    const server = loaded.data[0].find((item) => item.name === initialEdit);
+    if (!server) return;
+    initialEditHandled.current = true;
+    openEdit(server);
+  }, [initialEdit, loaded.data]);
   const loadDefaultColumns = async (table) => {
     if (!table) { setDefaultColumns([]); return; }
     try { const result = await api.db.preview.columns({ ...draft, table }); setDefaultColumns(result.columns || []); } catch (failure) { setError(failure); }
@@ -1732,7 +1927,10 @@ function DatabaseServersModal() {
 
 function DataViewer() {
   const { name = "" } = useParams();
-  const loaded = useLoad((signal) => api.jobs.get(name, { signal }), [name]);
+  const loaded = useLoad(async (signal) => {
+    const value = await api.jobs.status(name, { signal });
+    return value.job;
+  }, [name]);
   if (loaded.loading && !loaded.data) return <main className="neo-main" aria-label="DBus Collector main"><p className="neo-message">Loading Data Viewer…</p></main>;
   if (loaded.error) return <main className="neo-main" aria-label="DBus Collector main"><Notice error={loaded.error} /></main>;
   return <DataViewerPage job={name} detail={loaded.data} />;

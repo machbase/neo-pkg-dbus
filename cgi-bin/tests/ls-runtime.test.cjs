@@ -72,6 +72,9 @@ test('LS runtime은 password 없는 snapshot과 0600 secret을 분리하고 logi
   const snapshot = JSON.parse(fs.readFileSync(files.snapshot, 'utf8'));
   const secret = JSON.parse(fs.readFileSync(files.secret, 'utf8'));
   assert.equal(JSON.stringify(snapshot).includes('not-for-snapshot'), false);
+  assert.equal(snapshot.schemaVersion, 2);
+  assert.equal(Object.hasOwn(snapshot, 'jobs'), false);
+  assert.deepEqual(snapshot.performance, { enabled: true, jobSampleCount: 1000, writerSummaryIntervalMs: 30000 });
   assert.equal(secret.servers.local.password, 'not-for-snapshot');
   assert.equal(fs.statSync(files.secret).mode & 0o777, 0o600);
   assert.deepEqual(JSON.parse(fs.readFileSync(files.active, 'utf8')).names, []);
@@ -82,10 +85,23 @@ test('LS runtime은 password 없는 snapshot과 0600 secret을 분리하고 logi
   assert.equal(fs.statSync(files.launcher).mode & 0o777, 0o755);
   assert.equal(fs.statSync(files.control).mode & 0o777, 0o755);
   await call((done) => runtime.start('line-a', done));
-  assert.deepEqual(JSON.parse(fs.readFileSync(files.active, 'utf8')).names, ['line-a']);
+  assert.deepEqual(JSON.parse(fs.readFileSync(files.active, 'utf8')).names, [], 'JSH control does not own the Go active checkpoint');
   await call((done) => runtime.refreshLog('line-a', done));
   await call((done) => runtime.clearOverrun('line-a', done));
   fs.mkdirSync(path.dirname(files.runtime), { recursive: true });
+  fs.writeFileSync(files.runtime, JSON.stringify({ jobs: {
+    'line-a': {
+      state: 'running', lastReadAt: '2026-09-01T00:00:00.000Z', lastStoredAt: '2026-09-01T00:00:00.001Z',
+      overrunCount: 3, lastOverrunAt: '2026-09-01T00:00:00.010Z',
+    },
+  } }), 'utf8');
+
+  fs.writeFileSync(files.runtime, JSON.stringify({ jobs: {
+    'line-a': { state: 'starting', stateDetail: 'Preparing tags…' },
+  } }), 'utf8');
+  assert.deepEqual(await call((done) => runtime.inspect('line-a', done)), {
+    controllerState: 'STARTING', controllerDetail: 'Preparing tags…', statusError: null,
+  });
   fs.writeFileSync(files.runtime, JSON.stringify({ jobs: {
     'line-a': {
       state: 'running', lastReadAt: '2026-09-01T00:00:00.000Z', lastStoredAt: '2026-09-01T00:00:00.001Z',

@@ -13,6 +13,8 @@
     "summaryIntervalMs": 3600000
   },
   "ls": {
-    "interval": { "useTaskCycle": true }
+    "interval": { "useTaskCycle": true },
+    "writer": { "queueCapacity": 64, "flushMaxRows": 1024, "flushIntervalMs": 1000 },
+    "performance": { "enabled": true, "jobSampleCount": 1000, "writerSummaryIntervalMs": 30000 }
   }
 }

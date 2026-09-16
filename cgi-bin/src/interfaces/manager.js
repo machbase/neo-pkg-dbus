@@ -5,6 +5,7 @@ const { error } = require('../config/errors.js');
 const { createJobOperationLock } = require('../jobs/operation-lock.js');
 const { profileLockKey } = require('../config/profile-lock-key.js');
 const { createDbusAdapter } = require('../dbus/adapter.js');
+const { loadProductPolicy } = require('../config/product-policy.js');
 const { typeFromSignature } = require('../dbus/types.js');
 const { InterfaceStore } = require('./store.js');
 const { InterfaceReferenceAnalyzer } = require('./references.js');
@@ -14,7 +15,7 @@ function same(left, right) { return JSON.stringify(left) === JSON.stringify(righ
 function interfaceId(value) { if (!isIdentifier(value)) throw error('DBUS_INTERFACE_INVALID', 'DBus Interface ID 형식이 잘못되었습니다.', { id: value }); return value; }
 function methodId(value) { if (!isIdentifier(value)) throw error('DBUS_METHOD_INVALID', 'DBus Method ID 형식이 잘못되었습니다.', { methodId: value }); return value; }
 class InterfaceManager {
-  constructor(options) { const settings = options || {}; this.cgiRoot = settings.cgiRoot; this.store = settings.store || new InterfaceStore({ cgiRoot: this.cgiRoot }); this.references = settings.references || new InterfaceReferenceAnalyzer({ cgiRoot: this.cgiRoot }); this.mutationLock = settings.mutationLock || createJobOperationLock({ directory: path.join(this.cgiRoot, 'conf.d', '.interface-mutation-locks') }); this.jobLock = settings.jobLock || createJobOperationLock({ directory: path.join(this.cgiRoot, 'conf.d', '.job-operation-locks') }); this.readerLock = settings.readerLock || createJobOperationLock({ directory: path.join(this.cgiRoot, 'conf.d', '.interface-mutation-readers') }); this.dbusFactory = settings.dbusFactory || (() => createDbusAdapter()); }
+  constructor(options) { const settings = options || {}; this.cgiRoot = settings.cgiRoot; const productPolicy = settings.productPolicy || loadProductPolicy(this.cgiRoot); this.store = settings.store || new InterfaceStore({ cgiRoot: this.cgiRoot }); this.references = settings.references || new InterfaceReferenceAnalyzer({ cgiRoot: this.cgiRoot, useIndex: productPolicy.target === 'ls' }); this.mutationLock = settings.mutationLock || createJobOperationLock({ directory: path.join(this.cgiRoot, 'conf.d', '.interface-mutation-locks') }); this.jobLock = settings.jobLock || createJobOperationLock({ directory: path.join(this.cgiRoot, 'conf.d', '.job-operation-locks') }); this.readerLock = settings.readerLock || createJobOperationLock({ directory: path.join(this.cgiRoot, 'conf.d', '.interface-mutation-readers') }); this.dbusFactory = settings.dbusFactory || (() => createDbusAdapter()); }
   execute(callback, action) { try { callback(null, action()); } catch (failure) { callback(failure); } }
   required(id) { interfaceId(id); const found = this.store.find(id); if (!found) throw error('DBUS_INTERFACE_NOT_FOUND', 'DBus Interface를 찾을 수 없습니다.', { id }); return found; }
   writable(id) { const found = this.required(id); if (found.builtIn) throw error('DBUS_INTERFACE_READ_ONLY', 'Built-in DBus Interface는 바꿀 수 없습니다.', { id }); return found; }

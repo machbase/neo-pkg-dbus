@@ -326,18 +326,18 @@ function ensureLsCollectorExecutable(cgiRoot) {
 }
 
 // `pkg install` normally reaches the JobManager lifecycle, which refreshes the
-// LS collector snapshot as part of package installation.  The LS fast path
+// LS collector policy as part of package installation.  The LS fast path
 // below deliberately uses servicectl directly (the service controller must not
 // depend on an asynchronous JSH callback), so a manually unpacked package can
 // otherwise register a service with no go-collector.json and the Go child exits
-// immediately.  Seed the snapshot before install/start; this is also safe when
-// Jobs already exist and preserves their current active checkpoint.
+// immediately. Seed the small global policy before install/start; Jobs live in
+// their canonical files and are never copied into this document.
 function ensureLsCollectorSnapshot(cgiRoot) {
   // Do not require the CGI JobManager here. `pkg run` and the Neo JSH Console
   // execute package scripts in a restricted child module loader where loading
   // the whole CGI source graph can fail with "Invalid module". The full
-  // JobManager snapshot is still produced whenever a Job is created/updated;
-  // this bootstrap only makes an unpacked, empty LS package startable.
+  // JobManager refreshes this policy when runtime settings change; this
+  // bootstrap only makes an unpacked, empty LS package startable.
   const confDir = path.join(cgiRoot, 'conf.d');
   const dataDir = path.join(cgiRoot, 'data');
   let settings = {};
@@ -346,10 +346,10 @@ function ensureLsCollectorSnapshot(cgiRoot) {
   const snapshot = path.join(confDir, 'go-collector.json');
   if (!fs.existsSync(snapshot)) {
     writeJsonAtomic(snapshot, {
-      schemaVersion: 1,
-      jobs: [],
+      schemaVersion: 2,
       logging: settings.logging || {},
       writer: (settings.ls && settings.ls.writer) || {},
+      performance: (settings.ls && settings.ls.performance) || {},
     });
   }
   const secrets = path.join(confDir, 'go-collector-secrets.json');

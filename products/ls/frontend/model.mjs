@@ -24,6 +24,13 @@ export const minimumIntervalMs = 1;
 export const retryConfigurable = false;
 export const tagCsvImporter = Object.freeze({ apply: applyLsTagCsv });
 
+const DATA_COUNT_LIMITS = Object.freeze({ X: 4096, B: 4096, W: 2048, D: 1024, L: 512 });
+
+export function dataCountLimit(deviceString) {
+  const value = String(deviceString || '').trim().toUpperCase();
+  return DATA_COUNT_LIMITS[value.startsWith('%') ? value[2] : value[1]] || 4096;
+}
+
 function nextCallIdentity(calls, methodId) {
   const usedIds = new Set((calls || []).map((call) => call.id));
   const usedNames = new Set((calls || []).map((call) => call.name));

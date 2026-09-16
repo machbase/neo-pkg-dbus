@@ -26,4 +26,32 @@ function jobNeedsStringValueColumn(config, interfaceStore) {
   });
 }
 
-module.exports = { jobNeedsStringValueColumn, selectionStorageType };
+function tagMayProduceFractionalValue(tag) {
+  const source = tag || {};
+  const bias = source.bias === undefined ? 0 : Number(source.bias);
+  const multiplier = source.multiplier === undefined ? 1 : Number(source.multiplier);
+  if (!Number.isFinite(bias) || !Number.isFinite(multiplier)) return true;
+
+  // PLC numeric values are integers. The result is guaranteed to remain an integer only when
+  // the input coefficient and the constant term of the configured affine transform are integers.
+  if (!Number.isInteger(multiplier)) return true;
+  const order = Array.isArray(source.transformOrder) ? source.transformOrder : ['bias', 'multiplier'];
+  const constant = order[0] === 'multiplier' ? bias : bias * multiplier;
+  return !Number.isInteger(constant);
+}
+
+function jobMayProduceFractionalValue(config) {
+  return (config && Array.isArray(config.methodCalls) ? config.methodCalls : []).some((call) => {
+    const selections = Array.isArray(call && call.outputSelections)
+      ? call.outputSelections : [{ tags: Array.isArray(call && call.tags) ? call.tags : [] }];
+    return selections.some((selection) => (Array.isArray(selection && selection.tags) ? selection.tags : [])
+      .some(tagMayProduceFractionalValue));
+  });
+}
+
+module.exports = {
+  jobMayProduceFractionalValue,
+  jobNeedsStringValueColumn,
+  selectionStorageType,
+  tagMayProduceFractionalValue,
+};

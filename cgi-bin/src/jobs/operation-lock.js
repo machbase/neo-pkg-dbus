@@ -7,6 +7,7 @@ const { error } = require('../config/errors.js');
 
 const DEFAULT_LEASE_MS = 30 * 1000;
 const DEFAULT_HEARTBEAT_MS = 5 * 1000;
+const MAX_ACQUIRE_ATTEMPTS = 8;
 
 function defaultToken() {
   return `${process.pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
@@ -19,15 +20,22 @@ function jobConflict(name) {
 function defaultIsProcessAlive(pid) {
   try {
     const result = process.kill(pid, 0);
-    if (result && result.code === 'ESRCH') return false;
-    return true;
+    return !isConfirmedMissingProcess(result);
   } catch (failure) {
-    return !(failure && failure.code === 'ESRCH');
+    return !isConfirmedMissingProcess(failure);
   }
 }
 
 function isConfirmedMissingProcess(result) {
-  return result === false || Boolean(result && result.code === 'ESRCH');
+  if (result === false || Boolean(result && result.code === 'ESRCH')) return true;
+  // Node throws an ESRCH Error for a missing PID. Neo JSH 8.5.11 instead
+  // returns a GoError value with no `code`, for example:
+  //   GoError: kill 4075 with 0: os: process already finished
+  // Match only the platform's explicit missing-process messages. Unknown
+  // probe errors (including EPERM) remain fail-closed and protect the lock.
+  let message = '';
+  try { message = String(result && result.message ? result.message : result || ''); } catch (_) {}
+  return /\b(?:no such process|process already finished)\b/i.test(message);
 }
 
 function createJobOperationLock(options) {
@@ -45,128 +53,19 @@ function createJobOperationLock(options) {
 
   fileSystem.mkdirSync(directory, { recursive: true });
 
-  function ownerFile(lockDirectory) {
-    return path.join(lockDirectory, 'owner.json');
+  function isMissing(failure) {
+    return Boolean(failure && failure.code === 'ENOENT');
   }
 
-  function heartbeatFile(lockDirectory, token) {
-    return path.join(lockDirectory, `heartbeat-${encodeURIComponent(token)}`);
-  }
-
-  function isValidOwner(owner) {
-    return Boolean(owner)
-      && typeof owner.token === 'string'
-      && owner.token.length > 0
-      && Number.isSafeInteger(owner.pid)
-      && owner.pid > 0
-      && Number.isFinite(owner.acquiredAt)
-      && Number.isFinite(owner.heartbeatAt)
-      && owner.heartbeatAt >= owner.acquiredAt;
-  }
-
-  function cleanupDetachedDirectory(detachedDirectory) {
-    let entries;
+  function isAlreadyPresent(failure, target) {
+    if (failure && failure.code === 'EEXIST') return true;
+    // Neo JSH 8.5.11 wraps an O_EXCL collision as ENOENT. The path state is
+    // authoritative; the wrapper's error code alone cannot identify absence.
     try {
-      entries = fileSystem.readdirSync(detachedDirectory);
-    } catch (failure) {
-      if (failure && failure.code === 'ENOENT') return;
-      throw failure;
-    }
-    for (const entry of entries) {
-      if (entry === '.' || entry === '..') continue;
-      try {
-        fileSystem.unlinkSync(path.join(detachedDirectory, entry));
-      } catch (failure) {
-        if (!failure || failure.code !== 'ENOENT') throw failure;
-      }
-    }
-    try {
-      fileSystem.rmdirSync(detachedDirectory);
-    } catch (failure) {
-      if (!failure || failure.code !== 'ENOENT') throw failure;
-    }
-  }
-
-  function writeOwnerDocument(ownerPath, owner, name) {
-    const temporaryPath = `${ownerPath}.tmp-${defaultToken()}`;
-    let remaining = `${JSON.stringify(owner)}\n`;
-    let descriptor;
-    try {
-      descriptor = fileSystem.openSync(temporaryPath, 'wx');
-      while (remaining.length > 0) {
-        const count = fileSystem.writeSync(descriptor, remaining);
-        if (!Number.isInteger(count) || count <= 0 || count > remaining.length) {
-          const failure = new Error('owner 문서를 끝까지 기록하지 못했습니다.');
-          failure.code = 'EIO';
-          throw failure;
-        }
-        remaining = remaining.slice(count);
-      }
-      if (typeof fileSystem.fsyncSync === 'function') fileSystem.fsyncSync(descriptor);
-      fileSystem.closeSync(descriptor);
-      descriptor = undefined;
-      if (fileSystem.existsSync(ownerPath)) throw jobConflict(name);
-      fileSystem.renameSync(temporaryPath, ownerPath);
-    } catch (failure) {
-      if (descriptor !== undefined) {
-        try {
-          fileSystem.closeSync(descriptor);
-        } catch (closeFailure) {
-          failure.closeError = closeFailure;
-        }
-      }
-      try {
-        fileSystem.unlinkSync(temporaryPath);
-      } catch (cleanupFailure) {
-        if (!cleanupFailure || cleanupFailure.code !== 'ENOENT') failure.cleanupError = cleanupFailure;
-      }
-      throw failure;
-    }
-  }
-
-  function readCanonicalOwner(lockDirectory, name) {
-    let entries;
-    try {
-      entries = fileSystem.readdirSync(lockDirectory);
-    } catch (failure) {
-      if (failure && failure.code === 'ENOENT') return undefined;
-      throw jobConflict(name);
-    }
-    const finalFiles = entries.filter((entry) => /^owner.*\.json$/.test(entry));
-    const hasOwner = entries.includes('owner.json');
-    const temporaryFiles = entries.filter((entry) => /^owner\.json\.tmp-/.test(entry));
-    if (!hasOwner) return finalFiles.length === 0 ? { incomplete: true } : { ambiguous: true };
-    if (finalFiles.length !== 1 || temporaryFiles.length !== 0) return { ambiguous: true };
-    let owner;
-    try {
-      owner = JSON.parse(fileSystem.readFileSync(ownerFile(lockDirectory), 'utf8'));
+      return fileSystem.existsSync(target);
     } catch (_) {
-      return { incomplete: true };
+      return false;
     }
-    if (!isValidOwner(owner)) return { incomplete: true };
-    return owner;
-  }
-
-  function readOwner(lockDirectory, name) {
-    const owner = readCanonicalOwner(lockDirectory, name);
-    if (!owner || owner.incomplete || owner.ambiguous) throw jobConflict(name);
-    return owner;
-  }
-
-  function writeOwner(lockDirectory, owner, name) {
-    writeOwnerDocument(ownerFile(lockDirectory), owner, name);
-  }
-
-  function writeHeartbeat(lockDirectory, token, timestamp) {
-    fileSystem.writeFileSync(heartbeatFile(lockDirectory, token), `${timestamp}\n`);
-  }
-
-  function heartbeatAt(lockDirectory, owner) {
-    try {
-      const value = Number(String(fileSystem.readFileSync(heartbeatFile(lockDirectory, owner.token), 'utf8')).trim());
-      if (Number.isFinite(value) && value >= owner.acquiredAt) return value;
-    } catch (_) {}
-    return owner.heartbeatAt;
   }
 
   function modifiedAt(target) {
@@ -182,361 +81,394 @@ function createJobOperationLock(options) {
     return null;
   }
 
-  function cleanupQuarantine(reclaimedDirectory) {
-    cleanupDetachedDirectory(reclaimedDirectory);
+  function isDirectory(target) {
+    const stat = fileSystem.statSync(target);
+    return typeof stat.isDirectory === 'function' ? stat.isDirectory() : Boolean(stat.isDirectory);
   }
 
-  function discardCanonical(lockDirectory, name, token, suffix) {
-    if (readOwner(lockDirectory, name).token !== token) throw jobConflict(name);
-    const detachedDirectory = `${lockDirectory}.${suffix}-${token}`;
-    fileSystem.renameSync(lockDirectory, detachedDirectory);
-    cleanupDetachedDirectory(detachedDirectory);
+  function isValidOwner(owner) {
+    return Boolean(owner)
+      && typeof owner.token === 'string'
+      && owner.token.length > 0
+      && Number.isSafeInteger(owner.pid)
+      && owner.pid > 0
+      && Number.isFinite(owner.acquiredAt)
+      && Number.isFinite(owner.heartbeatAt)
+      && owner.heartbeatAt >= owner.acquiredAt;
   }
 
-  function discardUnownedCanonical(lockDirectory, token) {
-    const detachedDirectory = `${lockDirectory}.failed-${token}`;
-    fileSystem.renameSync(lockDirectory, detachedDirectory);
-    cleanupDetachedDirectory(detachedDirectory);
+  function writeAll(descriptor, content) {
+    let remaining = content;
+    while (remaining.length > 0) {
+      const count = fileSystem.writeSync(descriptor, remaining);
+      if (!Number.isInteger(count) || count <= 0 || count > remaining.length) {
+        const failure = new Error('lock 문서를 끝까지 기록하지 못했습니다.');
+        failure.code = 'EIO';
+        throw failure;
+      }
+      remaining = remaining.slice(count);
+    }
   }
 
-  function reclaimOwnerFile(reclaimMutex, token) {
-    return path.join(reclaimMutex, `owner-${encodeURIComponent(token)}.json`);
+  function unlinkIfPresent(target) {
+    try {
+      fileSystem.unlinkSync(target);
+      return true;
+    } catch (failure) {
+      if (isMissing(failure)) return false;
+      throw failure;
+    }
   }
 
-  function writeReclaimOwner(reclaimMutex, token) {
-    const timestamp = now();
-    const ownerPath = reclaimOwnerFile(reclaimMutex, token);
-    writeOwnerDocument(ownerPath, {
+  function writeExclusive(target, document) {
+    let descriptor;
+    let created = false;
+    try {
+      descriptor = fileSystem.openSync(target, 'wx', 0o600);
+      created = true;
+      writeAll(descriptor, `${JSON.stringify(document)}\n`);
+      if (typeof fileSystem.fsyncSync === 'function') fileSystem.fsyncSync(descriptor);
+      fileSystem.closeSync(descriptor);
+      descriptor = undefined;
+    } catch (failure) {
+      if (descriptor !== undefined) {
+        try { fileSystem.closeSync(descriptor); } catch (closeFailure) { failure.closeError = closeFailure; }
+      }
+      if (created) {
+        try { unlinkIfPresent(target); } catch (cleanupFailure) { failure.cleanupError = cleanupFailure; }
+      }
+      throw failure;
+    }
+  }
+
+  function ownerDocument(token, timestamp) {
+    return {
       token,
       pid: process.pid,
       acquiredAt: timestamp,
       heartbeatAt: timestamp,
-    }, 'reclaim-mutex');
+    };
   }
 
-  function readReclaimOwner(reclaimMutex, name) {
+  function readJsonOwner(target) {
+    try {
+      const owner = JSON.parse(fileSystem.readFileSync(target, 'utf8'));
+      return isValidOwner(owner) ? owner : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function normalizedEntries(target) {
+    return fileSystem.readdirSync(target).filter((entry) => entry !== '.' && entry !== '..');
+  }
+
+  function newestModifiedAt(target, entries) {
+    let newest = modifiedAt(target);
+    for (const entry of entries || []) {
+      try {
+        const value = modifiedAt(path.join(target, entry));
+        if (Number.isFinite(value) && (!Number.isFinite(newest) || value > newest)) newest = value;
+      } catch (_) {}
+    }
+    return newest;
+  }
+
+  function inspectLegacyLock(lockPath) {
     let entries;
     try {
-      entries = fileSystem.readdirSync(reclaimMutex);
+      entries = normalizedEntries(lockPath);
     } catch (failure) {
-      if (failure && failure.code === 'ENOENT') return undefined;
-      throw jobConflict(name);
+      if (isMissing(failure)) return { missing: true };
+      throw failure;
     }
-    const ownerFiles = entries.filter((entry) => /^owner-.*\.json$/.test(entry));
-    const temporaryFiles = entries.filter((entry) => /^owner-.*\.tmp-/.test(entry));
-    if (ownerFiles.length === 0) return temporaryFiles.length === 0 ? null : { incomplete: true };
-    if (ownerFiles.length !== 1 || temporaryFiles.length !== 0) return { ambiguous: true };
-    let owner;
+    const ownerFiles = entries.filter((entry) => /^owner.*\.json$/.test(entry));
+    const temporaryFiles = entries.filter((entry) => /^owner\.json\.tmp-/.test(entry));
+    const heartbeatFiles = entries.filter((entry) => /^heartbeat-/.test(entry));
+    const unexpected = entries.filter((entry) => !ownerFiles.includes(entry)
+      && !temporaryFiles.includes(entry) && !heartbeatFiles.includes(entry));
+    const lastModified = newestModifiedAt(lockPath, entries);
+    if (!entries.includes('owner.json')) {
+      return ownerFiles.length === 0 && unexpected.length === 0
+        ? { missing: false, type: 'legacy-directory', incomplete: true, entries, lastActivity: lastModified }
+        : { missing: false, type: 'legacy-directory', ambiguous: true, entries, lastActivity: lastModified };
+    }
+    if (ownerFiles.length !== 1 || temporaryFiles.length !== 0 || unexpected.length !== 0) {
+      return { missing: false, type: 'legacy-directory', ambiguous: true, entries, lastActivity: lastModified };
+    }
+    const owner = readJsonOwner(path.join(lockPath, 'owner.json'));
+    if (!owner) return { missing: false, type: 'legacy-directory', incomplete: true, entries, lastActivity: lastModified };
+    let heartbeat = owner.heartbeatAt;
     try {
-      owner = JSON.parse(fileSystem.readFileSync(path.join(reclaimMutex, ownerFiles[0]), 'utf8'));
-    } catch (_) {
-      return { incomplete: true };
-    }
-    if (!isValidOwner(owner)
-      || ownerFiles[0] !== path.basename(reclaimOwnerFile(reclaimMutex, owner.token))) {
-      return { incomplete: true };
-    }
-    return owner;
+      const value = Number(String(fileSystem.readFileSync(
+        path.join(lockPath, `heartbeat-${encodeURIComponent(owner.token)}`), 'utf8',
+      )).trim());
+      if (Number.isFinite(value) && value >= owner.acquiredAt) heartbeat = value;
+    } catch (_) {}
+    return { missing: false, type: 'legacy-directory', owner, entries, lastActivity: heartbeat };
   }
 
-  function mayReclaimMutex(reclaimMutex, name) {
-    let fallbackModifiedAt;
+  function inspectLock(lockPath) {
     try {
-      fallbackModifiedAt = modifiedAt(reclaimMutex);
+      if (isDirectory(lockPath)) return inspectLegacyLock(lockPath);
     } catch (failure) {
-      if (failure && failure.code === 'ENOENT') return undefined;
-      throw jobConflict(name);
-    }
-    let owner;
-    try {
-      owner = readReclaimOwner(reclaimMutex, name);
-    } catch (failure) {
-      if (failure && failure.code === 'ENOENT') return undefined;
-      throw jobConflict(name);
+      if (isMissing(failure)) return { missing: true };
+      throw failure;
     }
     let lastActivity;
-    if (owner && !owner.incomplete && !owner.ambiguous) lastActivity = owner.heartbeatAt;
-    else {
-      lastActivity = fallbackModifiedAt;
+    try {
+      lastActivity = modifiedAt(lockPath);
+    } catch (failure) {
+      if (isMissing(failure)) return { missing: true };
+      throw failure;
     }
-    if (!Number.isFinite(lastActivity) || now() - lastActivity < leaseMs) throw jobConflict(name);
-    if (owner === null) return null;
-    if (owner === undefined) return undefined;
-    if (owner.incomplete) return null;
-    if (owner.ambiguous) throw jobConflict(name);
+    const owner = readJsonOwner(lockPath);
+    if (!owner) return { missing: false, type: 'file', incomplete: true, lastActivity };
+    return { missing: false, type: 'file', owner, lastActivity: owner.heartbeatAt };
+  }
+
+  function requireReclaimable(state, name) {
+    if (!state || state.missing) return;
+    if (state.ambiguous) throw jobConflict(name);
+    if (!Number.isFinite(state.lastActivity) || now() - state.lastActivity < leaseMs) throw jobConflict(name);
+    if (state.incomplete) return;
     let alive = true;
-    try {
-      alive = isProcessAlive(owner.pid);
-    } catch (_) {
-      alive = true;
-    }
+    try { alive = isProcessAlive(state.owner.pid); } catch (_) { alive = true; }
     if (!isConfirmedMissingProcess(alive)) throw jobConflict(name);
-    return owner;
   }
 
-  function quarantineStaleReclaimMutex(reclaimMutex, name) {
-    if (mayReclaimMutex(reclaimMutex, name) === undefined) return false;
-    const quarantineToken = randomReclaimToken();
-    const detachedMutex = `${reclaimMutex}.reclaimed-${quarantineToken}`;
+  function guardOwnerFile(guardPath) {
+    return path.join(guardPath, 'owner.json');
+  }
+
+  function guardClaimFile(guardPath, token) {
+    return path.join(guardPath, `claim-${encodeURIComponent(token)}.json`);
+  }
+
+  function writeExisting(target, document) {
+    let descriptor;
     try {
-      fileSystem.renameSync(reclaimMutex, detachedMutex);
-    } catch (renameFailure) {
-      if (renameFailure && renameFailure.code === 'ENOENT') return false;
-      throw jobConflict(name);
+      descriptor = fileSystem.openSync(target, 'w', 0o600);
+      if (typeof fileSystem.fchmodSync === 'function') fileSystem.fchmodSync(descriptor, 0o600);
+      writeAll(descriptor, `${JSON.stringify(document)}\n`);
+      if (typeof fileSystem.fsyncSync === 'function') fileSystem.fsyncSync(descriptor);
+      fileSystem.closeSync(descriptor);
+      descriptor = undefined;
+    } catch (failure) {
+      if (descriptor !== undefined) {
+        try { fileSystem.closeSync(descriptor); } catch (closeFailure) { failure.closeError = closeFailure; }
+      }
+      throw failure;
     }
-    cleanupDetachedDirectory(detachedMutex);
-    return true;
   }
 
-  function acquireReclaimMutex(reclaimMutex, name) {
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      if (fileSystem.existsSync(reclaimMutex)) {
-        quarantineStaleReclaimMutex(reclaimMutex, name);
+  function inspectGuard(guardPath) {
+    let entries;
+    try {
+      entries = normalizedEntries(guardPath);
+    } catch (failure) {
+      if (isMissing(failure)) return { missing: true };
+      throw failure;
+    }
+    const lastActivity = newestModifiedAt(guardPath, entries);
+    if (entries.length === 0) return { missing: false, empty: true, entries, lastActivity };
+    if (entries.length !== 1) {
+      return { missing: false, ambiguous: true, entries, lastActivity };
+    }
+    const entry = entries[0];
+    const isOwner = entry === 'owner.json';
+    const isClaim = /^claim-.*\.json$/.test(entry);
+    if (!isOwner && !isClaim) return { missing: false, ambiguous: true, entries, lastActivity };
+    const owner = readJsonOwner(path.join(guardPath, entry));
+    if (!owner || (isClaim && entry !== path.basename(guardClaimFile(guardPath, owner.token)))) {
+      return { missing: false, incomplete: true, entry, entries, lastActivity };
+    }
+    return { missing: false, owner, entry, entries, lastActivity: owner.heartbeatAt };
+  }
+
+  function releaseGuard(guardPath, ownerPath, token) {
+    const current = readJsonOwner(ownerPath);
+    if (!current || current.token !== token) return;
+    try {
+      if (!unlinkIfPresent(ownerPath)) return;
+    } catch (_) {
+      return;
+    }
+    try {
+      fileSystem.rmdirSync(guardPath);
+    } catch (_) {}
+  }
+
+  function acquireGuard(guardPath, name) {
+    for (let attempt = 0; attempt < MAX_ACQUIRE_ATTEMPTS; attempt += 1) {
+      try {
+        fileSystem.mkdirSync(guardPath);
+      } catch (failure) {
+        if (!isAlreadyPresent(failure, guardPath)) throw failure;
+      }
+
+      const state = inspectGuard(guardPath);
+      if (state.missing) continue;
+      if (state.empty) {
+        const token = randomReclaimToken();
+        const ownerPath = guardOwnerFile(guardPath);
+        try {
+          writeExclusive(ownerPath, ownerDocument(token, now()));
+          return { token, release() { releaseGuard(guardPath, ownerPath, token); } };
+        } catch (failure) {
+          if (isAlreadyPresent(failure, ownerPath) || isMissing(failure)) continue;
+          throw failure;
+        }
+      }
+
+      requireReclaimable(state, name);
+      const current = inspectGuard(guardPath);
+      if (current.missing || current.empty) continue;
+      requireReclaimable(current, name);
+      if (state.entry !== current.entry) throw jobConflict(name);
+      if (state.owner && (!current.owner || current.owner.token !== state.owner.token)) throw jobConflict(name);
+
+      const currentPath = path.join(guardPath, current.entry);
+      if (current.entry !== 'owner.json') {
+        if (!unlinkIfPresent(currentPath)) continue;
         continue;
       }
 
       const token = randomReclaimToken();
-      const pendingMutex = `${reclaimMutex}.pending-${encodeURIComponent(token)}`;
+      const claimPath = guardClaimFile(guardPath, token);
       try {
-        fileSystem.mkdirSync(pendingMutex);
+        fileSystem.renameSync(currentPath, claimPath);
       } catch (failure) {
-        if (failure && failure.code === 'EEXIST') throw jobConflict(name);
+        if (isMissing(failure)) continue;
         throw failure;
       }
-
       try {
-        writeReclaimOwner(pendingMutex, token);
+        writeExisting(claimPath, ownerDocument(token, now()));
       } catch (failure) {
-        try {
-          cleanupDetachedDirectory(pendingMutex);
-        } catch (cleanupFailure) {
-          failure.cleanupError = cleanupFailure;
-        }
-        if (failure && failure.code === 'ENOENT') throw jobConflict(name);
         throw failure;
       }
-
-      if (fileSystem.existsSync(reclaimMutex)) {
-        cleanupDetachedDirectory(pendingMutex);
-        quarantineStaleReclaimMutex(reclaimMutex, name);
-        continue;
-      }
-      try {
-        fileSystem.renameSync(pendingMutex, reclaimMutex);
-      } catch (failure) {
-        let cleanupFailure;
-        try {
-          cleanupDetachedDirectory(pendingMutex);
-        } catch (pendingCleanupFailure) {
-          cleanupFailure = pendingCleanupFailure;
-        }
-        if (cleanupFailure) {
-          cleanupFailure.publishError = failure;
-          throw cleanupFailure;
-        }
-        if (failure && failure.code === 'ENOENT') throw jobConflict(name);
-        if (failure && (failure.code === 'EEXIST' || failure.code === 'ENOTEMPTY')) continue;
-        throw failure;
-      }
-      return token;
+      return { token, release() { releaseGuard(guardPath, claimPath, token); } };
     }
     throw jobConflict(name);
   }
 
-  function releaseReclaimMutex(reclaimMutex, name, token) {
-    const owner = readReclaimOwner(reclaimMutex, name);
-    if (!owner || owner.token !== token) return;
-    try {
-      fileSystem.unlinkSync(reclaimOwnerFile(reclaimMutex, token));
-    } catch (failure) {
-      if (failure && failure.code === 'ENOENT') return;
-      throw failure;
+  function removeLegacyLock(lockPath, expected, name) {
+    const current = inspectLegacyLock(lockPath);
+    requireReclaimable(current, name);
+    if (expected.owner && (!current.owner || current.owner.token !== expected.owner.token)) throw jobConflict(name);
+    if (current.ambiguous) throw jobConflict(name);
+    for (const entry of current.entries || []) {
+      const target = path.join(lockPath, entry);
+      try {
+        if (isDirectory(target)) throw jobConflict(name);
+      } catch (failure) {
+        if (failure && failure.code === 'JOB_CONFLICT') throw failure;
+        if (!isMissing(failure)) throw failure;
+        continue;
+      }
+      unlinkIfPresent(target);
     }
     try {
-      fileSystem.rmdirSync(reclaimMutex);
+      fileSystem.rmdirSync(lockPath);
     } catch (failure) {
-      if (failure && (failure.code === 'ENOENT' || failure.code === 'ENOTEMPTY')) return;
+      if (!isMissing(failure)) throw failure;
+    }
+  }
+
+  function removeStaleLock(lockPath, state, name) {
+    const current = inspectLock(lockPath);
+    if (current.missing) return;
+    requireReclaimable(current, name);
+    if (state.owner && (!current.owner || current.owner.token !== state.owner.token)) throw jobConflict(name);
+    if (current.type === 'legacy-directory') removeLegacyLock(lockPath, current, name);
+    else unlinkIfPresent(lockPath);
+  }
+
+  function readOwnedFile(lockPath, name, token) {
+    const state = inspectLock(lockPath);
+    if (state.missing || state.type !== 'file' || !state.owner || state.owner.token !== token) throw jobConflict(name);
+    return state.owner;
+  }
+
+  function replaceOwner(lockPath, name, token, owner) {
+    const temporaryPath = `${lockPath}.tmp-${defaultToken()}`;
+    try {
+      writeExclusive(temporaryPath, owner);
+      readOwnedFile(lockPath, name, token);
+      fileSystem.renameSync(temporaryPath, lockPath);
+    } catch (failure) {
+      try { unlinkIfPresent(temporaryPath); } catch (cleanupFailure) { failure.cleanupError = cleanupFailure; }
       throw failure;
     }
   }
 
-  function createHandle(name, lockDirectory, token) {
+  function removeOwnedFile(lockPath, name, token) {
+    let owner;
+    try { owner = readOwnedFile(lockPath, name, token); } catch (_) { return false; }
+    if (owner.token !== token) return false;
+    return unlinkIfPresent(lockPath);
+  }
+
+  function createHandle(name, lockPath, token) {
     function assertOwned() {
-      if (readOwner(lockDirectory, name).token !== token) throw jobConflict(name);
+      readOwnedFile(lockPath, name, token);
     }
 
     let timer;
     try {
       timer = startTimer(() => {
         try {
-          assertOwned();
-          writeHeartbeat(lockDirectory, token, now());
+          const owner = readOwnedFile(lockPath, name, token);
+          replaceOwner(lockPath, name, token, { ...owner, heartbeatAt: now() });
         } catch (_) {}
       }, heartbeatMs);
     } catch (failure) {
-      try {
-        discardCanonical(lockDirectory, name, token, 'failed');
-      } catch (cleanupFailure) {
-        failure.cleanupError = cleanupFailure;
-      }
+      try { removeOwnedFile(lockPath, name, token); } catch (cleanupFailure) { failure.cleanupError = cleanupFailure; }
       throw failure;
     }
 
     function release() {
-      stopTimer(timer);
-      let owner;
-      try {
-        owner = readOwner(lockDirectory, name);
-      } catch (_) {
-        return;
-      }
-      if (owner.token !== token) return;
-      const releasedDirectory = `${lockDirectory}.released-${token}`;
-      fileSystem.renameSync(lockDirectory, releasedDirectory);
-      cleanupDetachedDirectory(releasedDirectory);
+      let timerFailure = null;
+      try { stopTimer(timer); } catch (failure) { timerFailure = failure; }
+      // A timer implementation failure must never turn a completed CGI
+      // mutation into a permanent Job lock.
+      removeOwnedFile(lockPath, name, token);
+      if (timerFailure) throw timerFailure;
     }
 
     return { token, assertOwned, release };
   }
 
-  function installOwnerDocument(lockDirectory, name, token) {
-    const timestamp = now();
-    try {
-      writeOwner(lockDirectory, {
-        token,
-        pid: process.pid,
-        acquiredAt: timestamp,
-        heartbeatAt: timestamp,
-      }, name);
-    } catch (failure) {
-      if (failure && failure.code === 'ENOENT') throw jobConflict(name);
-      throw failure;
-    }
-  }
-
-  function mayReclaim(lockDirectory, name) {
-    let fallbackModifiedAt;
-    try {
-      fallbackModifiedAt = modifiedAt(lockDirectory);
-    } catch (failure) {
-      if (failure && failure.code === 'ENOENT') return null;
-      throw jobConflict(name);
-    }
-    let owner;
-    try {
-      owner = readCanonicalOwner(lockDirectory, name);
-    } catch (failure) {
-      if (failure && failure.code === 'ENOENT') return null;
-      throw jobConflict(name);
-    }
-    let lastActivity;
-    if (owner && !owner.incomplete && !owner.ambiguous) lastActivity = heartbeatAt(lockDirectory, owner);
-    else {
-      lastActivity = fallbackModifiedAt;
-    }
-    if (!Number.isFinite(lastActivity) || now() - lastActivity < leaseMs) throw jobConflict(name);
-    if (owner === undefined || owner === null) return null;
-    if (owner.incomplete) return owner;
-    if (owner.ambiguous) throw jobConflict(name);
-    let alive = true;
-    try {
-      alive = isProcessAlive(owner.pid);
-    } catch (_) {
-      alive = true;
-    }
-    if (!isConfirmedMissingProcess(alive)) throw jobConflict(name);
-    return owner;
-  }
-
   function acquire(name) {
-    const lockDirectory = path.join(directory, `${name}.lock`);
-    const reclaimMutex = `${lockDirectory}.reclaim`;
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      if (fileSystem.existsSync(reclaimMutex)) {
-        quarantineStaleReclaimMutex(reclaimMutex, name);
-        continue;
-      }
-      try {
-        fileSystem.mkdirSync(lockDirectory);
-      } catch (failure) {
-        if (!failure || failure.code !== 'EEXIST') throw failure;
-        const mutexToken = acquireReclaimMutex(reclaimMutex, name);
-        let mutexHeld = true;
-        let reclaimedDirectory = null;
-        let installedToken = null;
-        let replacementDirectoryCreated = false;
-        let replacementToken = null;
-        let cleanupStarted = false;
-        try {
-          if (mayReclaim(lockDirectory, name) === null) continue;
-
-          const token = randomToken();
-          replacementToken = token;
-          reclaimedDirectory = `${lockDirectory}.reclaimed-${token}`;
-          try {
-            fileSystem.renameSync(lockDirectory, reclaimedDirectory);
-          } catch (renameFailure) {
-            if (renameFailure && renameFailure.code === 'ENOENT') continue;
-            throw jobConflict(name);
-          }
-
-          fileSystem.mkdirSync(lockDirectory);
-          replacementDirectoryCreated = true;
-          installOwnerDocument(lockDirectory, name, token);
-          installedToken = token;
-          cleanupStarted = true;
-          cleanupQuarantine(reclaimedDirectory);
-          reclaimedDirectory = null;
-
-          mutexHeld = false;
-          releaseReclaimMutex(reclaimMutex, name, mutexToken);
-          return createHandle(name, lockDirectory, token);
-        } catch (reclaimFailure) {
-          if (installedToken !== null) {
-            try {
-              discardCanonical(lockDirectory, name, installedToken, 'failed');
-            } catch (cleanupFailure) {
-              reclaimFailure.cleanupError = cleanupFailure;
-            }
-          } else if (replacementDirectoryCreated && fileSystem.existsSync(lockDirectory)) {
-            try {
-              discardUnownedCanonical(lockDirectory, replacementToken);
-            } catch (cleanupFailure) {
-              reclaimFailure.cleanupError = cleanupFailure;
-            }
-          }
-          if (reclaimedDirectory !== null && !cleanupStarted && !fileSystem.existsSync(lockDirectory)) {
-            try {
-              fileSystem.renameSync(reclaimedDirectory, lockDirectory);
-              reclaimedDirectory = null;
-            } catch (restoreFailure) {
-              reclaimFailure.restoreError = restoreFailure;
-            }
-          }
-          throw reclaimFailure;
-        } finally {
-          if (mutexHeld) {
-            mutexHeld = false;
-            releaseReclaimMutex(reclaimMutex, name, mutexToken);
-          }
-        }
+    const lockPath = path.join(directory, `${name}.lock`);
+    const guardPath = `${lockPath}.reclaim`;
+    const guard = acquireGuard(guardPath, name);
+    let handle;
+    try {
+      const state = inspectLock(lockPath);
+      if (!state.missing) {
+        requireReclaimable(state, name);
+        removeStaleLock(lockPath, state, name);
       }
 
-      let token;
+      const token = randomToken();
+      const timestamp = now();
       try {
-        token = randomToken();
-        installOwnerDocument(lockDirectory, name, token);
+        writeExclusive(lockPath, ownerDocument(token, timestamp));
       } catch (failure) {
+        if (isAlreadyPresent(failure, lockPath)) throw jobConflict(name);
         throw failure;
       }
-      return createHandle(name, lockDirectory, token);
+      handle = createHandle(name, lockPath, token);
+    } finally {
+      guard.release();
     }
-    throw jobConflict(name);
+    return handle;
   }
 
   function assertAvailable(name) {
-    const lockDirectory = path.join(directory, `${name}.lock`);
-    mayReclaim(lockDirectory, name);
+    const state = inspectLock(path.join(directory, `${name}.lock`));
+    if (!state.missing) requireReclaimable(state, name);
   }
 
   return { acquire, assertAvailable };

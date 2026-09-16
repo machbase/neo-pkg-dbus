@@ -124,7 +124,7 @@ function fixture(options) {
         throw error('JOB_NOT_FOUND', 'Job을 찾을 수 없습니다.', { name });
       },
     },
-    serverStore: {
+    serverStore: settings.serverStore || {
       get(name, callback) {
         callback(null, name === 'local-db' ? {
           schemaVersion: 1, name, host: '127.0.0.1', port: 5656, user: 'sys', password: 'secret',
@@ -195,6 +195,32 @@ async function testJobScopedDataViewer() {
   assert.deepEqual(publicPage.cursor, { next: null, previous: null });
   assert.equal(Object.prototype.hasOwnProperty.call(publicPage, 'nextCursor'), false);
   assert.equal(Object.prototype.hasOwnProperty.call(publicPage, 'previousCursor'), false);
+
+  const sharedDatabase = fixture({
+    productPolicy: { target: 'ls' },
+    jobRepository: {
+      read(name) {
+        return jobDocument(name, {
+          database: { server: 'local-db', table: 'OLD_TAG', valueColumn: 'OLD_VALUE', stringValueColumn: 'OLD_STR' },
+        });
+      },
+    },
+    serverStore: {
+      get(name, callback) {
+        callback(null, name === 'local-db' ? {
+          schemaVersion: 1, name, host: '127.0.0.1', port: 5656, user: 'sys', password: 'secret',
+          defaultTable: 'TAG', valueColumn: 'VALUE', stringValueColumn: 'STR_VALUE',
+        } : null);
+      },
+    },
+  });
+  const sharedPage = await call(sharedDatabase.viewer, 'data', {
+    job: 'line-a', server: 'local-db', table: 'TAG', names: ['%MB3'],
+  });
+  assert.equal(sharedPage.table, 'TAG', 'LS Data Viewer follows the current shared Database profile mapping');
+  await rejectsCode(call(sharedDatabase.viewer, 'data', {
+    job: 'line-a', server: 'local-db', table: 'OLD_TAG', names: ['%MB3'],
+  }), 'JOB_DATA_SOURCE_MISMATCH');
 
   const numericOnly = fixture({
     jobRepository: {

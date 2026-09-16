@@ -6,7 +6,7 @@ const { loadSettings } = require('../config/settings-loader.js');
 const { loadProductPolicy } = require('../config/product-policy.js');
 const { resolveIntervalPolicy } = require('../ls/interval-policy.js');
 const { createDatabaseValidationAdapter } = require('../db/validation-adapter.js');
-const { jobNeedsStringValueColumn } = require('../output/storage-policy.js');
+const { jobMayProduceFractionalValue, jobNeedsStringValueColumn } = require('../output/storage-policy.js');
 const { InterfaceStore } = require('../interfaces/store.js');
 const { profileLockKey: interfaceLockKey } = require('../config/profile-lock-key.js');
 const { classifyControllerState } = require('../service/controller-state.js');
@@ -15,6 +15,7 @@ const { createLsRuntime } = require('../collector/ls-runtime.js');
 const { createServerStore } = require('../db/server-store.js');
 const { jobDefaults } = require('./defaults.js');
 const { createJobOperationLock } = require('./operation-lock.js');
+const { JobIndexRepository, fromDocument: indexFromDocument } = require('./index-repository.js');
 const { JobRepository, revisionOf } = require('./repository.js');
 const { deepMerge, validateJobConfig, validateJobName } = require('./validator.js');
 
@@ -45,6 +46,13 @@ function stripName(document) {
   delete config.name;
   delete config.revision;
   return config;
+}
+
+function sameConfig(left, right) {
+  // Both values have passed validateJobConfig(), which returns the same stable
+  // schema order.  Keeping this comparison JSON-only also keeps it compatible
+  // with the Neo JSH runtime (no Node-only deep equality dependency).
+  return JSON.stringify(left) === JSON.stringify(right);
 }
 
 function tagsForCall(call) {
@@ -91,6 +99,11 @@ class JobManager {
     this.productPolicy = settings.productPolicy || loadProductPolicy(this.cgiRoot);
     this.dbusFactory = settings.dbusFactory;
     this.isLs = this.productPolicy.target === 'ls';
+    this.indexRepository = settings.indexRepository || (this.isLs ? new JobIndexRepository({
+      cgiRoot: this.cgiRoot,
+      jobDirectory: this.repository.directory,
+      directory: settings.jobIndexDir,
+    }) : null);
     this.serverStore = settings.serverStore || createServerStore({ cgiRoot: this.cgiRoot });
     this.lsRuntime = this.isLs ? (settings.lsRuntime || createLsRuntime({
       cgiRoot: this.cgiRoot,
@@ -174,6 +187,7 @@ class JobManager {
   databaseOptions(config) {
     return {
       needsStringValueColumn: jobNeedsStringValueColumn(config, this.interfaceStore),
+      fractionalValuePossible: jobMayProduceFractionalValue(config),
     };
   }
 
@@ -423,6 +437,100 @@ class JobManager {
     }
   }
 
+  readIndex(name) {
+    if (!this.indexRepository.registered(name)) {
+      throw error('JOB_NOT_FOUND', 'Job을 찾을 수 없습니다.', { name });
+    }
+    return this.indexRepository.read(name);
+  }
+
+  syncIndex(document) {
+    if (!this.isLs) return null;
+    const expected = indexFromDocument(document);
+    let current = null;
+    try { current = this.indexRepository.read(document.name); } catch (_) {}
+    if (!current || JSON.stringify(current) !== JSON.stringify(expected)) {
+      return this.indexRepository.write(document);
+    }
+    return current;
+  }
+
+  configFromIndex(index, databaseCache) {
+    const cache = databaseCache || {};
+    let database = cache[index.database.server];
+    if (!database) {
+      let called = false;
+      let readError = null;
+      let server = null;
+      this.serverStore.get(index.database.server, (failure, value) => {
+        called = true;
+        readError = failure;
+        server = value;
+      });
+      if (!called) throw new Error('LS Database profile read must complete synchronously.');
+      if (readError) throw readError;
+      database = {
+        ...index.database,
+        ...(server && server.defaultTable ? { table: server.defaultTable } : {}),
+        ...(server && server.valueColumn ? { valueColumn: server.valueColumn } : {}),
+        ...(server ? { stringValueColumn: server.stringValueColumn || '' } : {}),
+      };
+      cache[index.database.server] = database;
+    }
+    return {
+      schedule: { intervalMs: index.intervalMs },
+      methodCalls: index.methodReferences.map((reference) => ({
+        id: reference.callId,
+        interfaceId: reference.interfaceId,
+        methodId: reference.methodId,
+      })),
+      database: { ...database },
+      execution: { ...index.execution },
+      log: { level: index.logLevel },
+    };
+  }
+
+  lsState(overview, name) {
+    const service = overview && overview.service || {
+      controllerState: 'UNKNOWN', controllerDetail: null, statusError: new Error('LS collector state is unavailable.'),
+    };
+    if (service.statusError || service.controllerState === 'NOT_INSTALLED') return service;
+    if (!['RUNNING', 'STARTING'].includes(service.controllerState)) {
+      return {
+        controllerState: service.controllerState === 'FAILED' ? 'FAILED' : 'STOPPED',
+        controllerDetail: service.controllerDetail,
+        statusError: null,
+      };
+    }
+    const runtime = overview.runtime && overview.runtime.jobs && overview.runtime.jobs[name];
+    const runtimeState = runtime && runtime.state;
+    const controllerState = runtimeState === 'running' ? 'RUNNING'
+      : runtimeState === 'starting' ? 'STARTING'
+        : runtimeState === 'stopping' ? 'STOPPING'
+          : runtimeState === 'failed' ? 'FAILED' : 'STOPPED';
+    return {
+      controllerState,
+      controllerDetail: runtime && runtime.stateDetail || service.controllerDetail,
+      statusError: null,
+    };
+  }
+
+  lsLastRun(runtimeJob) {
+    if (!runtimeJob) return null;
+    if (!runtimeJob.lastReadAt && !runtimeJob.lastStoredAt && !runtimeJob.lastError) return null;
+    return projectLastRun({
+      status: runtimeJob.lastError ? 'failed' : 'success',
+      lastRunAt: runtimeJob.lastReadAt || null,
+      lastSuccessfulRunAt: runtimeJob.lastError ? null : (runtimeJob.lastReadAt || null),
+      lastStoredAt: runtimeJob.lastStoredAt || null,
+      lastError: runtimeJob.lastError || null,
+      overrunCount: Number.isSafeInteger(runtimeJob.overrunCount) && runtimeJob.overrunCount >= 0 ? runtimeJob.overrunCount : 0,
+      queueSkipped: Number.isSafeInteger(runtimeJob.queueSkipped) && runtimeJob.queueSkipped >= 0 ? runtimeJob.queueSkipped : 0,
+      lastOverrunAt: runtimeJob.lastOverrunAt || null,
+      methodCalls: [],
+    });
+  }
+
   diagnostic(name, callback) {
     let value;
     try {
@@ -443,7 +551,44 @@ class JobManager {
   get(name, callback) {
     this.callback(callback, () => {
       this.validateName(name);
+      if (this.isLs && !this.indexRepository.exists(name)) {
+        if (!this.repository.exists(name)) {
+          throw error('JOB_NOT_FOUND', 'Job을 찾을 수 없습니다.', { name });
+        }
+        throw error('JOB_INVALID_CONFIG', 'This Job configuration cannot be read. Recreate the Job before continuing.', {
+          name, registrationMissing: true,
+        });
+      }
+      if (this.isLs) this.readIndex(name);
       this.diagnostic(name, callback);
+    });
+  }
+
+  status(name, callback) {
+    if (!this.isLs) {
+      this.get(name, (getError, detail) => {
+        if (getError) { callback(getError); return; }
+        this.lastRun(name, (lastRunError, value) => callback(lastRunError, {
+          job: detail, lastRun: value && value.lastRun || null,
+        }));
+      });
+      return;
+    }
+    let index;
+    try { index = this.readIndex(this.validateName(name)); }
+    catch (readError) { callback(readError); return; }
+    this.lsRuntime.overview((_unused, overview) => {
+      try {
+        const state = this.lsState(overview, name);
+        const config = this.configFromIndex(index);
+        const job = this.view(name, config, state, null, index.revision);
+        job.methodCallCount = index.methodCallCount;
+        job.tagCount = index.tagCount;
+        callback(null, {
+          job,
+          lastRun: this.lsLastRun(overview.runtime && overview.runtime.jobs && overview.runtime.jobs[name]),
+        });
+      } catch (statusError) { callback(statusError); }
     });
   }
 
@@ -476,7 +621,34 @@ class JobManager {
     this.callController('details', [this.serviceName(name), 'lastRun'], callback);
   }
 
+  listFromLsOverview(records, overview) {
+    const databaseCache = {};
+    return records.map((record) => {
+      if (record.error || !record.index) {
+        const state = { controllerState: 'UNKNOWN', controllerDetail: record.error && record.error.message, statusError: null };
+        return this.summary(this.view(record.name, null, state, record.error), null);
+      }
+      const state = this.lsState(overview, record.name);
+      const detail = this.view(record.name, this.configFromIndex(record.index, databaseCache), state, null, record.index.revision);
+      const runtimeJob = overview.runtime && overview.runtime.jobs && overview.runtime.jobs[record.name];
+      return {
+        ...this.summary(detail, this.lsLastRun(runtimeJob)),
+        tagCount: record.index.tagCount,
+      };
+    });
+  }
+
   list(callback) {
+    if (this.isLs) {
+      let records;
+      try { records = this.indexRepository.list(); } catch (listError) { callback(listError); return; }
+      if (!records.length) { callback(null, []); return; }
+      this.lsRuntime.overview((_unused, overview) => {
+        try { callback(null, this.listFromLsOverview(records, overview)); }
+        catch (listError) { callback(listError); }
+      });
+      return;
+    }
     let records;
     try { records = this.repository.list(); } catch (listError) { callback(listError); return; }
     if (!records.length) { callback(null, []); return; }
@@ -507,6 +679,23 @@ class JobManager {
           if (pending === 0) callback(null, values);
         });
       });
+    });
+  }
+
+  health(callback) {
+    if (!this.isLs) {
+      this.list((listError, jobs) => callback(listError, { jobs: jobs || [], daemonState: null }));
+      return;
+    }
+    let records;
+    try { records = this.indexRepository.list(); } catch (listError) { callback(listError); return; }
+    this.lsRuntime.overview((_unused, overview) => {
+      try {
+        callback(null, {
+          jobs: this.listFromLsOverview(records, overview),
+          daemonState: overview.service,
+        });
+      } catch (listError) { callback(listError); }
     });
   }
 
@@ -597,7 +786,11 @@ class JobManager {
     config.methodCalls.forEach((call) => tagsForCall(call).forEach((tag) => currentTags.add(tag.name)));
     const jobs = [];
     const tags = new Set();
+    const registeredNames = this.isLs
+      ? new Set(this.indexRepository.list().filter((record) => record.index).map((record) => record.name))
+      : null;
     this.repository.list().forEach((record) => {
+      if (registeredNames && !registeredNames.has(record.name)) return;
       if (!record.document || record.name === name) return;
       const other = stripName(record.document);
       if (!other.database || other.database.server !== config.database.server
@@ -663,12 +856,13 @@ class JobManager {
       this.withMutation(name, callback, (handle, done, holdInterfaces) => {
         this.guardMutable(name, (guardError, current) => {
           if (guardError) { done(guardError); return; }
-          if (!Number.isSafeInteger(patch.revision) || patch.revision < 1) {
-            done(error('JOB_REVISION_REQUIRED', 'Job 수정에는 GET으로 받은 revision이 필요합니다.', { name }));
-            return;
-          }
           try {
-            const { revision, ...configPatch } = patch;
+            // The public revision is informational. LS is operated by one
+            // administrator, so an older form must not lose a valid edit just
+            // because another endpoint (for example Log Level) advanced it.
+            // The repository CAS below still uses the revision read while this
+            // mutation owns the Job lock and therefore protects real races.
+            const { revision: _clientRevision, ...configPatch } = patch;
             const existing = current.config;
             holdInterfaces(existing);
             const merged = deepMerge(deepMerge(jobDefaults(), existing), configPatch);
@@ -678,7 +872,20 @@ class JobManager {
               if (databaseError) { done(databaseError); return; }
               try {
                 handle.assertOwned();
-                const document = this.repository.save(name, { ...config, name, revision: revision + 1 }, revision);
+                if (sameConfig(existing, config)) {
+                  this.syncIndex(current.document);
+                  this.inspect(name, (_unused, state) => done(null, this.view(
+                    name, existing, state, null, current.revision,
+                  )));
+                  return;
+                }
+                const nextRevision = current.revision + 1;
+                const document = this.repository.save(
+                  name,
+                  { ...config, name, revision: nextRevision },
+                  current.revision,
+                );
+                this.syncIndex(document);
                 this.inspect(name, (_unused, state) => done(null, this.view(
                   name, stripName(document), state, null, revisionOf(document),
                 )));
@@ -715,10 +922,6 @@ class JobManager {
           current = this.readValidated(name);
           holdInterfaces(current.config);
         } catch (readError) { done(readError); return; }
-        if (!Number.isSafeInteger(patch.revision) || patch.revision < 1) {
-          done(error('JOB_REVISION_REQUIRED', 'Log Level 변경에는 GET으로 받은 revision이 필요합니다.', { name }));
-          return;
-        }
         let config;
         try {
           config = this.validateConfig({
@@ -731,8 +934,33 @@ class JobManager {
           let document;
           try {
             handle.assertOwned();
-            document = this.repository.save(name, { ...config, name, revision: patch.revision + 1 }, patch.revision);
-            this.lsRuntime.snapshot();
+            if (sameConfig(current.config, config)) {
+              this.syncIndex(current.document);
+              const completeUnchanged = () => done(
+                null,
+                this.view(name, current.config, before, null, current.revision),
+              );
+              // A previous hot-apply may have saved the requested level and
+              // then failed to notify the running collector. Retrying the same
+              // level must therefore re-send refresh-log even though there is
+              // no JSON/revision change to persist.
+              if (before.controllerState !== 'RUNNING') { completeUnchanged(); return; }
+              this.lsRuntime.refreshLog(name, (controlError) => {
+                if (controlError) {
+                  done(controllerFailure('CONTROLLER_OPERATION_FAILED', 'LS Job Log Level을 즉시 반영하지 못했습니다.', name, 'RUNNING', controlError.message));
+                  return;
+                }
+                completeUnchanged();
+              });
+              return;
+            }
+            const nextRevision = current.revision + 1;
+            document = this.repository.save(
+              name,
+              { ...config, name, revision: nextRevision },
+              current.revision,
+            );
+            this.syncIndex(document);
           } catch (saveError) { done(saveError); return; }
           const complete = () => this.inspect(name, (_ignored, after) => done(
             after.statusError,
@@ -759,7 +987,7 @@ class JobManager {
     this.callback(callback, () => {
       this.validateName(name);
       this.withMutation(name, callback, (handle, done) => {
-        try { this.readValidated(name); } catch (readError) { done(readError); return; }
+        try { this.readIndex(name); } catch (readError) { done(readError); return; }
         try { handle.assertOwned(); } catch (lockError) { done(lockError); return; }
         this.lsRuntime.clearOverrun(name, (controlError) => {
           if (controlError) {
@@ -1045,14 +1273,36 @@ class JobManager {
         let config;
         try { holdInterfaces(payload.config); config = this.validateConfig(payload.config); }
         catch (validationError) { done(validationError); return; }
+        try {
+          handle.assertOwned();
+          const hasDocument = this.repository.exists(name);
+          const hasIndex = this.indexRepository.exists(name);
+          if (hasDocument && hasIndex) {
+            done(error('JOB_ALREADY_EXISTS', '같은 이름의 Job이 이미 있습니다.', { name }));
+            return;
+          }
+          // A full document without its final registration marker is either an
+          // interrupted create/update or an unsupported pre-index Job. A new
+          // Create owns this name, so discard that invisible orphan first.
+          if (hasDocument) this.repository.discard(name);
+          if (hasIndex) this.indexRepository.remove(name);
+        } catch (cleanupError) { done(cleanupError); return; }
         this.database.ensure(config.database, this.databaseOptions(config), (databaseError) => {
           if (databaseError) { done(databaseError); return; }
           let document;
-          try { handle.assertOwned(); document = this.repository.create(name, config); this.lsRuntime.snapshot(); }
+          try {
+            handle.assertOwned();
+            document = this.repository.createAtomic(name, config);
+            this.indexRepository.write(document);
+            this.lsRuntime.syncConfig();
+          }
           catch (createError) { done(createError); return; }
           this.lsRuntime.install((installError) => {
             if (installError) {
-              try { this.repository.remove(name); this.lsRuntime.snapshot(); } catch (_) {}
+              try {
+                this.repository.discard(name);
+                this.indexRepository.remove(name);
+              } catch (_) {}
               done(controllerFailure('CONTROLLER_UNAVAILABLE', 'LS collector daemon을 설치하지 못했습니다.', name, 'NOT_INSTALLED', installError.message));
               return;
             }
@@ -1068,14 +1318,16 @@ class JobManager {
   installLs(name, callback) {
     this.callback(callback, () => {
       this.validateName(name);
-      this.withMutation(name, callback, (handle, done, holdInterfaces) => {
-        let current;
-        try { current = this.readValidated(name); holdInterfaces(current.config); this.lsRuntime.snapshot(); }
+      this.withMutation(name, callback, (handle, done) => {
+        let index;
+        try { index = this.readIndex(name); this.lsRuntime.syncConfig(); }
         catch (readError) { done(readError); return; }
         try { handle.assertOwned(); } catch (ownershipError) { done(ownershipError); return; }
         this.lsRuntime.install((installError) => {
           if (installError) { done(controllerFailure('CONTROLLER_UNAVAILABLE', 'LS collector daemon을 설치하지 못했습니다.', name, 'NOT_INSTALLED', installError.message)); return; }
-          this.inspect(name, (_unused, state) => done(state.statusError, this.view(name, current.config, state, null, current.revision)));
+          this.inspect(name, (_unused, state) => done(state.statusError, this.view(
+            name, this.configFromIndex(index), state, null, index.revision,
+          )));
         });
       });
     });
@@ -1084,26 +1336,19 @@ class JobManager {
   startLs(name, callback) {
     this.callback(callback, () => {
       this.validateName(name);
-      this.withMutation(name, callback, (handle, done, holdInterfaces) => {
-        let current;
-        try { current = this.readValidated(name); holdInterfaces(current.config); }
+      this.withMutation(name, callback, (handle, done) => {
+        let index;
+        try { index = this.readIndex(name); }
         catch (readError) { done(readError); return; }
-        this.inspect(name, (_unused, before) => {
-          if (before.statusError) { done(before.statusError); return; }
-          if (before.controllerState === 'RUNNING') { done(error('JOB_RUNNING', '실행 중인 Job은 시작할 수 없습니다.', { name })); return; }
-          this.validateDatabase(current.config, (databaseError) => {
-            if (databaseError) { done(databaseError); return; }
-            try { handle.assertOwned(); this.lsRuntime.snapshot(); } catch (snapshotError) { done(snapshotError); return; }
-            this.lsRuntime.ensureRunning((startError) => {
-              if (startError) { done(controllerFailure('CONTROLLER_UNAVAILABLE', 'LS collector daemon을 시작하지 못했습니다.', name, before.controllerState, startError.message)); return; }
-              this.lsRuntime.start(name, (controlError) => {
-                if (controlError) { done(controllerFailure('CONTROLLER_OPERATION_FAILED', 'LS Job 시작 제어에 실패했습니다.', name, 'STOPPED', controlError.message)); return; }
-                this.inspect(name, (_ignored, after) => {
-                  if (after.statusError || after.controllerState !== 'RUNNING') {
-                    done(after.statusError || controllerFailure('CONTROLLER_OPERATION_FAILED', 'LS Job 시작 상태를 확인하지 못했습니다.', name, after.controllerState, after.controllerDetail));
-                  } else done(null, this.view(name, current.config, after, null, current.revision));
-                });
-              });
+        try { handle.assertOwned(); } catch (ownershipError) { done(ownershipError); return; }
+        this.lsRuntime.ensureRunning((startError) => {
+          if (startError) { done(controllerFailure('CONTROLLER_UNAVAILABLE', 'LS collector daemon을 시작하지 못했습니다.', name, 'UNKNOWN', startError.message)); return; }
+          this.lsRuntime.start(name, (controlError) => {
+            if (controlError) { done(controllerFailure('CONTROLLER_OPERATION_FAILED', 'LS Job 시작 제어에 실패했습니다.', name, 'STOPPED', controlError.message)); return; }
+            this.inspect(name, (_ignored, after) => {
+              if (after.statusError || !['STARTING', 'RUNNING'].includes(after.controllerState)) {
+                done(after.statusError || controllerFailure('CONTROLLER_OPERATION_FAILED', 'LS Job 시작 상태를 확인하지 못했습니다.', name, after.controllerState, after.controllerDetail));
+              } else done(null, this.view(name, this.configFromIndex(index), after, null, index.revision));
             });
           });
         });
@@ -1115,16 +1360,14 @@ class JobManager {
     this.callback(callback, () => {
       this.validateName(name);
       this.withMutation(name, callback, (handle, done) => {
-        let current;
-        try { current = this.readValidated(name); } catch (readError) { done(readError); return; }
-        this.inspect(name, (_unused, before) => {
-          if (before.statusError) { done(before.statusError); return; }
-          if (before.controllerState !== 'RUNNING') { done(error('SERVICE_NOT_RUNNING', '실행 중인 LS Job만 멈출 수 있습니다.', { name })); return; }
-          try { handle.assertOwned(); } catch (ownershipError) { done(ownershipError); return; }
-          this.lsRuntime.stop(name, (stopError) => {
-            if (stopError) { done(controllerFailure('CONTROLLER_OPERATION_FAILED', 'LS Job 중지 제어에 실패했습니다.', name, 'RUNNING', stopError.message)); return; }
-            this.inspect(name, (_ignored, after) => done(after.statusError, this.view(name, current.config, after, null, current.revision)));
-          });
+        let index;
+        try { index = this.readIndex(name); } catch (readError) { done(readError); return; }
+        try { handle.assertOwned(); } catch (ownershipError) { done(ownershipError); return; }
+        this.lsRuntime.stop(name, (stopError) => {
+          if (stopError) { done(controllerFailure('CONTROLLER_OPERATION_FAILED', 'LS Job 중지 제어에 실패했습니다.', name, 'RUNNING', stopError.message)); return; }
+          this.inspect(name, (_ignored, after) => done(after.statusError, this.view(
+            name, this.configFromIndex(index), after, null, index.revision,
+          )));
         });
       });
     });
@@ -1134,13 +1377,13 @@ class JobManager {
     this.callback(callback, () => {
       this.validateName(name);
       this.withMutation(name, callback, (handle, done) => {
-        let current;
-        try { current = this.readValidated(name); } catch (readError) { done(readError); return; }
+        let index;
+        try { index = this.readIndex(name); } catch (readError) { done(readError); return; }
         this.inspect(name, (_unused, before) => {
           if (before.statusError) { done(before.statusError); return; }
           // Package stop only stops the one daemon after all Job locks have
           // been acquired. Keep logical active state for package start.
-          try { handle.assertOwned(); done(null, this.view(name, current.config, before, null, current.revision)); }
+          try { handle.assertOwned(); done(null, this.view(name, this.configFromIndex(index), before, null, index.revision)); }
           catch (ownershipError) { done(ownershipError); }
         });
       });
@@ -1151,15 +1394,23 @@ class JobManager {
     this.callback(callback, () => {
       this.validateName(name);
       this.withMutation(name, callback, (handle, done) => {
-        this.guardMutable(name, (guardError) => {
-          if (guardError) { done(guardError); return; }
+        let index;
+        try { index = this.readIndex(name); } catch (readError) { done(readError); return; }
+        this.inspect(name, (_unused, state) => {
+          if (state.statusError) { done(state.statusError); return; }
+          if (['RUNNING', 'STARTING', 'STOPPING'].includes(state.controllerState)) {
+            done(error('JOB_RUNNING', '실행 중이거나 전환 중인 Job은 바꾸거나 지울 수 없습니다.', {
+              name, controllerState: state.controllerState,
+            }));
+            return;
+          }
           try {
             handle.assertOwned();
-            const removed = this.repository.remove(name);
-            this.lsRuntime.snapshot();
+            this.repository.discard(name);
+            this.indexRepository.remove(name);
             // The daemon belongs to the package, not to its last logical Job.
             // Package uninstall owns controller unregistering.
-            done(null, removed);
+            done(null, { name, revision: index.revision });
           } catch (deleteError) { done(deleteError); }
         });
       });
@@ -1192,6 +1443,10 @@ class JobManager {
   }
 
   lastRun(name, callback) {
+    if (this.isLs) {
+      this.status(name, (statusError, value) => callback(statusError, value && { lastRun: value.lastRun }));
+      return;
+    }
     let current;
     try { current = this.readValidated(name); } catch (readError) { callback(readError); return; }
     this.inspect(name, (_unused, state) => {

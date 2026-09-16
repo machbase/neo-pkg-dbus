@@ -46,14 +46,10 @@ async function run() {
     assert.equal(fs.readdirSync(path.join(root, 'conf.d', 'db-servers')).includes('.race-db.lock'), false);
 
     fs.writeFileSync(path.join(root, 'conf.d', 'db-servers', '.locked-db.lock'), JSON.stringify({ createdAt: 'old' }));
-    await assert.rejects(call(store, 'create', {
+    const legacyLockCreated = await call(store, 'create', {
       name: 'locked-db', host: 'localhost', port: 5656, user: 'sys', password: 'locked-secret',
-    }), (failure) => {
-      assert.equal(failure.code, 'DB_SERVER_CREATE_LOCKED');
-      assert.equal(failure.details.staleLockRequiresManualReview, true);
-      assert.equal(JSON.stringify(failure).includes('locked-secret'), false);
-      return true;
     });
+    assert.equal(legacyLockCreated.name, 'locked-db', 'obsolete create-only lock files must not block the leased operation lock');
     assert.equal(fs.existsSync(path.join(root, 'conf.d', 'db-servers', '.locked-db.lock')), true);
     const created = await call(store, 'create', {
       name: 'local-db', host: '127.0.0.1', port: 5656, user: 'sys', password: 'secret',
@@ -69,7 +65,7 @@ async function run() {
     assert.deepEqual(publicServers.find((server) => server.name === 'local-db'), created);
     assert.deepEqual(publicServers.find((server) => server.name === 'localhost'), {
       schemaVersion: 1, name: 'localhost', host: '127.0.0.1', port: 5656, user: 'sys', hasPassword: true,
-      defaultTable: 'DEFAULT_DBUS', valueColumn: '', stringValueColumn: '',
+      defaultTable: 'DEFAULT_DBUS', valueColumn: 'VALUE', stringValueColumn: '',
     });
     assert.deepEqual(await call(store, 'setDefaultTableColumns', 'localhost', 'default_dbus', 'value', ''), {
       schemaVersion: 1, name: 'localhost', host: '127.0.0.1', port: 5656, user: 'sys', hasPassword: true,
@@ -87,6 +83,19 @@ async function run() {
       schemaVersion: 1, name: 'local-db', host: '127.0.0.1', port: 5656, user: 'sys', password: 'secret',
       defaultTable: '', valueColumn: '', stringValueColumn: '',
     });
+
+    const tableOnly = await call(store, 'create', {
+      name: 'table-only', host: '127.0.0.1', port: 5656, user: 'sys', password: 'secret',
+      defaultTable: 'tag_data',
+    });
+    assert.equal(tableOnly.defaultTable, 'TAG_DATA');
+    assert.equal(tableOnly.valueColumn, 'VALUE');
+
+    fs.writeFileSync(path.join(root, 'conf.d', 'db-servers', 'legacy.json'), JSON.stringify({
+      schemaVersion: 1, name: 'legacy', host: '127.0.0.1', port: 5656, user: 'sys', password: 'secret',
+      defaultTable: 'OLD_TAG', valueColumn: '', stringValueColumn: '',
+    }));
+    assert.equal((await call(store, 'getPublic', 'legacy')).valueColumn, 'VALUE');
     assert.equal(fs.readdirSync(path.join(root, 'conf.d', 'db-servers')).some((name) => name.includes('.tmp-')), false);
 
     await rejectsCode(call(store, 'update', 'local-db', {

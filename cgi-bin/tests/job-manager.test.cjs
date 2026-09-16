@@ -323,7 +323,7 @@ async function testHappyLifecycleAndProjection() {
   }
 }
 
-async function testUpdateRejectsStaleRevision() {
+async function testUpdateUsesServerRevisionAndAcceptsStaleClientRevision() {
   const root = setupRoot('neo-job-manager-revision-');
   try {
     const manager = managerFor(root, fakeServiceModule(), fakeDatabase());
@@ -336,14 +336,21 @@ async function testUpdateRejectsStaleRevision() {
     });
     assert.equal(updated.revision, 2, '성공한 수정은 revision을 하나 올려야 합니다.');
 
-    await rejectsCode(call(manager, 'update', 'alpha', {
+    const staleUpdated = await call(manager, 'update', 'alpha', {
       revision: created.revision,
       schedule: { intervalMs: 3000 },
-    }), 'JOB_CONFLICT');
+    });
+    assert.equal(staleUpdated.revision, 3, '서버의 최신 revision 다음 번호를 발급해야 합니다.');
 
     const current = await call(manager, 'get', 'alpha');
-    assert.equal(current.revision, 2);
-    assert.equal(current.config.schedule.intervalMs, 2000, '오래된 수정은 최신 설정을 덮어쓰면 안 됩니다.');
+    assert.equal(current.revision, 3);
+    assert.equal(current.config.schedule.intervalMs, 3000, '낮은 client revision의 유효한 수정도 저장해야 합니다.');
+
+    const duplicate = await call(manager, 'update', 'alpha', {
+      revision: created.revision,
+      schedule: { intervalMs: 3000 },
+    });
+    assert.equal(duplicate.revision, 3, '동일한 재요청은 revision을 증가시키지 않아야 합니다.');
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -592,14 +599,17 @@ async function testCreateAndUpdateProvisionDatabaseTable() {
     const created = await call(manager, 'create', { name: 'alpha', config: numericConfig });
     assert.deepEqual(database.ensureCalls, [{
       database: numericConfig.database,
-      options: { needsStringValueColumn: false },
+      options: { needsStringValueColumn: false, fractionalValuePossible: false },
     }], '생성은 Job 저장 전에 필요한 Table 구조를 전달해야 합니다.');
     await call(manager, 'update', 'alpha', {
       revision: created.revision,
       methodCalls: [jobConfig().methodCalls[0]],
     });
     assert.equal(database.ensureCalls.length, 2, '정지된 Job 수정도 Table을 보장해야 합니다.');
-    assert.deepEqual(database.ensureCalls[1].options, { needsStringValueColumn: true });
+    assert.deepEqual(database.ensureCalls[1].options, {
+      needsStringValueColumn: true,
+      fractionalValuePossible: false,
+    });
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -1009,7 +1019,7 @@ async function testLsLogLevelHotApplyDoesNotStopLogicalJob() {
       inspect(_name, callback) {
         callback(null, { controllerState: 'RUNNING', controllerDetail: null, statusError: null });
       },
-      snapshot() { calls.push('snapshot'); },
+      syncConfig() { calls.push('syncConfig'); },
       refreshLog(name, callback) { calls.push(['refreshLog', name]); callback(null); },
     };
     const manager = new JobManager({
@@ -1023,15 +1033,104 @@ async function testLsLogLevelHotApplyDoesNotStopLogicalJob() {
       lsRuntime,
       databaseAdapter: fakeDatabase(),
     });
-    manager.repository.create('alpha', jobConfig());
+    const created = manager.repository.create('alpha', jobConfig());
+    manager.indexRepository.write(created);
 
     const result = await call(manager, 'updateLog', 'alpha', { revision: 1, level: 'warn' });
     assert.equal(result.running, true);
     assert.equal(result.revision, 2);
     assert.equal(result.config.log.level, 'warn');
-    assert.deepEqual(calls, ['snapshot', ['refreshLog', 'alpha']]);
+    assert.deepEqual(calls, [['refreshLog', 'alpha']]);
     assert.equal(manager.repository.read('alpha').log.level, 'warn');
     assert.equal(manager.repository.read('alpha').revision, 2);
+
+    const duplicate = await call(manager, 'updateLog', 'alpha', { revision: 1, level: 'warn' });
+    assert.equal(duplicate.revision, 2, '동일한 Log Level 재요청은 revision을 증가시키지 않아야 합니다.');
+    assert.deepEqual(calls, [['refreshLog', 'alpha'], ['refreshLog', 'alpha']],
+      '동일한 Log Level 재요청도 이전 control 실패로 생긴 설정/daemon 불일치를 복구해야 합니다.');
+
+    const stale = await call(manager, 'updateLog', 'alpha', { revision: 1, level: 'error' });
+    assert.equal(stale.revision, 3, '낮은 client revision이어도 서버 revision을 기준으로 저장해야 합니다.');
+    assert.equal(stale.config.log.level, 'error');
+    assert.equal(manager.repository.read('alpha').revision, 3);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
+async function testLsUpdateKeepsRegistrationAndRepairsStaleIndex() {
+  const root = setupRoot('neo-ls-update-index-recovery-');
+  try {
+    const lsInterface = JSON.parse(fs.readFileSync(
+      path.join(__dirname, '..', '..', 'products', 'ls', 'interfaces', 'ls-plc-device.json'),
+      'utf8',
+    ));
+    writeJson(path.join(root, 'conf.d', 'interfaces', 'ls-plc-device.json'), lsInterface);
+    const config = jobConfig({
+      methodCalls: [{
+        id: 'read-a', name: 'Read A', interfaceId: 'ls-plc-device', methodId: 'get-device-data',
+        inputs: { DataCount: 1, DeviceString: '%MB0' },
+        outputSelections: [{
+          id: 'return-data', sourceIndex: 0, interpretation: 'json', selector: '/data',
+          valueType: 'array', elementType: 'numeric',
+          tags: [{ name: 'MB0', bias: 0, multiplier: 1, transformOrder: ['bias', 'multiplier'], signed: false }],
+        }],
+      }],
+    });
+    const lsRuntime = {
+      inspect(_name, callback) {
+        callback(null, { controllerState: 'STOPPED', controllerDetail: null, statusError: null });
+      },
+    };
+    const manager = new JobManager({
+      cgiRoot: root,
+      productPolicy: {
+        target: 'ls',
+        minimumIntervalMs: 1,
+        validationLimits: { maxGeneratedTagsPerCall: 65535, maxBufferedRowsPerCycle: 65535 },
+        validateProductConfig(config) { return config; },
+      },
+      lsRuntime,
+      databaseAdapter: fakeDatabase(),
+      serverStore: {
+        get(name, callback) {
+          callback(null, {
+            name, defaultTable: 'TAG', valueColumn: 'VALUE', stringValueColumn: 'STR_VALUE',
+          });
+        },
+      },
+    });
+    manager.settings = () => ({ defaults: { database: { server: 'local-db' } }, limits: {} });
+    const created = manager.repository.create('alpha', config);
+    manager.indexRepository.write(created);
+
+    const originalWrite = manager.indexRepository.write.bind(manager.indexRepository);
+    let failNextWrite = true;
+    manager.indexRepository.write = (document) => {
+      if (failNextWrite) {
+        failNextWrite = false;
+        throw new Error('simulated interrupted index write');
+      }
+      return originalWrite(document);
+    };
+
+    await assert.rejects(
+      call(manager, 'update', 'alpha', { revision: 1, schedule: { intervalMs: 2000 } }),
+      /simulated interrupted index write/,
+    );
+    assert.equal(manager.repository.read('alpha').revision, 2,
+      'canonical Job 저장은 완료된 상태를 재현해야 합니다.');
+    assert.equal(manager.indexRepository.read('alpha').revision, 1,
+      '실패한 index 갱신이 기존 등록 marker를 지우면 안 됩니다.');
+
+    const visible = await call(manager, 'get', 'alpha');
+    assert.equal(visible.revision, 2, 'stale index가 남아도 Job 상세는 유실되지 않아야 합니다.');
+    assert.equal(visible.config.schedule.intervalMs, 2000);
+
+    const retried = await call(manager, 'update', 'alpha', { revision: 1, schedule: { intervalMs: 2000 } });
+    assert.equal(retried.revision, 2, '동일 저장 재시도는 canonical revision을 다시 올리지 않아야 합니다.');
+    assert.equal(manager.indexRepository.read('alpha').revision, 2,
+      '동일 저장 재시도는 stale index를 canonical Job과 동기화해야 합니다.');
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -1051,7 +1150,8 @@ async function testLsClearOverrunUsesLogicalCollectorControl() {
       lsRuntime,
       databaseAdapter: fakeDatabase(),
     });
-    manager.repository.create('alpha', jobConfig());
+    const created = manager.repository.create('alpha', jobConfig());
+    manager.indexRepository.write(created);
 
     const result = await call(manager, 'clearOverrun', 'alpha');
     assert.deepEqual(calls, [['clearOverrun', 'alpha'], ['lastRun', 'alpha']]);
@@ -1064,7 +1164,7 @@ async function testLsClearOverrunUsesLogicalCollectorControl() {
 
 async function run() {
   await testHappyLifecycleAndProjection();
-  await testUpdateRejectsStaleRevision();
+  await testUpdateUsesServerRevisionAndAcceptsStaleClientRevision();
   testReleaseFailureStillCompletesMutationCallback();
   await testUpdateSerializesDeleteAndCreateAcrossManagers();
   await testUpdateSerializesStartAcrossManagers();
@@ -1084,6 +1184,7 @@ async function run() {
   await testPackageUninstallFencesDeletedAndNewJobNamesUntilCompletion();
   await testPackageStopHoldsEarlierJobLockUntilWholeLifecycleCompletes();
   await testLsLogLevelHotApplyDoesNotStopLogicalJob();
+  await testLsUpdateKeepsRegistrationAndRepairsStaleIndex();
   await testLsClearOverrunUsesLogicalCollectorControl();
 
   const adapter = createControllerAdapter(fakeServiceModule());

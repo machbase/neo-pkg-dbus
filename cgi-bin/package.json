@@ -1,6 +1,6 @@
 {
   "name": "neo-pkg-dbus",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "CGI and jobs service for neo-pkg-dbus",
   "minServerVersion": "8.5.8"
 }

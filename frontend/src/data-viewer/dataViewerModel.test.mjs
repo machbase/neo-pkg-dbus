@@ -1338,6 +1338,7 @@ test("buildDataViewerEChartOption creates line chart options with data zoom", ()
     });
 
     assert.equal(option.backgroundColor, "#252525");
+    assert.deepEqual(option.color, ["#4fc3f7", "#ffd54f", "#81c784", "#ff6b6b", "#ba68c8", "#ff9f43", "#4dd0e1", "#f06292", "#dce775"]);
     assert.equal(option.grid.length, 2);
     assert.equal(option.xAxis.length, 3);
     assert.equal(option.yAxis.length, 3);
@@ -1347,6 +1348,10 @@ test("buildDataViewerEChartOption creates line chart options with data zoom", ()
     assert.equal(option.series[0].type, "line");
     assert.equal(option.series[0].id, "main-series-0");
     assert.equal(option.series[0].name, "sensor.a");
+    assert.equal(option.series[0].lineStyle.color, "#4fc3f7");
+    assert.equal(option.series[0].lineStyle.width, 1.5);
+    assert.equal(option.yAxis[0].min, 9.95);
+    assert.equal(option.yAxis[0].max, 11.05);
     assert.equal(option.series[1].id, "navigator-series-0");
     assert.equal(option.series[1].yAxisIndex, 2);
     assert.equal(option.series[1].tooltip.show, false);
@@ -1354,6 +1359,20 @@ test("buildDataViewerEChartOption creates line chart options with data zoom", ()
     assert.deepEqual(option.dataZoom.map((zoom) => zoom.type), ["inside", "slider"]);
     assert.deepEqual(option.dataZoom.map((zoom) => zoom.xAxisIndex), [[1], [1]]);
     assert.equal(option.toolbox.show, false);
+});
+
+test("buildDataViewerEChartOption pads a constant series above and below its value", () => {
+    const at = Date.parse("2026-06-01T00:00:00Z");
+    const option = buildDataViewerEChartOption({
+        series: [{ name: "sensor.a", data: [[at, 100], [at + 1000, 100]] }],
+        timeRange: {
+            from: "2026-06-01T00:00:00.000Z",
+            to: "2026-06-01T00:01:00.000Z",
+        },
+    });
+
+    assert.equal(option.yAxis[0].min, 95);
+    assert.equal(option.yAxis[0].max, 105);
 });
 
 test("buildDataViewerEChartOption keeps the plot size independent of the tag count", () => {
@@ -1750,16 +1769,16 @@ test("formatTimeRangeLabel renders the pinned range in the selected time zone", 
     );
 });
 
-test("DEFAULT_DATA_VIEWER_TIME_RANGE is a bounded last-1-hour window", () => {
+test("DEFAULT_DATA_VIEWER_TIME_RANGE is a bounded last-10-minute window", () => {
     // Starting from an empty range leaves no bounded query window, so pagination has nothing to page against.
-    assert.deepEqual(DEFAULT_DATA_VIEWER_TIME_RANGE, { from: "now-1h", to: "now" });
+    assert.deepEqual(DEFAULT_DATA_VIEWER_TIME_RANGE, { from: "now-10m", to: "now" });
     assert.ok(DEFAULT_DATA_VIEWER_TIME_RANGE.from);
     assert.ok(DEFAULT_DATA_VIEWER_TIME_RANGE.to);
 });
 
-test("DEFAULT_DATA_VIEWER_TIME_RANGE resolves to a one hour window ending now", () => {
+test("DEFAULT_DATA_VIEWER_TIME_RANGE resolves to a ten minute window ending now", () => {
     const base = new Date("2026-06-01T12:00:00.000Z");
-    assert.equal(resolveTimeRangeInput(DEFAULT_DATA_VIEWER_TIME_RANGE.from, base, "from"), "2026-06-01T11:00:00.000Z");
+    assert.equal(resolveTimeRangeInput(DEFAULT_DATA_VIEWER_TIME_RANGE.from, base, "from"), "2026-06-01T11:50:00.000Z");
     assert.equal(resolveTimeRangeInput(DEFAULT_DATA_VIEWER_TIME_RANGE.to, base, "to"), "2026-06-01T12:00:00.001Z");
 });
 

@@ -87,6 +87,7 @@ export const api = {
   jobs: {
     list: (options) => request("/job/list", options),
     get: (name, options) => get("/job", { name }, options),
+    status: (name, options) => get("/job/status", { name }, options),
     create: (name, config, options) => send("POST", "/job", { name, config }, options),
     update: (name, patch, options) => send("PUT", named("/job", name), Object.fromEntries(Object.entries(patch).filter(([key]) => key !== "name")), options),
     updateLogLevel: (name, patch, options) => send("PUT", named("/job/log", name), patch, options),
