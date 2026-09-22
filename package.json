@@ -1,6 +1,6 @@
 {
   "name": "neo-pkg-dbus",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Machbase Neo D-Bus data collector package",
   "minServerVersion": "8.5.8",
   "scripts": {
