@@ -8,18 +8,40 @@ const test = require('node:test');
 const { createLsRuntime, runtimePaths, LS_SERVICE_NAME } = require('../src/collector/ls-runtime.js');
 const { ReferenceAnalyzer } = require('../src/profiles/references.js');
 const { externalPath: controlExternalPath } = require('../neo-dbus-control.js');
-const { externalPath: launcherExternalPath } = require('../neo-dbus-launcher.js');
+const {
+  daemonCommand,
+  externalPath: launcherExternalPath,
+} = require('../neo-dbus-launcher.js');
 
 function call(operation) {
   return new Promise((resolve, reject) => operation((error, value) => (error ? reject(error) : resolve(value))));
 }
 
-test('LS launcher와 control은 CGI·service 공통 /work mount를 외부 명령 경로로 사용한다', () => {
+test('LS launcher와 control은 JSH /work 경로를 host Neo 경로로 변환한다', () => {
   for (const externalPath of [controlExternalPath, launcherExternalPath]) {
-    assert.equal(externalPath('/work/public/neo-pkg-dbus/cgi-bin'), '/work/public/neo-pkg-dbus/cgi-bin');
+    assert.equal(
+      externalPath('/work/public/neo-pkg-dbus/cgi-bin', '/home/machbase/neo/machbase-neo'),
+      '/home/machbase/neo/public/neo-pkg-dbus/cgi-bin',
+      'host에서 직접 실행한 Neo는 물리 설치 디렉터리를 사용해야 한다.',
+    );
+    assert.equal(
+      externalPath('/work/public/neo-pkg-dbus/cgi-bin', '/work/machbase-neo'),
+      '/work/public/neo-pkg-dbus/cgi-bin',
+      '실제 /work에서 실행하는 컨테이너 배치는 동일한 물리 경로를 유지해야 한다.',
+    );
     assert.throws(() => externalPath('/data/public/neo-pkg-dbus/cgi-bin'), /unsupported JSH path/);
     assert.throws(() => externalPath('/work/public/../secret'), /unsupported JSH path/);
+    assert.throws(() => externalPath('/work/public/neo-pkg-dbus/cgi-bin', 'machbase-neo'), /host work root is unavailable/);
   }
+});
+
+test('LS launcher는 collector가 JSH 부모 종료를 감시하도록 parent PID를 전달한다', () => {
+  const command = daemonCommand('/home/machbase/neo/public/neo-pkg-dbus/cgi-bin', 4321);
+  assert.match(command, /neo-dbus-collector'/);
+  assert.match(command, /--root '\/home\/machbase\/neo\/public\/neo-pkg-dbus\/cgi-bin'/);
+  assert.match(command, /--parent-pid 4321$/);
+  assert.throws(() => daemonCommand('/work/public/neo-pkg-dbus/cgi-bin', 0), /invalid JSH process PID/);
+  assert.throws(() => daemonCommand('/work/public/neo-pkg-dbus/cgi-bin', '1; reboot'), /invalid JSH process PID/);
 });
 
 test('LS runtime은 password 없는 snapshot과 0600 secret을 분리하고 logical Job control을 호출한다', async (context) => {

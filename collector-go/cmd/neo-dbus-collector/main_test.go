@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -23,6 +24,61 @@ func TestNextAlignedUsesEpochBoundaries(t *testing.T) {
 	if got, want := nextAligned(base, time.Millisecond), time.Millisecond; got != want {
 		t.Fatalf("1ms delay=%s want %s", got, want)
 	}
+}
+
+func TestRunDaemonStopsWhenLauncherProcessExits(t *testing.T) {
+	root := t.TempDir()
+	conf := filepath.Join(root, "conf.d")
+	if err := os.MkdirAll(conf, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(conf, configFileName), []byte(`{"schemaVersion":2,"logging":{},"writer":{},"performance":{}}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	launcher := exec.Command(os.Args[0], "-test.run=^TestLauncherHelperProcess$")
+	launcher.Env = append(os.Environ(), "DBUS_LAUNCHER_HELPER=1")
+	if err := launcher.Start(); err != nil {
+		t.Fatalf("start launcher helper: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- runDaemon(root, launcher.Process.Pid) }()
+	socket := filepath.Join(root, "data", socketFileName)
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if _, err := os.Stat(socket); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			_ = launcher.Process.Kill()
+			_ = launcher.Wait()
+			t.Fatal("collector control socket was not created")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if err := launcher.Process.Kill(); err != nil {
+		t.Fatalf("kill launcher helper: %v", err)
+	}
+	if err := launcher.Wait(); err == nil {
+		t.Fatal("launcher helper exited successfully after Kill, want signal error")
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("runDaemon: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("collector did not stop after launcher exited")
+	}
+}
+
+func TestLauncherHelperProcess(t *testing.T) {
+	if os.Getenv("DBUS_LAUNCHER_HELPER") != "1" {
+		return
+	}
+	select {}
 }
 
 func TestJobLogUsesExistingCGILogLocationAndLevel(t *testing.T) {
