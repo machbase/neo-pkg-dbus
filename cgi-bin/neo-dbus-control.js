@@ -6,16 +6,18 @@
 const path = require('path');
 const process = require('process');
 
-function externalPath(virtualPath) {
+function externalPath(virtualPath, executablePath) {
   const value = String(virtualPath || '');
   const relative = value.replace(/^\/work\/?/, '');
   if (!relative || relative === value || relative.split('/').includes('..')) {
     throw new Error(`unsupported JSH path: ${virtualPath}`);
   }
-  // `/work` is a Neo-provided mount and is visible to the shell spawned by
-  // JSH. Do not derive it from process.execPath: CGI and service JSH processes
-  // use different executable roots on the PLC.
-  return path.join('/work', relative);
+  // `/work` belongs to JSH's virtual filesystem. The external control process
+  // must use the corresponding host path so it reaches the daemon's physical
+  // Unix socket and configuration root.
+  const hostWorkRoot = path.dirname(String(executablePath || process.execPath || ''));
+  if (!hostWorkRoot || hostWorkRoot === '.') throw new Error('host work root is unavailable.');
+  return path.join(hostWorkRoot, relative);
 }
 
 function shellQuote(value) {

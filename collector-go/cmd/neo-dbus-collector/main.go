@@ -32,6 +32,7 @@ import (
 	"github.com/godbus/dbus/v5"
 	client "github.com/machbase/neo-client/v2"
 	"github.com/machbase/neo-client/v2/api"
+	"github.com/machbase/neo-pkg-dbus/collector-go/internal/parentwatch"
 )
 
 const (
@@ -309,6 +310,7 @@ type activeJob struct {
 func main() {
 	root := flag.String("root", "", "cgi-bin directory")
 	control := flag.Bool("control", false, "send one control command")
+	parentPID := flag.Int("parent-pid", 0, "exit gracefully when this parent process exits (default: disabled)")
 	flag.Parse()
 	if strings.TrimSpace(*root) == "" {
 		fatal(errors.New("--root is required"))
@@ -325,14 +327,51 @@ func main() {
 	if flag.NArg() != 0 {
 		fatal(errors.New("daemon accepts no positional arguments"))
 	}
-	if err := runDaemon(*root); err != nil {
+	if err := runDaemon(*root, *parentPID); err != nil {
 		fatal(err)
 	}
 }
 
 func fatal(err error) { fmt.Fprintln(os.Stderr, "neo-dbus-collector:", err); os.Exit(1) }
 
-func runDaemon(root string) error {
+func runDaemon(root string, parentPID int) (retErr error) {
+	if parentPID < 0 {
+		return fmt.Errorf("parent PID must not be negative: %d", parentPID)
+	}
+
+	parentContext, cancelParentMonitor := context.WithCancel(context.Background())
+	defer cancelParentMonitor()
+	var parentMonitor parentwatch.Monitor
+	var parentDone chan error
+	parentWaited := false
+	if parentPID > 0 {
+		var err error
+		parentMonitor, err = parentwatch.New(parentPID)
+		if err != nil {
+			return fmt.Errorf("monitor parent process: %w", err)
+		}
+		parentDone = make(chan error, 1)
+		go func() {
+			err := parentMonitor.Wait(parentContext)
+			parentDone <- err
+			if err == nil || !errors.Is(err, context.Canceled) {
+				cancelParentMonitor()
+			}
+		}()
+		defer func() {
+			cancelParentMonitor()
+			if !parentWaited {
+				waitErr := <-parentDone
+				if retErr == nil && waitErr != nil && !errors.Is(waitErr, context.Canceled) {
+					retErr = fmt.Errorf("monitor parent process: %w", waitErr)
+				}
+			}
+			if closeErr := parentMonitor.Close(); retErr == nil && closeErr != nil {
+				retErr = fmt.Errorf("close parent process monitor: %w", closeErr)
+			}
+		}()
+	}
+
 	writerPolicy, err := loadWriterPolicy(root)
 	if err != nil {
 		return err
@@ -362,9 +401,23 @@ func runDaemon(root string) error {
 	go d.serve(listener)
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
-	<-signals
+	defer signal.Stop(signals)
+	if parentDone == nil {
+		<-signals
+	} else {
+		select {
+		case <-signals:
+		case parentErr := <-parentDone:
+			parentWaited = true
+			if parentErr != nil && !errors.Is(parentErr, context.Canceled) {
+				retErr = fmt.Errorf("monitor parent process: %w", parentErr)
+			} else {
+				fmt.Fprintf(os.Stderr, "neo-dbus-collector: parent process %d exited, shutting down\n", parentPID)
+			}
+		}
+	}
 	d.shutdown()
-	return nil
+	return retErr
 }
 
 func (d *daemon) restoreActiveJobs() error {
