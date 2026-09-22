@@ -380,6 +380,19 @@ function defaultCgiRoot() {
   return path.join(root, 'cgi-bin');
 }
 
+// `servicectl install --enable` starts the service immediately on current Neo
+// builds, while the package manager invokes the package `start` script next.
+// Some controllers accept that second start and create another launcher. Make
+// every explicit start converge to one native collector before starting it.
+function restartLsCollector(exec, stopNative, serviceName, print) {
+  stopNative();
+  const stopResult = exec('servicectl', 'stop', serviceName);
+  if (stopResult !== 0) print('[WARN] LS collector service was already stopped or unavailable.');
+  if (exec('servicectl', 'start', serviceName) !== 0) {
+    throw new Error('LS collector service start failed.');
+  }
+}
+
 // `pkg run` executes a package script in a short-lived child JSH engine.  The
 // service module is callback based, so an LS package lifecycle must use the
 // synchronous servicectl command: otherwise that child can exit before the
@@ -414,7 +427,7 @@ function runLsPackageAction(action) {
     }
   } else if (action === 'start') {
     ensureLsCollectorSnapshot(cgiRoot);
-    if (exec('servicectl', 'start', serviceName) !== 0) throw new Error('LS collector service start failed.');
+    restartLsCollector(exec, stopNative, serviceName, defaultPrint);
   } else if (action === 'stop') {
     stopNative();
     const result = exec('servicectl', 'stop', serviceName);
@@ -444,6 +457,7 @@ module.exports = {
   createLifecycle,
   defaultCgiRoot,
   ensureLsCollectorExecutable,
+  restartLsCollector,
   runLsPackageAction,
   install(callback) { if (callback) defaultLifecycle().install(callback); else packageAction('install'); },
   start(callback) { if (callback) defaultLifecycle().start(callback); else packageAction('start'); },

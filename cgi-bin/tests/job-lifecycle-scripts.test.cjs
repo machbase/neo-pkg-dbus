@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const { jobConfig, setupRoot, writeJson } = require('./job-fixture.cjs');
-const { createLifecycle } = require('../../scripts/lifecycle.js');
+const { createLifecycle, restartLsCollector } = require('../../scripts/lifecycle.js');
 const { loadCollectorEntry, runCollectorEntry } = require('../neo-collector.js');
 
 function lifecycleManager(initial) {
@@ -50,6 +50,33 @@ function lifecycleManager(initial) {
 
 function invoke(action) {
   return new Promise((resolve, reject) => action((error, value) => (error ? reject(error) : resolve(value))));
+}
+
+function testLsExplicitStartConvergesToOneService() {
+  const calls = [];
+  const printed = [];
+  restartLsCollector(
+    (...args) => { calls.push(args); return 0; },
+    () => { calls.push(['stopNative']); },
+    '_dbu_collector',
+    (message) => printed.push(message),
+  );
+  assert.deepEqual(calls, [
+    ['stopNative'],
+    ['servicectl', 'stop', '_dbu_collector'],
+    ['servicectl', 'start', '_dbu_collector'],
+  ]);
+  assert.deepEqual(printed, []);
+
+  calls.length = 0;
+  restartLsCollector(
+    (...args) => { calls.push(args); return args[1] === 'stop' ? 1 : 0; },
+    () => { calls.push(['stopNative']); },
+    '_dbu_collector',
+    (message) => printed.push(message),
+  );
+  assert.match(printed.at(-1), /already stopped or unavailable/);
+  assert.deepEqual(calls.at(-1), ['servicectl', 'start', '_dbu_collector']);
 }
 
 async function testPackageStopPreservesJobConflict(root) {
@@ -252,6 +279,7 @@ async function testLsPackageLifecycleUsesOneDaemonAndDoesNotReplayJobStart(root)
 async function run() {
   const root = setupRoot('neo-job-scripts-');
   try {
+    testLsExplicitStartConvergesToOneService();
     await testUninstallPreservesJobConflicts(root);
     await testPackageStopPreservesJobConflict(root);
     await testLifecycleAcquireConflictAggregatesAndRecovers(root);
