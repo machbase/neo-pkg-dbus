@@ -33,6 +33,10 @@ function run() {
 
     const valid = validateJobConfig(jobConfig(), { interfaceStore: interfaces, limits });
     assert.equal(valid.methodCalls.length, 1);
+    assert.equal(valid.execution.test, false);
+    assert.equal(validateJobConfig(jobConfig({ execution: { ...jobConfig().execution, test: true } }), {
+      interfaceStore: interfaces, limits,
+    }).execution.test, true);
     assert.notStrictEqual(valid, jobConfig());
     assert.equal(validateJobConfig(jobConfig({
       database: { ...jobConfig().database, table: 'lower_case_table' },
@@ -40,6 +44,10 @@ function run() {
     assert.deepEqual(valid.methodCalls[0].tags[0], {
       name: '%MB3', bias: 0, multiplier: 1, signed: false,
     });
+    const converted = validateJobConfig(jobConfig({
+      methodCalls: [methodCall({ tags: methodCall().tags.map((tag) => ({ ...tag, conversion: 'DWORD2REAL' })) })],
+    }), { interfaceStore: interfaces, limits });
+    assert.equal(converted.methodCalls[0].tags[0].conversion, 'DWORD2REAL');
     const legacyMbTag = { ...methodCall().tags[0], calcOrder: 'mb' };
     assert.deepEqual(validateJobConfig(jobConfig({
       methodCalls: [methodCall({ tags: [legacyMbTag] })],
@@ -111,6 +119,7 @@ function run() {
       jobConfig({ retry: { initialDelayMs: 30000, maximumDelayMs: 5000, multiplier: 2 } }),
       jobConfig({ execution: { savePolicy: 'sometimes', onMethodError: 'stop' } }),
       jobConfig({ execution: { savePolicy: 'perMethod', onMethodError: 'continue' } }),
+      jobConfig({ execution: { savePolicy: 'perMethod', onMethodError: 'stop', test: 'true' } }),
       jobConfig({ database: { ...jobConfig().database, server: '../secret' } }),
     ];
     badConfigs.forEach((config) => assertCode(

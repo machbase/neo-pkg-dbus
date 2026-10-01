@@ -6,6 +6,11 @@ const { loadSettings } = require('../config/settings-loader.js');
 const { loadProductPolicy } = require('../config/product-policy.js');
 const { resolveIntervalPolicy } = require('../ls/interval-policy.js');
 const { createDatabaseValidationAdapter } = require('../db/validation-adapter.js');
+const {
+  DATABASE_PROFILE_LOCK_NAME,
+  createDatabaseProfileOperationLock,
+  databaseProfileConflict,
+} = require('../db/profile-operation-lock.js');
 const { jobMayProduceFractionalValue, jobNeedsStringValueColumn } = require('../output/storage-policy.js');
 const { InterfaceStore } = require('../interfaces/store.js');
 const { profileLockKey: interfaceLockKey } = require('../config/profile-lock-key.js');
@@ -115,6 +120,8 @@ class JobManager {
     this.operationLock = settings.operationLock || createJobOperationLock({
       directory: path.join(this.cgiRoot, 'conf.d', '.job-operation-locks'),
     });
+    this.databaseProfileLock = this.isLs ? (settings.databaseProfileLock
+      || createDatabaseProfileOperationLock({ cgiRoot: this.cgiRoot })) : null;
     this.packageLifecycleLock = settings.packageLifecycleLock || createJobOperationLock({
       directory: path.join(this.cgiRoot, 'conf.d', '.package-lifecycle-locks'),
     });
@@ -168,6 +175,14 @@ class JobManager {
 
   validateDatabase(config, callback) {
     if (!this.isLs) { this.database.validate(config.database, callback); return; }
+    this.applyLsDatabaseProfile(config, (profileError) => {
+      if (profileError) { callback(profileError); return; }
+      this.database.validate(config.database, callback);
+    });
+  }
+
+  applyLsDatabaseProfile(config, callback) {
+    if (!this.isLs) { callback(null); return; }
     this.serverStore.get(config.database.server, (serverError, server) => {
       if (serverError) { callback(serverError); return; }
       if (!server) { callback(error('DB_SERVER_NOT_FOUND', '등록 DB server를 찾을 수 없습니다.', { server: config.database.server })); return; }
@@ -180,7 +195,22 @@ class JobManager {
         valueColumn: server.valueColumn || config.database.valueColumn,
         stringValueColumn: server.stringValueColumn || config.database.stringValueColumn,
       };
-      this.database.validate(config.database, callback);
+      // Product normalization is repeated after resolving the shared LS
+      // profile because its effective table can differ from the stale table in
+      // a Job document. Internal TEST input must never survive that mismatch.
+      if (typeof this.productPolicy.normalizeTestMode === 'function') {
+        this.productPolicy.normalizeTestMode(config);
+      }
+      callback(null);
+    });
+  }
+
+  ensureDatabase(config, callback) {
+    const ensure = () => this.database.ensure(config.database, this.databaseOptions(config), callback);
+    if (!this.isLs) { ensure(); return; }
+    this.applyLsDatabaseProfile(config, (profileError) => {
+      if (profileError) { callback(profileError); return; }
+      ensure();
     });
   }
 
@@ -724,7 +754,7 @@ class JobManager {
             }));
             return;
           }
-          this.database.ensure(config.database, this.databaseOptions(config), (databaseError) => {
+          this.ensureDatabase(config, (databaseError) => {
             if (databaseError) { done(databaseError); return; }
             let document;
             const discardConfig = (failure) => {
@@ -868,7 +898,7 @@ class JobManager {
             const merged = deepMerge(deepMerge(jobDefaults(), existing), configPatch);
             holdInterfaces(merged);
             const config = this.validateConfig(merged);
-            this.database.ensure(config.database, this.databaseOptions(config), (databaseError) => {
+            this.ensureDatabase(config, (databaseError) => {
               if (databaseError) { done(databaseError); return; }
               try {
                 handle.assertOwned();
@@ -1287,7 +1317,7 @@ class JobManager {
           if (hasDocument) this.repository.discard(name);
           if (hasIndex) this.indexRepository.remove(name);
         } catch (cleanupError) { done(cleanupError); return; }
-        this.database.ensure(config.database, this.databaseOptions(config), (databaseError) => {
+        this.ensureDatabase(config, (databaseError) => {
           if (databaseError) { done(databaseError); return; }
           let document;
           try {
@@ -1336,21 +1366,69 @@ class JobManager {
   startLs(name, callback) {
     this.callback(callback, () => {
       this.validateName(name);
-      this.withMutation(name, callback, (handle, done) => {
+      let profileHandle;
+      try {
+        profileHandle = this.databaseProfileLock.acquire(DATABASE_PROFILE_LOCK_NAME);
+      } catch (lockError) {
+        callback(lockError && lockError.code === 'JOB_CONFLICT'
+          ? databaseProfileConflict('start', name) : lockError);
+        return;
+      }
+      let profileFinished = false;
+      const finishStart = (failure, value) => {
+        if (profileFinished) return;
+        profileFinished = true;
+        let releaseError = null;
+        try { profileHandle.release(); } catch (cleanupError) { releaseError = cleanupError; }
+        if (failure && releaseError && (typeof failure === 'object' || typeof failure === 'function')) {
+          failure.cleanupError = releaseError;
+        }
+        callback(failure || releaseError, value);
+      };
+      this.withMutation(name, finishStart, (handle, done) => {
         let index;
         try { index = this.readIndex(name); }
         catch (readError) { done(readError); return; }
-        try { handle.assertOwned(); } catch (ownershipError) { done(ownershipError); return; }
-        this.lsRuntime.ensureRunning((startError) => {
-          if (startError) { done(controllerFailure('CONTROLLER_UNAVAILABLE', 'LS collector daemon을 시작하지 못했습니다.', name, 'UNKNOWN', startError.message)); return; }
-          this.lsRuntime.start(name, (controlError) => {
-            if (controlError) { done(controllerFailure('CONTROLLER_OPERATION_FAILED', 'LS Job 시작 제어에 실패했습니다.', name, 'STOPPED', controlError.message)); return; }
-            this.inspect(name, (_ignored, after) => {
-              if (after.statusError || !['STARTING', 'RUNNING'].includes(after.controllerState)) {
-                done(after.statusError || controllerFailure('CONTROLLER_OPERATION_FAILED', 'LS Job 시작 상태를 확인하지 못했습니다.', name, after.controllerState, after.controllerDetail));
-              } else done(null, this.view(name, this.configFromIndex(index), after, null, index.revision));
+        const startRuntime = () => {
+          try { handle.assertOwned(); } catch (ownershipError) { done(ownershipError); return; }
+          this.lsRuntime.ensureRunning((startError) => {
+            if (startError) { done(controllerFailure('CONTROLLER_UNAVAILABLE', 'LS collector daemon을 시작하지 못했습니다.', name, 'UNKNOWN', startError.message)); return; }
+            this.lsRuntime.start(name, (controlError) => {
+              if (controlError) { done(controllerFailure('CONTROLLER_OPERATION_FAILED', 'LS Job 시작 제어에 실패했습니다.', name, 'STOPPED', controlError.message)); return; }
+              this.inspect(name, (_ignored, after) => {
+                if (after.statusError || !['STARTING', 'RUNNING'].includes(after.controllerState)) {
+                  done(after.statusError || controllerFailure('CONTROLLER_OPERATION_FAILED', 'LS Job 시작 상태를 확인하지 못했습니다.', name, after.controllerState, after.controllerDetail));
+                } else done(null, this.view(name, this.configFromIndex(index), after, null, index.revision));
+              });
             });
           });
+        };
+        // Normal Jobs keep the original fast start path. A TEST-marked Job is
+        // rechecked against the current shared database profile at every start;
+        // if the table changed, persist false before the Go daemon can see it.
+        // Returning to the benchmark table never restores true automatically.
+        if (index.execution.test !== true) { startRuntime(); return; }
+        let current;
+        try { current = this.readValidated(name); }
+        catch (readError) { done(readError); return; }
+        const effective = deepMerge({}, current.config);
+        this.applyLsDatabaseProfile(effective, (profileError) => {
+          if (profileError) { done(profileError); return; }
+          if (effective.execution.test === true) { startRuntime(); return; }
+          try {
+            handle.assertOwned();
+            const nextConfig = {
+              ...current.config,
+              execution: { ...current.config.execution, test: false },
+            };
+            const document = this.repository.save(
+              name,
+              { ...nextConfig, name, revision: current.revision + 1 },
+              current.revision,
+            );
+            index = this.syncIndex(document);
+          } catch (saveError) { done(saveError); return; }
+          startRuntime();
         });
       });
     });

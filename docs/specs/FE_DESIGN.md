@@ -178,6 +178,8 @@ Main의 DB Server 관리 화면은 등록 DB Server를 목록으로 보여 주�
 
 Job form은 먼저 `GET /db/server/list`로 등록 서버를 고른다. 선택 후 `GET /db/table/list?server=...` 후보에서 Table을 고르거나 직접 입력한다. 목록에 없는 Table은 별도 `POST /db/table/create` 요청을 보내지 않고 Job Create/Save 요청에서 Output Mapping에 맞춰 자동 생성한다. 숫자 출력만 있으면 `VALUE`, 문자열 계열 저장이 있으면 `VALUE`와 `STR_VALUE`를 쓴다. 생성한 이름이 서버의 Default Table과 같으면 Backend가 서버 기본 Column도 생성 schema와 같은 값으로 저장하므로, 이후 새 Job은 `GET /db/server/list` 응답에서 해당 Column을 바로 복사한다. 이후 기존 Table만 `GET /db/table/columns?server=...&table=...`로 value/string value column 후보를 받아 두 Column 콤보박스에 보여 준다. FE는 기존 Table의 Column 이름을 직접 입력하게 하지 않으며, 새 Table의 Column control도 열지 않는다. Backend가 TAG primary key와 basetime column을 판별하므로 FE는 컬럼 이름을 가정하지 않는다.
 
+LS Database Servers 목록은 Job 목록의 `RUNNING`, `STARTING`, `STOPPING`, `running:true` 또는 상태 확인 불가 항목이 하나라도 있으면 Edit를 비활성화하고 `Stop all Jobs before editing Database settings.`와 대상 이름을 표시한다. 편집 모달이 열린 뒤 상태가 바뀌어도 Update를 비활성화한다. 화면 검사는 안내와 오조작 방지이며, 저장 시 Backend의 `LS_DATABASE_JOBS_NOT_STOPPED` 재검증이 최종 기준이다. 모든 Job이 정지된 뒤 사용자가 profile을 저장하며 FE는 Job 자동 reload나 `restartRunningJobs` 재요청을 하지 않는다. 등록 Job이 있으면 Backend가 새 Default Table을 먼저 생성·검증하므로 성공 응답은 바로 Start 가능한 mapping을 뜻한다. 생성·기존 schema 검증 오류는 열린 Database 편집 모달의 안내로 표시한다. LS는 String Value Column을 사용하지 않으며 저장값도 빈 문자열이다. generic의 Database Server 관리 흐름은 바꾸지 않는다.
+
 ### Method Call과 Tag
 
 Job에는 Method Call이 하나 이상 필요하고 화면 순서가 실행 순서다. 각 Call draft는 `interfaceId`, `methodId`, raw `inputs`, Tag 목록을 가진다. 화면은 DBus Interface별로 접고 펼치는 구조로 Call을 묶되, 호출 순서는 전체 Job 순서다. drag-and-drop은 각 Call 좌측 상단의 drag 아이콘에서만 시작하며, 키보드로 쓸 수 있는 위/아래 이동 버튼도 제공한다. 각 Call은 Interface, Method, 입력 요약, Tag 수, 수정·삭제 동작을 표시한다.

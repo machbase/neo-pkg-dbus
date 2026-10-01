@@ -5,10 +5,25 @@ function clone(value) {
 export const productTarget = 'generic';
 export const minimumIntervalMs = 1000;
 export const retryConfigurable = true;
+export const supportsStringValueColumn = true;
 export const tagCsvImporter = null;
+export const testTableName = null;
+
+export function canUseTestMode() {
+  return false;
+}
+
+export function normalizeProductTestMode(config) {
+  if (!config?.execution) return config;
+  return { ...config, execution: { ...config.execution, test: false } };
+}
 
 export function dataCountLimit() {
   return null;
+}
+
+export function tagConversionOptions() {
+  return [];
 }
 
 export function resolveJobFormMode({ settings, settingsLoading = false, settingsError = null } = {}) {

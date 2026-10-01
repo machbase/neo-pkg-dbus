@@ -78,12 +78,18 @@ function createMetadataReader(options) {
         )).map((row) => String(row.NAME === undefined ? row.name : row.NAME)),
       }));
     },
-    createTagTable(server, table, callback) {
+    createTagTable(server, table, options, callback) {
+      let settings = options;
+      let done = callback;
+      if (typeof options === 'function') {
+        done = options;
+        settings = {};
+      }
       if (typeof table !== 'string' || !TABLE_NAME.test(table)) {
-        callback(new Error('DB table name 형식이 잘못되었습니다.'));
+        done(new Error('DB table name 형식이 잘못되었습니다.'));
         return;
       }
-      withConnection(server, callback, (connection) => {
+      withConnection(server, done, (connection) => {
         if (typeof connection.exec !== 'function') throw new Error('machcli connection exec()를 사용할 수 없습니다.');
         const existing = rowsOf(connection.query(
           'SELECT ID FROM M$SYS_TABLES WHERE NAME = ? AND DATABASE_ID = -1', table,
@@ -93,8 +99,20 @@ function createMetadataReader(options) {
           failure.code = 'TABLE_ALREADY_EXISTS';
           throw failure;
         }
-        connection.exec(`CREATE TAG TABLE ${table} (NAME VARCHAR(100) PRIMARY KEY, TIME DATETIME BASETIME, VALUE DOUBLE SUMMARIZED, STR_VALUE VARCHAR(1024))`);
-        return { table, valueColumn: 'VALUE', stringValueColumn: 'STR_VALUE' };
+        const definitions = [
+          'NAME VARCHAR(100) PRIMARY KEY',
+          'TIME DATETIME BASETIME',
+          'VALUE DOUBLE SUMMARIZED',
+        ];
+        if (settings && settings.includeStringValueColumn === true) {
+          definitions.push('STR_VALUE VARCHAR(1024)');
+        }
+        connection.exec(`CREATE TAG TABLE ${table} (${definitions.join(', ')})`);
+        return {
+          table,
+          valueColumn: 'VALUE',
+          stringValueColumn: settings && settings.includeStringValueColumn === true ? 'STR_VALUE' : '',
+        };
       });
     },
     columns(server, table, callback) {

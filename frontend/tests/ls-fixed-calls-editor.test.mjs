@@ -294,6 +294,8 @@ test("LS DeviceString 선택기는 숫자 스피너와 세 부분 선택을 제�
   assert.ok(button(renderer.root, "DeviceString address Decrease"));
 
   await act(async () => input(renderer.root, "DeviceString memory area").props.onChange({ target: { value: "M" } }));
+  assert.equal(input(renderer.root, "DeviceString data type").type, "select");
+  assert.deepEqual(input(renderer.root, "DeviceString data type").findAllByType("option").slice(1).map((item) => item.props.value), ["X", "B", "W", "D", "L"]);
   await act(async () => input(renderer.root, "DeviceString data type").props.onChange({ target: { value: "W" } }));
   await act(async () => input(renderer.root, "DeviceString address").props.onChange({ target: { value: "10" } }));
   await act(async () => buttonText(renderer.root, "Apply").props.onClick());
@@ -301,6 +303,20 @@ test("LS DeviceString 선택기는 숫자 스피너와 세 부분 선택을 제�
   assert.equal(harness.calls()[0].inputs.DeviceString, "%MW10");
   assert.equal(input(renderer.root, "DeviceString").props.value, "MW10");
   assert.equal(button(renderer.root, "Toggle DeviceString address picker").props["aria-expanded"], false);
+  await act(async () => renderer.unmount());
+});
+
+test("LS DeviceString 직접 입력도 정의되지 않은 Data Type을 저장하지 않는다", async () => {
+  const { renderer } = await renderCalls([fixedCall("get-device-data-1", "%MB3", 1)]);
+  await act(async () => button(renderer.root, "Toggle DeviceString address picker").props.onClick());
+
+  await act(async () => input(renderer.root, "DeviceString address preview").props.onChange({ target: { value: "%MZ100" } }));
+  assert.equal(input(renderer.root, "DeviceString data type").props.value, "");
+  assert.equal(buttonText(renderer.root, "Apply").props.disabled, true);
+
+  await act(async () => input(renderer.root, "DeviceString data type").props.onChange({ target: { value: "L" } }));
+  assert.equal(input(renderer.root, "DeviceString address preview").props.value, "%ML100");
+  assert.equal(buttonText(renderer.root, "Apply").props.disabled, false);
   await act(async () => renderer.unmount());
 });
 
@@ -318,7 +334,7 @@ test("LS 빈 DeviceString Address는 0이고 DataCount는 1 아래로 내려가�
   await act(async () => renderer.unmount());
 });
 
-test("LS DeviceString 선택기는 Memory Area와 Data Type 목록을 하나만 연다", async () => {
+test("LS DeviceString 선택기는 Memory Area 입력과 제한된 Data Type select를 제공한다", async () => {
   const { renderer } = await renderCalls([fixedCall("get-device-data-1", "%MB3", 1)]);
   await act(async () => button(renderer.root, "Toggle DeviceString address picker").props.onClick());
 
@@ -326,13 +342,13 @@ test("LS DeviceString 선택기는 Memory Area와 Data Type 목록을 하나만 
   const areaOptions = renderer.root.findAllByProps({ "aria-label": "DeviceString memory area options" });
   assert.equal(areaOptions.length, 1);
   assert.deepEqual(areaOptions[0].findAllByType("button").map((item) => item.props.children), ["A", "F", "I", "Q", "M", "K", "R", "W"]);
-  assert.equal(renderer.root.findAllByProps({ "aria-label": "DeviceString data type options" }).length, 0);
+  const dataTypeSelect = input(renderer.root, "DeviceString data type");
+  assert.equal(dataTypeSelect.type, "select");
+  assert.deepEqual(dataTypeSelect.findAllByType("option").slice(1).map((item) => item.props.children), ["X", "B", "W", "D", "L"]);
+  assert.equal(button(renderer.root, "Toggle DeviceString data type options"), undefined);
 
-  await act(async () => button(renderer.root, "Toggle DeviceString data type options").props.onClick());
+  await act(async () => dataTypeSelect.props.onChange({ target: { value: "D" } }));
   assert.equal(renderer.root.findAllByProps({ "aria-label": "DeviceString memory area options" }).length, 0);
-  const typeOptions = renderer.root.findAllByProps({ "aria-label": "DeviceString data type options" });
-  assert.equal(typeOptions.length, 1);
-  assert.deepEqual(typeOptions[0].findAllByType("button").map((item) => item.props.children), ["X", "B", "W", "D", "L"]);
   await act(async () => renderer.unmount());
 });
 
@@ -532,6 +548,29 @@ test("LS Tag Transform은 공통 숫자 Stepper로 Bias와 Multiplier를 변경�
   assert.equal(harness.calls()[0].outputSelections[0].tags[0].bias, -1);
   assert.equal(harness.calls()[0].outputSelections[0].tags[0].multiplier, 2);
   await act(async () => renderer.unmount());
+});
+
+test("LS Tag 형변환은 주소 타입별 선택지를 제공하고 REAL에서는 Signed를 끈다", async () => {
+  const harness = await renderCalls([fixedCall("get-device-data-1", "%MD0", 1)]);
+  const { renderer } = harness;
+  await act(async () => tagsSummary(renderer.root).props.onClick());
+
+  const conversion = input(renderer.root, "MD0 Type Conversion");
+  assert.equal(conversion.props.value, "DWORD2INT");
+  assert.deepEqual(conversion.findAllByType("option").map((option) => option.children.join("")), ["INT", "REAL"]);
+  assert.equal(input(renderer.root, "MD0 Signed").props.disabled, false);
+
+  await act(async () => conversion.props.onChange({ target: { value: "DWORD2REAL" } }));
+  assert.equal(harness.calls()[0].outputSelections[0].tags[0].conversion, "DWORD2REAL");
+  assert.equal(harness.calls()[0].outputSelections[0].tags[0].signed, false);
+  assert.equal(input(renderer.root, "MD0 Signed").props.disabled, true);
+  await act(async () => renderer.unmount());
+
+  const bitHarness = await renderCalls([fixedCall("get-device-data-1", "%MX0", 1)]);
+  await act(async () => tagsSummary(bitHarness.renderer.root).props.onClick());
+  assert.equal(bitHarness.renderer.root.findAllByProps({ "aria-label": "MX0 Type Conversion" }).length, 0);
+  assert.equal(input(bitHarness.renderer.root, "MX0 Signed").props.disabled, true);
+  await act(async () => bitHarness.renderer.unmount());
 });
 
 test("LS Import CSV는 접힌 Tags에서 선택 Call만 즉시 치환하고 부족한 뒤 Tag를 유지한다", async () => {

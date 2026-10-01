@@ -7,6 +7,7 @@ const { JobManager } = require('../src/jobs/manager.js');
 const { createControllerAdapter } = require('../src/service/controller-adapter.js');
 const { call, jobConfig, rejectsCode, setupRoot, writeJson } = require('./job-fixture.cjs');
 const { createLifecycle } = require('../../scripts/lifecycle.js');
+const lsProductPolicy = require('../../products/ls/backend/index.js');
 
 function notInstalled() {
   const failure = new Error('service not found');
@@ -1162,6 +1163,98 @@ async function testLsClearOverrunUsesLogicalCollectorControl() {
   }
 }
 
+async function testLsStartFailsTestModeClosedWhenSharedTableChanged() {
+  const root = setupRoot('neo-ls-test-source-start-');
+  try {
+    const lsInterface = JSON.parse(fs.readFileSync(
+      path.join(__dirname, '..', '..', 'products', 'ls', 'interfaces', 'ls-plc-device.json'),
+      'utf8',
+    ));
+    writeJson(path.join(root, 'conf.d', 'interfaces', 'ls-plc-device.json'), lsInterface);
+    const config = jobConfig({
+      execution: { savePolicy: 'perMethod', onMethodError: 'stop', test: true },
+      database: { server: 'local-db', table: 'T4_DBUS_TEST_', valueColumn: 'VALUE', stringValueColumn: '' },
+      methodCalls: [{
+        id: 'read-a', name: 'Read A', interfaceId: 'ls-plc-device', methodId: 'get-device-data',
+        inputs: { DataCount: 1, DeviceString: '%MB0' },
+        outputSelections: [{
+          id: 'return-data', sourceIndex: 0, interpretation: 'json', selector: '/data',
+          valueType: 'array', elementType: 'numeric',
+          tags: [{ name: 'MB0', bias: 0, multiplier: 1, transformOrder: ['bias', 'multiplier'], conversion: 'BYTE2INT', signed: false }],
+        }],
+      }],
+    });
+    const calls = [];
+    const databaseProfileLock = {
+      acquire(name) {
+        calls.push(['databaseLock', name]);
+        return { release() { calls.push('databaseUnlock'); } };
+      },
+    };
+    const lsRuntime = {
+      ensureRunning(callback) { calls.push('ensureRunning'); callback(null); },
+      start(name, callback) { calls.push(['start', name]); callback(null); },
+      inspect(_name, callback) {
+        callback(null, { controllerState: 'RUNNING', controllerDetail: null, statusError: null });
+      },
+    };
+    const manager = new JobManager({
+      cgiRoot: root,
+      productPolicy: lsProductPolicy,
+      lsRuntime,
+      databaseProfileLock,
+      databaseAdapter: fakeDatabase(),
+      serverStore: {
+        get(name, callback) {
+          callback(null, { name, defaultTable: 'PRODUCTION', valueColumn: 'VALUE', stringValueColumn: '' });
+        },
+      },
+    });
+    manager.settings = () => ({ defaults: { database: { server: 'local-db' } }, limits: {} });
+    const created = manager.repository.create('alpha', config);
+    manager.indexRepository.write(created);
+
+    const result = await call(manager, 'start', 'alpha');
+    assert.deepEqual(calls, [
+      ['databaseLock', 'ls-shared-database-profile'],
+      'ensureRunning', ['start', 'alpha'], 'databaseUnlock',
+    ]);
+    assert.equal(result.config.execution.test, false);
+    assert.equal(result.revision, 2);
+    assert.equal(manager.repository.read('alpha').execution.test, false);
+    assert.equal(manager.indexRepository.read('alpha').execution.test, false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
+async function testLsStartStopsBeforeJobMutationWhenDatabaseProfileIsBusy() {
+  const root = setupRoot('neo-ls-database-profile-conflict-');
+  try {
+    const runtimeCalls = [];
+    const manager = new JobManager({
+      cgiRoot: root,
+      productPolicy: lsProductPolicy,
+      databaseAdapter: fakeDatabase(),
+      databaseProfileLock: {
+        acquire() { throw Object.assign(new Error('busy'), { code: 'JOB_CONFLICT' }); },
+      },
+      lsRuntime: {
+        ensureRunning(callback) { runtimeCalls.push('ensureRunning'); callback(null); },
+        start(name, callback) { runtimeCalls.push(['start', name]); callback(null); },
+      },
+    });
+    const created = manager.repository.create('alpha', jobConfig());
+    manager.indexRepository.write(created);
+
+    await rejectsCode(call(manager, 'start', 'alpha'), 'JOB_CONFLICT');
+    assert.deepEqual(runtimeCalls, []);
+    assert.equal(fs.readdirSync(path.join(root, 'conf.d', '.job-operation-locks')).length, 0);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
 async function run() {
   await testHappyLifecycleAndProjection();
   await testUpdateUsesServerRevisionAndAcceptsStaleClientRevision();
@@ -1186,6 +1279,8 @@ async function run() {
   await testLsLogLevelHotApplyDoesNotStopLogicalJob();
   await testLsUpdateKeepsRegistrationAndRepairsStaleIndex();
   await testLsClearOverrunUsesLogicalCollectorControl();
+  await testLsStartFailsTestModeClosedWhenSharedTableChanged();
+  await testLsStartStopsBeforeJobMutationWhenDatabaseProfileIsBusy();
 
   const adapter = createControllerAdapter(fakeServiceModule());
   assert.equal(typeof adapter.status, 'function');

@@ -40,6 +40,7 @@ function fromDocument(document) {
     execution: {
       savePolicy: document.execution && document.execution.savePolicy,
       onMethodError: document.execution && document.execution.onMethodError,
+      test: document.execution && document.execution.test === true,
     },
     logLevel: document.log && document.log.level || 'info',
   };
@@ -64,12 +65,16 @@ function validateIndex(name, value) {
     || ['server', 'table', 'valueColumn', 'stringValueColumn'].some((field) => typeof value.database[field] !== 'string')
     || !value.execution || typeof value.execution !== 'object' || Array.isArray(value.execution)
     || typeof value.execution.savePolicy !== 'string' || typeof value.execution.onMethodError !== 'string'
+    || (value.execution.test !== undefined && typeof value.execution.test !== 'boolean')
     || typeof value.logLevel !== 'string' || !value.logLevel) {
     throw error('JOB_INVALID_CONFIG', 'Job summary를 읽을 수 없습니다. Job을 다시 저장하십시오.', {
       name,
       summaryUnavailable: true,
     });
   }
+  // Indexes created before the internal test source existed remain readable,
+  // but absence is always fail-closed rather than inheriting a truthy default.
+  value.execution.test = value.execution.test === true;
   return value;
 }
 

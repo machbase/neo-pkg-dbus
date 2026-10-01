@@ -67,6 +67,7 @@ test('generic 제품은 자유 Job과 Interface 관리를 유지한다', () => {
   assert.equal(generic.productTarget, 'generic');
   assert.equal(generic.resolveJobFormMode({ settings: { provider: null } }), 'generic');
   assert.equal(generic.showsInterfaceManagement(), true);
+  assert.equal(generic.supportsStringValueColumn, true);
   assert.deepEqual(generic.createInitialMethodCalls(provider), []);
   const fixedCalls = ls.createInitialMethodCalls(provider);
   assert.deepEqual(generic.appendProductMethodCall(fixedCalls, provider), fixedCalls);
@@ -78,6 +79,7 @@ test('LS 제품은 고정 Call을 깊은 복사하고 새 Call도 독립적으�
   assert.equal(ls.productTarget, 'ls');
   assert.equal(ls.resolveJobFormMode({ settings: { provider }, editing: false }), 'fixed');
   assert.equal(ls.showsInterfaceManagement(), false);
+  assert.equal(ls.supportsStringValueColumn, false);
   const first = ls.createInitialMethodCalls(provider);
   first[0].outputSelections[0].tags.push({ name: 'changed' });
   assert.deepEqual(provider.outputSelections[0].tags, []);
@@ -99,7 +101,23 @@ test('LS 제품은 고정 Call을 깊은 복사하고 새 Call도 독립적으�
   assert.deepEqual(Object.fromEntries(['X', 'B', 'W', 'D', 'L'].map((type) => [type, ls.dataCountLimit(`%M${type}1000`)])), {
     X: 4096, B: 4096, W: 2048, D: 1024, L: 512,
   });
+  assert.deepEqual(ls.tagConversionOptions('%MB0'), [{ value: 'BYTE2INT', label: 'INT' }]);
+  assert.deepEqual(ls.tagConversionOptions('%MW0'), [{ value: 'WORD2INT', label: 'INT' }]);
+  assert.deepEqual(ls.tagConversionOptions('%MD0'), [
+    { value: 'DWORD2INT', label: 'INT' }, { value: 'DWORD2REAL', label: 'REAL' },
+  ]);
+  assert.deepEqual(ls.tagConversionOptions('%ML0'), [
+    { value: 'LWORD2INT', label: 'INT' }, { value: 'LWORD2LREAL', label: 'LREAL' },
+  ]);
+  assert.deepEqual(ls.tagConversionOptions('%MX0'), []);
   assert.equal(ls.reconcileProductTags({ DataCount: 4096, DeviceString: '%MB1000' }, [], provider).at(-1).name, 'MB5095');
+  assert.equal(ls.reconcileProductTags({ DataCount: 1, DeviceString: '%MD0' }, [], provider)[0].conversion, 'DWORD2INT');
+  assert.deepEqual(ls.reconcileProductTags({ DataCount: 1, DeviceString: '%ML0' }, [{
+    name: 'MD0', conversion: 'DWORD2REAL', signed: true,
+  }], provider)[0], {
+    name: 'ML0', conversion: 'LWORD2LREAL', signed: false, bias: 0, multiplier: 1,
+    transformOrder: ['bias', 'multiplier'], nameMode: 'auto',
+  });
   assert.equal(lsBackend.target, 'ls');
 });
 
@@ -172,6 +190,7 @@ test('LS Backend는 모든 Call의 고정 Method와 출력 구조를 검증한�
     }],
   };
   assert.equal(lsBackend.validateProductConfig(config), config);
+  assert.deepEqual(config.methodCalls[0].outputSelections[0].tags.map((tag) => tag.conversion), ['BYTE2INT', 'BYTE2INT']);
   const second = structuredClone(config.methodCalls[0]);
   second.id = 'get-device-data-2';
   second.inputs = { DataCount: 1, DeviceString: '%MW10' };
@@ -183,4 +202,37 @@ test('LS Backend는 모든 Call의 고정 Method와 출력 구조를 검증한�
   const invalidSecond = structuredClone(multiple);
   invalidSecond.methodCalls[1].outputSelections[0].selector = '/other';
   assert.throws(() => lsBackend.validateProductConfig(invalidSecond), /fixed output/);
+
+  const real = structuredClone(config);
+  real.methodCalls[0].inputs.DeviceString = '%MD3';
+  real.methodCalls[0].outputSelections[0].tags.forEach((tag) => { tag.conversion = 'DWORD2INT'; });
+  real.methodCalls[0].outputSelections[0].tags[0].conversion = 'DWORD2REAL';
+  real.methodCalls[0].outputSelections[0].tags[0].signed = true;
+  lsBackend.validateProductConfig(real);
+  assert.equal(real.methodCalls[0].outputSelections[0].tags[0].signed, false);
+  const mismatch = structuredClone(real);
+  mismatch.methodCalls[0].outputSelections[0].tags[0].conversion = 'LWORD2LREAL';
+  assert.throws(() => lsBackend.validateProductConfig(mismatch), /does not match DeviceString/);
+});
+
+test('LS TEST source는 전용 table에서만 유지되고 Generic에서는 항상 꺼진다', () => {
+  const base = {
+    execution: { savePolicy: 'perMethod', onMethodError: 'stop', test: true },
+    database: { table: 't4_dbus_test_' },
+    methodCalls: [{
+      id: 'read', name: 'read', interfaceId: 'ls-plc-device', methodId: 'get-device-data',
+      inputs: { DataCount: 1, DeviceString: '%MB0' },
+      outputSelections: [{ id: 'return-data', sourceIndex: 0, interpretation: 'json', selector: '/data', valueType: 'array', elementType: 'numeric', tags: [
+        { name: 'MB0', bias: 0, multiplier: 1 },
+      ] }],
+    }],
+  };
+  lsBackend.validateProductConfig(base);
+  assert.equal(base.execution.test, true);
+  base.database.table = 'PRODUCTION';
+  lsBackend.validateProductConfig(base);
+  assert.equal(base.execution.test, false);
+  base.database.table = 'T4_DBUS_TEST_';
+  lsBackend.validateProductConfig(base);
+  assert.equal(base.execution.test, false, 'returning to the table must not auto-enable TEST');
 });

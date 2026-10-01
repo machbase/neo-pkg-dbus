@@ -15,7 +15,7 @@ function document(name = 'line-a') {
     revision: 7,
     profileId: 'ls-electric-plc',
     schedule: { intervalMs: 10 },
-    execution: { savePolicy: 'perMethod', onMethodError: 'stop' },
+    execution: { savePolicy: 'perMethod', onMethodError: 'stop', test: false },
     methodCalls: [{
       id: 'read-a', interfaceId: 'ls-plc-device', methodId: 'get-device-data',
       outputSelections: [{ tags: [{ name: 'tag-a' }, { name: 'tag-b' }] }],
@@ -38,7 +38,7 @@ test('Job index contains only the bounded management summary', () => {
     interfaceIds: ['ls-plc-device'],
     methodReferences: [{ interfaceId: 'ls-plc-device', methodId: 'get-device-data', callId: 'read-a' }],
     database: { server: 'localhost', table: 'TAG', valueColumn: 'VALUE', stringValueColumn: '' },
-    execution: { savePolicy: 'perMethod', onMethodError: 'stop' },
+    execution: { savePolicy: 'perMethod', onMethodError: 'stop', test: false },
     logLevel: 'warn',
   });
   assert.equal(JSON.stringify(value).includes('tag-a'), false);

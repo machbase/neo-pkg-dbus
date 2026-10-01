@@ -40,9 +40,9 @@ The LS build cross-builds the native collector for `linux/amd64` and includes it
 
 ## LS collection behavior
 
-The LS collector has one Go service, one native writer, and one reader goroutine per active Job. A reader uses the PLC timestamp returned by DBus, decodes and transforms typed rows, then puts them on the shared bounded writer queue without waiting for a database flush. The writer keeps one native Neo appender open for the shared Database profile; it is the only component which appends data. Its internal defaults are a 64-batch queue, a 1,024-row native batch threshold, and a 1-second forced flush. They live under `settings.json.ls.writer` for deployment tuning only and are not frontend controls. A controlled logical Job or package stop drains queued rows and requests a final flush; an unexpected process/power loss can lose rows still buffered since the last flush.
+The LS collector has one Go service, one native writer, and one reader goroutine per active Job. A reader uses the PLC timestamp returned by DBus, decodes and transforms typed rows, then puts them on the shared bounded writer queue without waiting for a database flush. Queue rows carry a daemon-stable numeric TAG registry index rather than a repeated TAG string; the channel allocates only its 512 pointer slots up front and batch payloads are allocated only by completed reads. The writer keeps one native Neo appender open for the shared Database profile; it is the only component which appends data. It also completes ordinary batches directly after Flush instead of creating one waiting goroutine per collection cycle; at short intervals this keeps goroutine and stack usage bounded by the daemon structure rather than by the number of batches awaiting the 1-second Flush. Its internal defaults are a 512-batch queue, an 8,192-row native batch threshold, and a 1-second forced flush. They live under `settings.json.ls.writer` for deployment tuning only and are not frontend controls. A controlled logical Job or package stop drains queued rows and requests a final flush; an unexpected process/power loss can lose rows still buffered since the last flush.
 
-PLC performance diagnostics are internal settings under `settings.json.ls.performance` and default to enabled. Each Job writes one microsecond summary with `job=<name>` per 1,000 read attempts, and the shared writer writes a `scope=shared` summary without a Job name per 30 seconds to each active Job log. Those defaults remain 1,000 and 30,000ms; their enforced minimums are 500 and 10,000ms. The writer summary includes maximum queued batches, append/flush busy ratio, and enqueue-to-successful-flush p99. Queue-to-durable samples are capped at 4,096 entries; no per-cycle performance records are written. The common log prefix supplies the record timestamp.
+PLC performance diagnostics are internal settings under `settings.json.ls.performance` and default to enabled. Each Job writes one microsecond summary with `job=<name>` per 1,000 read attempts, and the shared writer writes a `scope=shared` summary without a Job name per 30 seconds to each active Job log. Those defaults remain 1,000 and 30,000ms; their enforced minimums are 500 and 10,000ms. The Job summary includes DBus avg/p99/max, parse avg/max, reader-total p99/max, total skip count, scheduler-overrun count, queue-full skip count, and error count. The writer summary includes maximum queued batches and configured capacity, append/flush busy ratio, append batch/row counts, append service throughput, append avg/p99/max, flush max, and enqueue-to-successful-flush p99/max. Append and queue-to-durable samples are each capped at 4,096 entries; no per-cycle performance records are written. The common log prefix supplies the record timestamp.
 
 LS has one shared Database Server profile. The profile's server connection, Default Table and column mapping apply to every LS Job. The LS UI does not add, delete, or switch Database Server entries; edit the existing profile instead. Editing it while logical Jobs are active asks for confirmation, atomically refreshes the small collector policy/secret files, and reloads those Jobs. If the package service itself is stopped, the new settings are saved for the next start and the service is not started implicitly.
 
@@ -52,7 +52,32 @@ The full LS Job remains in `cgi-bin/conf.d/jobs/<name>.json`. A small `cgi-bin/c
 
 By default the package reads `ls.plc.program.GetTaskCycleInfo` with `TaskNumber=0` when an LS Job is created or saved. A successful `period-ms` result becomes the interval step. The interval editor rounds a typed value upward to that step; if the call is disabled or unavailable the step is `1ms`. Existing Jobs are not invalidated by a later policy change.
 
-Each LS Tag has a `signed` option (default `false`). It applies two's-complement conversion based on `%MB`, `%MW`, `%MD`, or `%ML` before bias/multiplier calculation. `%MX` values remain bits. Automatically created tables use DOUBLE; create an appropriate integer VALUE column yourself when exact integer storage, especially 64-bit `%ML`, is required.
+Each LS Tag has a type conversion followed by a `signed` option and then bias/multiplier calculation. `%MB/%MW/%MD/%ML` default to `BYTE2INT`, `WORD2INT`, `DWORD2INT`, and `LWORD2INT`; `signed:true` applies the matching 8/16/32/64-bit two's-complement interpretation before the calculation. `%MD` additionally supports `DWORD2REAL` and `%ML` supports `LWORD2LREAL`, which reinterpret the returned unsigned bit pattern as IEEE-754 `float32`/`float64`; Signed is disabled for these conversions. `%MX` values remain bits and use neither setting. Automatically created tables use DOUBLE; create an appropriate integer VALUE column yourself when exact integer storage, especially 64-bit `%ML`, is required.
+
+Machbase Appender reserves one value of each numeric type as its NULL sentinel.
+If a PLC value can equal one of the values below, create the table with a wider
+VALUE column type. The collector passes every DBUS numeric result as data and
+does not reinterpret it as NULL. Machbase Appender itself cannot distinguish an
+ordinary value equal to its reserved NULL value, so that value can be treated as
+NULL and a TAG sample with no non-NULL value column may produce no data row.
+
+| VALUE type | Reserved value |
+| --- | ---: |
+| SHORT | -32768 |
+| USHORT | 65535 |
+| INTEGER | -2147483648 |
+| UINTEGER | 4294967295 |
+| LONG | -9223372036854775808 |
+| ULONG | 18446744073709551615 |
+| FLOAT | 3.402823466e+38 |
+| DOUBLE | 1.7976931348623158e+308 |
+
+For example, use INTEGER instead of SHORT/USHORT and LONG instead of
+INTEGER/UINTEGER when the full source range is required. DOUBLE can represent a
+wider magnitude but may not preserve every 64-bit integer exactly; choose the
+table schema according to whether range or exact integer precision is required.
+LONG or DOUBLE is generally recommended for a user-created VALUE column, while
+their own reserved NULL values remain unavailable as ordinary data.
 
 ## Package lifecycle
 

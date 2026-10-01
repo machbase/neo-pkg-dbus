@@ -80,6 +80,9 @@ async function run() {
   await rejectsCode(call(createDatabaseValidationAdapter(dependencies(validColumns, {
     tableType: 'LOG',
   })), database), 'JOB_INVALID');
+  await rejectsCode(call(createDatabaseValidationAdapter(dependencies([], {
+    tableType: 'NOT_FOUND',
+  })), database), 'TABLE_NOT_FOUND');
   await rejectsCode(call(createDatabaseValidationAdapter(dependencies(
     validColumns.filter((column) => !column.primaryKey),
   )), database), 'JOB_INVALID');
