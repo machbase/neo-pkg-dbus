@@ -22,13 +22,63 @@ function generatedInput(inputs, names) {
 export const productTarget = 'ls';
 export const minimumIntervalMs = 1;
 export const retryConfigurable = false;
+export const supportsStringValueColumn = false;
 export const tagCsvImporter = Object.freeze({ apply: applyLsTagCsv });
+export const testTableName = 'T4_DBUS_TEST_';
+
+export function canUseTestMode(table) {
+  return String(table || '').trim().toUpperCase() === testTableName;
+}
+
+export function normalizeProductTestMode(config) {
+  if (!config?.execution) return config;
+  return {
+    ...config,
+    execution: {
+      ...config.execution,
+      test: config.execution.test === true && canUseTestMode(config.database?.table),
+    },
+  };
+}
 
 const DATA_COUNT_LIMITS = Object.freeze({ X: 4096, B: 4096, W: 2048, D: 1024, L: 512 });
+const INTEGER_CONVERSIONS = Object.freeze({
+  B: 'BYTE2INT', W: 'WORD2INT', D: 'DWORD2INT', L: 'LWORD2INT',
+});
+const REAL_CONVERSIONS = Object.freeze({ D: 'DWORD2REAL', L: 'LWORD2LREAL' });
+
+function addressDataType(deviceString) {
+  const value = String(deviceString || '').trim().toUpperCase();
+  return value.startsWith('%') ? value[2] : value[1];
+}
 
 export function dataCountLimit(deviceString) {
-  const value = String(deviceString || '').trim().toUpperCase();
-  return DATA_COUNT_LIMITS[value.startsWith('%') ? value[2] : value[1]] || 4096;
+  return DATA_COUNT_LIMITS[addressDataType(deviceString)] || 4096;
+}
+
+export function tagConversionOptions(deviceString) {
+  const dataType = addressDataType(deviceString);
+  const integer = INTEGER_CONVERSIONS[dataType];
+  if (!integer) return [];
+  const options = [{ value: integer, label: 'INT' }];
+  if (REAL_CONVERSIONS[dataType]) {
+    options.push({
+      value: REAL_CONVERSIONS[dataType],
+      label: dataType === 'L' ? 'LREAL' : 'REAL',
+    });
+  }
+  return options;
+}
+
+function normalizedTagConversion(deviceString, existing) {
+  const options = tagConversionOptions(deviceString);
+  if (!options.length) return undefined;
+  if (options.some((option) => option.value === existing)) return existing;
+  if (String(existing || '').endsWith('REAL')) {
+    const real = options.find((option) => option.label === 'REAL' || option.label === 'LREAL');
+    if (real) return real.value;
+  }
+  return options[0].value;
 }
 
 function nextCallIdentity(calls, methodId) {
@@ -117,15 +167,19 @@ export function reconcileProductTags(inputs, existingTags = [], provider = null)
   const start = Number(address[2]);
   const width = address[2].length;
   if (!Number.isSafeInteger(start) || start + count - 1 > Number.MAX_SAFE_INTEGER) return clone(existingTags || []);
+  const conversions = tagConversionOptions(rawAddress);
   return Array.from({ length: count }, (_, index) => {
     const existing = existingTags[index] || {};
     const manual = existing.nameMode === 'manual';
+    const conversion = normalizedTagConversion(rawAddress, existing.conversion);
+    const real = String(conversion || '').endsWith('REAL');
     return {
       ...existing,
       name: manual ? existing.name : `${prefix}${String(start + index).padStart(width, '0')}`,
       bias: Number.isFinite(Number(existing.bias)) ? Number(existing.bias) : 0,
       multiplier: Number.isFinite(Number(existing.multiplier)) ? Number(existing.multiplier) : 1,
-      signed: existing.signed === true,
+      ...(conversion ? { conversion } : {}),
+      signed: conversions.length && !real && existing.signed === true,
       transformOrder: validTransformOrder(existing.transformOrder)
         ? [...existing.transformOrder] : ['bias', 'multiplier'],
       nameMode: manual ? 'manual' : 'auto',

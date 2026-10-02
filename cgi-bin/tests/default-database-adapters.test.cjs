@@ -86,6 +86,34 @@ async function run() {
     }]);
     assert.equal(events.some(([event]) => event === 'connection.close'), true);
     assert.equal(events.some(([event]) => event === 'client.close'), true);
+
+    const createStatements = [];
+    const createReader = createMetadataReader({
+      clientFactory() {
+        return {
+          connect() {
+            return {
+              query() { return []; },
+              exec(sql) { createStatements.push(sql); },
+              close() {},
+            };
+          },
+          close() {},
+        };
+      },
+    });
+    assert.deepEqual(await call(createReader, 'createTagTable', {
+      host: '127.0.0.1', port: 5656, user: 'sys', password: 'secret',
+    }, 'LS_NUMERIC'), {
+      table: 'LS_NUMERIC', valueColumn: 'VALUE', stringValueColumn: '',
+    });
+    assert.equal(createStatements[0].includes('STR_VALUE'), false, 'LS/default table creation must remain numeric-only');
+    assert.deepEqual(await call(createReader, 'createTagTable', {
+      host: '127.0.0.1', port: 5656, user: 'sys', password: 'secret',
+    }, 'GENERIC_MIXED', { includeStringValueColumn: true }), {
+      table: 'GENERIC_MIXED', valueColumn: 'VALUE', stringValueColumn: 'STR_VALUE',
+    });
+    assert.equal(createStatements[1].includes('STR_VALUE VARCHAR(1024)'), true, 'generic callers can still request STR_VALUE');
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

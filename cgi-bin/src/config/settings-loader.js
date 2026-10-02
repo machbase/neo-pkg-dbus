@@ -23,7 +23,7 @@ function defaultSettings() {
     // is copied into the Go collector policy file but is not exposed in the UI.
     ls: {
       interval: { useTaskCycle: true },
-      writer: { queueCapacity: 64, flushMaxRows: 1024, flushIntervalMs: 1000 },
+      writer: { queueCapacity: 512, flushMaxRows: 8192, flushIntervalMs: 1000 },
       performance: { enabled: true, jobSampleCount: 1000, writerSummaryIntervalMs: 30000 },
     },
   };

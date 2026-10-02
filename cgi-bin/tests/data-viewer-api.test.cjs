@@ -4,6 +4,23 @@ const assert = require('node:assert/strict');
 const { error } = require('../src/config/errors.js');
 const { createDataViewer, rowsOf } = require('../src/db/data-viewer.js');
 
+const TIME_NS_ALIAS = '__DBUS_TIME_NS';
+const MIN_TIME_NS_ALIAS = '__DBUS_MIN_TIME_NS';
+const MAX_TIME_NS_ALIAS = '__DBUS_MAX_TIME_NS';
+
+function epochNanoseconds(value) {
+  const date = value instanceof Date ? value : new Date(value);
+  return (BigInt(date.getTime()) * BigInt(1000000)).toString();
+}
+
+function projectTimestamp(rows, timeColumn, sql) {
+  if (!sql.includes(`AS ${TIME_NS_ALIAS}`)) return rows;
+  return rows.map((row) => ({
+    ...row,
+    [TIME_NS_ALIAS]: row[TIME_NS_ALIAS] || epochNanoseconds(row[timeColumn]),
+  }));
+}
+
 function call(target, method, ...args) {
   if ((method === 'data' || method === 'chart' || method === 'stat' || method === 'tags') && args[0]) {
     args[0] = { job: 'line-a', server: 'local-db', table: 'TAG', ...args[0] };
@@ -79,28 +96,35 @@ function fixture(options) {
       if (sql.includes('_TAG_META') && sql.includes('WHERE')) return settings.hierarchyRows || [];
       if (sql.includes('_TAG_META')) return settings.metaRows || [{ _ID: 1, [primaryColumn]: '%MB3' }, { _ID: 2, [primaryColumn]: '%MB4' }];
       if (sql.includes('MIN(') && sql.includes('MAX(')) {
-        return [{ MIN_TIME: new Date('2026-08-01T00:00:00.000Z'), MAX_TIME: new Date('2026-08-03T00:00:00.000Z') }];
+        return [{
+          [MIN_TIME_NS_ALIAS]: epochNanoseconds('2026-08-01T00:00:00.000Z'),
+          [MAX_TIME_NS_ALIAS]: epochNanoseconds('2026-08-03T00:00:00.000Z'),
+        }];
       }
       if (sql.includes('COUNT(*) AS ROW_COUNT')) return [{ ROW_COUNT: 42 }];
       if (sql.includes('FROM TAG') && sql.includes(`${primaryColumn} IN`) && sql.startsWith(`SELECT ${primaryColumn},`)) {
-        const selectedRows = [
+        const selectedRows = settings.opcuaRows ? settings.opcuaRows({ sql, values }) : [
           { [primaryColumn]: '%MB3', TIME: new Date('2026-08-03T00:00:00.000Z'), VALUE: 12.5, STR_VALUE: null },
           { [primaryColumn]: '%MB4', TIME: new Date('2026-08-03T00:00:01.000Z'), VALUE: 8.5, STR_VALUE: null },
         ].filter((row) => values.includes(row[primaryColumn]));
         const offset = Number(values.at(-2));
         const limit = Number(values.at(-1));
-        return Number.isInteger(offset) && Number.isInteger(limit) ? selectedRows.slice(offset, offset + limit) : selectedRows;
+        const paged = Number.isInteger(offset) && Number.isInteger(limit) ? selectedRows.slice(offset, offset + limit) : selectedRows;
+        const timeColumn = (columns.find((column) => Number(column.FLAG) & 0x1000000) || {}).NAME || 'TIME';
+        return projectTimestamp(paged, timeColumn, sql);
       }
       if (sql.includes('FROM TAG') && sql.includes(`${primaryColumn} = ?`)) {
         const tag = values[0];
         if (settings.dataRows) {
           const rows = settings.dataRows({ tag, sql, values, index: dataQueryIndex });
           dataQueryIndex += 1;
-          return rows;
+          const timeColumn = (columns.find((column) => Number(column.FLAG) & 0x1000000) || {}).NAME || 'TIME';
+          return projectTimestamp(rows, timeColumn, sql);
         }
-        return tag === '%MB3'
+        const rows = tag === '%MB3'
           ? [{ NAME: tag, TIME: new Date('2026-08-03T00:00:00.000Z'), VALUE: 12.5, STR_VALUE: null }]
           : [{ NAME: tag, TIME: new Date('2026-08-03T00:00:01.000Z'), VALUE: null, STR_VALUE: 'ready' }];
+        return projectTimestamp(rows, 'TIME', sql);
       }
       if (sql.includes('FROM TAG') && sql.includes(`${primaryColumn} IN`)) return settings.chartRows || [
         { NAME: '%MB3', TIME: new Date('2026-08-03T00:00:00.000Z'), VALUE: 12.5 },
@@ -305,6 +329,33 @@ async function testOpcuaViewerReadsSelectedTagTimeBounds() {
     server: 'local-db', job: 'line-a', table: 'TAG', names: ['%MB3', '%MB4'],
     minTime: '2026-08-01T00:00:00.000Z', maxTime: '2026-08-03T00:00:00.000Z',
   });
+  const query = source.calls.find((entry) => entry.type === 'query' && entry.sql.includes('MIN('));
+  assert.match(query.sql, /TO_CHAR\(TO_TIMESTAMP\(MIN\(TIME\)\)\) AS __DBUS_MIN_TIME_NS/);
+  assert.match(query.sql, /TO_CHAR\(TO_TIMESTAMP\(MAX\(TIME\)\)\) AS __DBUS_MAX_TIME_NS/);
+}
+
+async function testOpcuaViewerUsesEpochTimestampInsteadOfTimezoneLessDbText() {
+  const expected = '2026-09-23T13:50:21.043Z';
+  const source = fixture({
+    opcuaRows() {
+      return [{
+        NAME: '%MB3',
+        // This is deliberately a timezone-less value with the same wall-clock
+        // digits. Reading it with new Date() changes meaning with process TZ.
+        TIME: '2026-09-23 13:50:21.043',
+        [TIME_NS_ALIAS]: epochNanoseconds(expected),
+        VALUE: 1,
+        STR_VALUE: null,
+      }];
+    },
+  });
+  const result = await rawCall(source.viewer, 'data', {
+    job: 'line-a', server: 'local-db', table: 'TAG', names: ['%MB3'],
+    page: 1, pageSize: 10,
+  });
+  assert.equal(result.rows[0].time, expected);
+  const query = source.calls.find((entry) => entry.type === 'query' && entry.sql.includes('FROM TAG'));
+  assert.match(query.sql, /TO_CHAR\(TO_TIMESTAMP\(TIME\)\) AS __DBUS_TIME_NS/);
 }
 
 async function testOpcuaViewerRawPageUsesOneSharedPage() {
@@ -339,6 +390,7 @@ async function run() {
   await testJobScopedDataViewer();
   await testOpcuaViewerCanReadAnyTagInTheMappedTable();
   await testOpcuaViewerReadsSelectedTagTimeBounds();
+  await testOpcuaViewerUsesEpochTimestampInsteadOfTimezoneLessDbText();
   await testOpcuaViewerRawPageUsesOneSharedPage();
   await testOpcuaViewerReadsTheLastRawPageCount();
   const connected = fixture();
@@ -442,7 +494,7 @@ async function run() {
   });
   assert.equal(alternatePage.rows[0].name, '%MB3');
   const alternateDataQuery = alternateRoles.calls.find((entry) => entry.type === 'query' && entry.sql.includes('FROM TAG'));
-  assert.match(alternateDataQuery.sql, /SELECT TAG_ID, TS, VALUE, STR_VALUE FROM TAG WHERE TAG_ID = \?/);
+  assert.match(alternateDataQuery.sql, /SELECT TAG_ID, TO_CHAR\(TO_TIMESTAMP\(TS\)\) AS __DBUS_TIME_NS, VALUE, STR_VALUE FROM TAG WHERE TAG_ID = \?/);
   assert.match(alternateDataQuery.sql, /ORDER BY TS DESC LIMIT \?, \?/);
   assert.equal(alternateDataQuery.sql.includes('_RID'), false);
 
@@ -824,6 +876,9 @@ async function run() {
   assert.deepEqual(chartQuery.columns, { primary: 'NAME', time: 'TIME', numericValue: 'VALUE' });
   assert.match(chartQuery.query, /SELECT TIME AS TIME, NAME AS NAME, VALUE AS VALUE FROM TAG/);
   assert.match(chartQuery.query, /NAME IN \('%MB3'\)/);
+  assert.match(chartQuery.query, /TIME >= FROM_TIMESTAMP\(1785542400000000000\)/);
+  assert.match(chartQuery.query, /TIME <= FROM_TIMESTAMP\(1785801600000000000\)/);
+  assert.doesNotMatch(chartQuery.query, /TO_DATE/i);
   const specialChart = fixture({
     jobRepository: {
       read(name) {

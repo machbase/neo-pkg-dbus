@@ -127,6 +127,12 @@ function createDatabaseValidationAdapter(options) {
         }
         callDependency(dependencies.metadataReader, 'columns', [server, database.table], (metadataError, metadata) => {
           if (metadataError) { callback(unavailable(metadataError)); return; }
+          if (String(metadata && metadata.tableType || '').toUpperCase() === 'NOT_FOUND') {
+            callback(error('TABLE_NOT_FOUND', 'Database Table을 찾을 수 없습니다.', {
+              server: database.server, table: database.table,
+            }));
+            return;
+          }
           try { callback(null, validatedExistingMapping(database, metadata)); }
           catch (validationError) { callback(validationError); }
         });
@@ -203,4 +209,4 @@ function createDatabaseValidationAdapter(options) {
   };
 }
 
-module.exports = { createDatabaseValidationAdapter };
+module.exports = { createDatabaseValidationAdapter, validatedExistingMapping };

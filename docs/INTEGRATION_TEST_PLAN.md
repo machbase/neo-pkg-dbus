@@ -26,17 +26,19 @@ Record the Neo version, Docker CPU quota, free disk space, `/tmp` usage, DBus in
 
 ## 3. Tag decoding and calculation
 
-For each type below, compare unsigned default handling with `signed: true`:
+For each type below, compare unsigned default handling with `signed: true` and the available type conversions:
 
 | Type | Boundary values |
 | --- | --- |
 | `%MX` | `0`, `1`; signed must not change bit handling |
 | `%MB` | `0x7F`, `0x80`, `0xFF` -> `127`, `-128`, `-1` |
 | `%MW` | `0x7FFF`, `0x8000`, `0xFFFF` -> `32767`, `-32768`, `-1` |
-| `%MD` | positive/negative signed boundaries |
-| `%ML` | feasible signed boundaries and precision policy |
+| `%MD` | positive/negative signed boundaries; `DWORD2REAL` IEEE-754 patterns including `±1.0` |
+| `%ML` | feasible signed boundaries and precision policy; `LWORD2LREAL` IEEE-754 patterns including `±1.0` |
 
 - Verify that two's-complement conversion occurs before bias/multiplier calculation.
+- Verify that REAL/LREAL bit reinterpretation occurs before bias/multiplier calculation and ignores/disables Signed.
+- Verify the UI order is Type Conversion, Signed, Transform; Byte/Word expose INT only, DWord exposes INT/REAL, LWord exposes INT/LREAL, and Bit exposes no conversion.
 - Verify calculation order, identity calculation (`bias=0`, `multiplier=1`), and independent settings for mixed Tags in a Call.
 - Verify that CSV import/export preserves `signed`.
 
@@ -59,9 +61,10 @@ For each type below, compare unsigned default handling with `signed: true`:
 ## 6. Persistent writer, append, and flush
 
 - Verify that one shared native writer/appender exists and readers do not wait for database flush after putting a batch on the queue.
-- Compare `flushMaxRows=1024`, `flushIntervalMs=1000` with lower row thresholds and longer forced-flush intervals.
+- Compare the production default `flushMaxRows=8192`, `flushIntervalMs=1000` with alternative row thresholds while retaining the one-second durability bound.
 - Verify that low-rate input becomes visible after forced flush and high-rate input flushes at the row threshold.
 - On logical Job stop and package stop, verify queue drain, final flush, and persistence of rows accepted before the stop.
+- At a 10ms interval, verify ordinary batches do not create one flush-waiting goroutine per cycle. Repeated Job Start/Stop must return process/thread/goroutine and RSS measurements to a stable range; `htop` user-thread rows must not be counted as duplicate processes.
 - On unexpected container/Neo termination, record the possible loss window since the most recent flush.
 
 ## 7. Performance and CPU measurements

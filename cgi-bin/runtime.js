@@ -580,7 +580,7 @@ var require_validator = __commonJS({
     }
     function validateTag(tag, names) {
       assertObject(tag, "Tag");
-      assertFields(tag, ["outputIndex", "sourceAddress", "name", "bias", "multiplier", "calcOrder", "transformOrder", "signed"], "Tag");
+      assertFields(tag, ["outputIndex", "sourceAddress", "name", "bias", "multiplier", "calcOrder", "transformOrder", "conversion", "signed"], "Tag");
       if (typeof tag.name !== "string" || !tag.name.trim()) {
         invalid("Tag name\uC774 \uD544\uC694\uD569\uB2C8\uB2E4.");
       }
@@ -593,8 +593,11 @@ var require_validator = __commonJS({
       if (tag.transformOrder !== void 0 && (!Array.isArray(tag.transformOrder) || tag.transformOrder.length !== 2 || new Set(tag.transformOrder).size !== 2 || !tag.transformOrder.includes("bias") || !tag.transformOrder.includes("multiplier"))) {
         invalid("Tag transformOrder\uB294 bias\uC640 multiplier\uB97C \uAC01\uAC01 \uD55C \uBC88\uC529 \uAC00\uC838\uC57C \uD569\uB2C8\uB2E4.");
       }
+      if (tag.conversion !== void 0 && !["BYTE2INT", "WORD2INT", "DWORD2INT", "DWORD2REAL", "LWORD2INT", "LWORD2LREAL"].includes(tag.conversion)) {
+        invalid("Tag conversion\uC744 \uC9C0\uC6D0\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.");
+      }
       if (tag.signed !== void 0 && typeof tag.signed !== "boolean") invalid("Tag signed\uB294 boolean\uC774\uC5B4\uC57C \uD569\uB2C8\uB2E4.");
-      return { name: tag.name, bias: tag.bias, multiplier: tag.multiplier, signed: tag.signed === true, ...tag.transformOrder ? { transformOrder: tag.transformOrder.slice() } : {} };
+      return { name: tag.name, bias: tag.bias, multiplier: tag.multiplier, ...tag.conversion ? { conversion: tag.conversion } : {}, signed: tag.signed === true, ...tag.transformOrder ? { transformOrder: tag.transformOrder.slice() } : {} };
     }
     function validateMethodCall(call, interfaceStore, options, callIds, callNames, tagNames) {
       assertObject(call, "Method Call");
@@ -691,8 +694,9 @@ var require_validator = __commonJS({
         invalid("retry \uC124\uC815 \uBC94\uC704\uAC00 \uC798\uBABB\uB418\uC5C8\uC2B5\uB2C8\uB2E4.");
       }
       assertObject(value.execution, "execution");
-      assertFields(value.execution, ["savePolicy", "onMethodError"], "execution");
+      assertFields(value.execution, ["savePolicy", "onMethodError", "test"], "execution");
       if (!SAVE_POLICIES.has(value.execution.savePolicy) || !METHOD_ERROR_POLICIES.has(value.execution.onMethodError)) invalid("execution policy\uAC00 \uC798\uBABB\uB418\uC5C8\uC2B5\uB2C8\uB2E4.");
+      if (value.execution.test !== void 0 && typeof value.execution.test !== "boolean") invalid("execution.test\uB294 boolean\uC774\uC5B4\uC57C \uD569\uB2C8\uB2E4.");
       if (!Array.isArray(value.methodCalls) || value.methodCalls.length < 1 || value.methodCalls.length > MAX_METHOD_CALLS) {
         invalid(`methodCalls\uB294 1~${MAX_METHOD_CALLS}\uAC1C\uC5EC\uC57C \uD569\uB2C8\uB2E4.`);
       }
@@ -717,6 +721,7 @@ var require_validator = __commonJS({
       if (!LOG_LEVELS.has(value.log.level) || !Number.isInteger(value.log.maxFiles) || value.log.maxFiles < 1 || value.log.maxFiles > 1e3) invalid("log \uC124\uC815\uC774 \uC798\uBABB\uB418\uC5C8\uC2B5\uB2C8\uB2E4.");
       const normalized = clone(value);
       normalized.database.table = normalized.database.table.toUpperCase();
+      normalized.execution.test = normalized.execution.test === true;
       normalized.methodCalls = methodCalls;
       return normalized;
     }
@@ -1650,6 +1655,9 @@ var require_data_viewer = __commonJS({
     var FLAG_SUMMARIZED = 33554432;
     var FLAG_METADATA = 67108864;
     var FLAG_PRIMARY = 134217728;
+    var TIME_NS_ALIAS = "__DBUS_TIME_NS";
+    var MIN_TIME_NS_ALIAS = "__DBUS_MIN_TIME_NS";
+    var MAX_TIME_NS_ALIAS = "__DBUS_MAX_TIME_NS";
     var TYPE_NAMES = {
       4: "short",
       104: "ushort",
@@ -1723,10 +1731,29 @@ var require_data_viewer = __commonJS({
     function escapeSqlString(value) {
       return String(value === void 0 || value === null ? "" : value).replace(/'/g, "''");
     }
-    function formatSqlDateLiteral(value) {
+    function formatSqlTimestampLiteral(value) {
       if (!(value instanceof Date)) return "";
-      const iso = value.toISOString().replace("T", " ").replace("Z", "");
-      return `to_date('${escapeSqlString(iso)}')`;
+      const milliseconds = value.getTime();
+      if (!Number.isFinite(milliseconds)) return "";
+      const nanoseconds = BigInt(milliseconds) * BigInt(1e6);
+      return `FROM_TIMESTAMP(${nanoseconds.toString()})`;
+    }
+    function epochNanosecondsToIso(value) {
+      if (value === void 0 || value === null || value === "") return null;
+      const source = String(value).trim();
+      if (!/^-?\d+$/.test(source)) return null;
+      try {
+        const milliseconds = BigInt(source) / BigInt(1e6);
+        const numeric = Number(milliseconds);
+        if (!Number.isSafeInteger(numeric)) return null;
+        const date = new Date(numeric);
+        return Number.isFinite(date.getTime()) ? date.toISOString() : null;
+      } catch (_) {
+        return null;
+      }
+    }
+    function timeAsNanoseconds(columnName, alias) {
+      return `TO_CHAR(TO_TIMESTAMP(${columnName})) AS ${alias}`;
     }
     function namesOf(value) {
       const source = Array.isArray(value) ? value : String(value || "").split(",");
@@ -2094,14 +2121,14 @@ var require_data_viewer = __commonJS({
         if (next) return { sql: `(${time.name} > ? OR (${time.name} = ? AND ${primary.name} > ?))`, values: [parsed.cursorTime, parsed.cursorTime, parsed.cursorName], orderTime: "ASC", orderName: "ASC", reverse: false };
         return { sql: `(${time.name} < ? OR (${time.name} = ? AND ${primary.name} < ?))`, values: [parsed.cursorTime, parsed.cursorTime, parsed.cursorName], orderTime: "DESC", orderName: "DESC", reverse: true };
       }
-      function mapViewerRow(row, primary, time, numeric, stringValue) {
-        const date = new Date(rowValue(row, time.name));
-        if (!Number.isFinite(date.getTime())) return null;
+      function mapViewerRow(row, primary, numeric, stringValue) {
+        const timestamp = epochNanosecondsToIso(rowValue(row, TIME_NS_ALIAS));
+        if (!timestamp) return null;
         const numberValue = numeric ? rowValue(row, numeric.name) : null;
         const textValue = stringValue ? rowValue(row, stringValue.name) : null;
         return {
           name: String(rowValue(row, primary.name)),
-          time: date.toISOString(),
+          time: timestamp,
           value: numberValue === void 0 ? null : numberValue,
           stringValue: textValue === void 0 ? null : textValue
         };
@@ -2136,7 +2163,7 @@ var require_data_viewer = __commonJS({
         }
         const orderTime = cursor ? cursor.orderTime : parsed.direction === "oldest" ? "ASC" : "DESC";
         const orderName = cursor ? cursor.orderName : "ASC";
-        const selected = [primary.name, time.name, numeric.name];
+        const selected = [primary.name, timeAsNanoseconds(time.name, TIME_NS_ALIAS), numeric.name];
         if (stringValue) selected.push(stringValue.name);
         let limit = "";
         if (!parsed.boundedRange) {
@@ -2158,7 +2185,7 @@ var require_data_viewer = __commonJS({
           direction: parsed.direction,
           page: parsed.page,
           pageSize: parsed.pageSize,
-          rows: ordered.map((row) => mapViewerRow(row, primary, time, numeric, stringValue)).filter(Boolean)
+          rows: ordered.map((row) => mapViewerRow(row, primary, numeric, stringValue)).filter(Boolean)
         };
       }
       return {
@@ -2388,7 +2415,7 @@ var require_data_viewer = __commonJS({
                 values.push(parsed.to);
               }
               values.push(parsed.offset, parsed.rowsPerTag + 1);
-              const selected = [primary.name, time.name];
+              const selected = [primary.name, timeAsNanoseconds(time.name, TIME_NS_ALIAS)];
               if (numeric) selected.push(numeric.name);
               if (stringValue) selected.push(stringValue.name);
               const fetchedRows = rowsOf(connection.query(
@@ -2398,13 +2425,13 @@ var require_data_viewer = __commonJS({
               if (fetchedRows.length > parsed.rowsPerTag) anyHasMore = true;
               const rows = fetchedRows.slice(0, parsed.rowsPerTag);
               rows.forEach((row) => {
-                const date = new Date(rowValue(row, time.name));
-                if (!Number.isFinite(date.getTime())) return;
+                const timestamp = epochNanosecondsToIso(rowValue(row, TIME_NS_ALIAS));
+                if (!timestamp) return;
                 const numberValue = numeric ? rowValue(row, numeric.name) : null;
                 const textValue = stringValue ? rowValue(row, stringValue.name) : null;
                 pageRows.push({
                   name: String(rowValue(row, primary.name)),
-                  time: date.toISOString(),
+                  time: timestamp,
                   value: numberValue === void 0 ? null : numberValue,
                   stringValue: textValue === void 0 ? null : textValue
                 });
@@ -2446,22 +2473,17 @@ var require_data_viewer = __commonJS({
             const primary = roleColumn(value.columns, params.primaryColumn, "primaryKey", "primaryColumn");
             const time = roleColumn(value.columns, params.timeColumn, "basetime", "timeColumn");
             const rows = rowsOf(connection.query(
-              `SELECT MIN(${time.name}) AS MIN_TIME, MAX(${time.name}) AS MAX_TIME FROM ${value.target.table} WHERE ${primary.name} IN (${selectedJob.names.map(() => "?").join(", ")})`,
+              `SELECT TO_CHAR(TO_TIMESTAMP(MIN(${time.name}))) AS ${MIN_TIME_NS_ALIAS}, TO_CHAR(TO_TIMESTAMP(MAX(${time.name}))) AS ${MAX_TIME_NS_ALIAS} FROM ${value.target.table} WHERE ${primary.name} IN (${selectedJob.names.map(() => "?").join(", ")})`,
               ...selectedJob.names
             ));
             const row = rows[0] || {};
-            const asIso = (source) => {
-              if (source === void 0 || source === null || source === "") return null;
-              const date = new Date(source);
-              return Number.isFinite(date.getTime()) ? date.toISOString() : null;
-            };
             return {
               server: server.name,
               job: selectedJob.name,
               table: value.target.table,
               names: selectedJob.names,
-              minTime: asIso(rowValue(row, "MIN_TIME")),
-              maxTime: asIso(rowValue(row, "MAX_TIME"))
+              minTime: epochNanosecondsToIso(rowValue(row, MIN_TIME_NS_ALIAS)),
+              maxTime: epochNanosecondsToIso(rowValue(row, MAX_TIME_NS_ALIAS))
             };
           }, callback);
         },
@@ -2533,8 +2555,8 @@ var require_data_viewer = __commonJS({
             const time = roleColumn(value.columns, params.timeColumn, "basetime", "timeColumn");
             const numeric = column(value.columns, selectedJob.database.valueColumn, null, (item) => item.numeric, "valueColumn");
             const clauses = [`${primary.name} IN (${parsed.names.map((name) => `'${escapeSqlString(name)}'`).join(", ")})`];
-            if (parsed.from) clauses.push(`${time.name} >= ${formatSqlDateLiteral(parsed.from)}`);
-            if (parsed.to) clauses.push(`${time.name} <= ${formatSqlDateLiteral(parsed.to)}`);
+            if (parsed.from) clauses.push(`${time.name} >= ${formatSqlTimestampLiteral(parsed.from)}`);
+            if (parsed.to) clauses.push(`${time.name} <= ${formatSqlTimestampLiteral(parsed.to)}`);
             const query = `SELECT ${time.name} AS TIME, ${primary.name} AS NAME, ${numeric.name} AS VALUE FROM ${value.target.table} WHERE ${clauses.join(" AND ")} ORDER BY ${time.name} ASC, ${primary.name} ASC`;
             return {
               server: server.name,
@@ -2659,12 +2681,18 @@ var require_metadata_reader = __commonJS({
             )).map((row) => String(row.NAME === void 0 ? row.name : row.NAME))
           }));
         },
-        createTagTable(server, table, callback) {
+        createTagTable(server, table, options2, callback) {
+          let settings2 = options2;
+          let done = callback;
+          if (typeof options2 === "function") {
+            done = options2;
+            settings2 = {};
+          }
           if (typeof table !== "string" || !TABLE_NAME.test(table)) {
-            callback(new Error("DB table name \uD615\uC2DD\uC774 \uC798\uBABB\uB418\uC5C8\uC2B5\uB2C8\uB2E4."));
+            done(new Error("DB table name \uD615\uC2DD\uC774 \uC798\uBABB\uB418\uC5C8\uC2B5\uB2C8\uB2E4."));
             return;
           }
-          withConnection(server, callback, (connection) => {
+          withConnection(server, done, (connection) => {
             if (typeof connection.exec !== "function") throw new Error("machcli connection exec()\uB97C \uC0AC\uC6A9\uD560 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.");
             const existing = rowsOf(connection.query(
               "SELECT ID FROM M$SYS_TABLES WHERE NAME = ? AND DATABASE_ID = -1",
@@ -2675,8 +2703,20 @@ var require_metadata_reader = __commonJS({
               failure.code = "TABLE_ALREADY_EXISTS";
               throw failure;
             }
-            connection.exec(`CREATE TAG TABLE ${table} (NAME VARCHAR(100) PRIMARY KEY, TIME DATETIME BASETIME, VALUE DOUBLE SUMMARIZED, STR_VALUE VARCHAR(1024))`);
-            return { table, valueColumn: "VALUE", stringValueColumn: "STR_VALUE" };
+            const definitions = [
+              "NAME VARCHAR(100) PRIMARY KEY",
+              "TIME DATETIME BASETIME",
+              "VALUE DOUBLE SUMMARIZED"
+            ];
+            if (settings2 && settings2.includeStringValueColumn === true) {
+              definitions.push("STR_VALUE VARCHAR(1024)");
+            }
+            connection.exec(`CREATE TAG TABLE ${table} (${definitions.join(", ")})`);
+            return {
+              table,
+              valueColumn: "VALUE",
+              stringValueColumn: settings2 && settings2.includeStringValueColumn === true ? "STR_VALUE" : ""
+            };
           });
         },
         columns(server, table, callback) {
@@ -2724,6 +2764,298 @@ var require_metadata_reader = __commonJS({
       };
     }
     module2.exports = { createMetadataReader };
+  }
+});
+
+// cgi-bin/src/db/profile-operation-lock.js
+var require_profile_operation_lock = __commonJS({
+  "cgi-bin/src/db/profile-operation-lock.js"(exports2, module2) {
+    "use strict";
+    var path = require("path");
+    var { error } = require_errors();
+    var { createJobOperationLock } = require_operation_lock();
+    var DATABASE_PROFILE_LOCK_NAME = "ls-shared-database-profile";
+    function createDatabaseProfileOperationLock(options) {
+      const settings = options || {};
+      return createJobOperationLock({
+        directory: settings.directory || path.join(
+          settings.cgiRoot,
+          "conf.d",
+          ".database-profile-operation-locks"
+        )
+      });
+    }
+    function databaseProfileConflict(operation, name) {
+      return error(
+        "JOB_CONFLICT",
+        operation === "start" ? "Database \uC124\uC815 \uC800\uC7A5 \uB610\uB294 \uB2E4\uB978 Job \uC2DC\uC791\uC774 \uC9C4\uD589 \uC911\uC785\uB2C8\uB2E4. \uC644\uB8CC \uD6C4 \uB2E4\uC2DC \uC2DC\uB3C4\uD558\uC2ED\uC2DC\uC624." : "Job \uC2DC\uC791 \uB610\uB294 Database \uC124\uC815 \uC800\uC7A5\uC774 \uC9C4\uD589 \uC911\uC785\uB2C8\uB2E4. \uBAA8\uB4E0 Job\uC744 \uC911\uC9C0\uD55C \uD6C4 \uB2E4\uC2DC \uC800\uC7A5\uD558\uC2ED\uC2DC\uC624.",
+        { operation, ...name ? { name } : {} }
+      );
+    }
+    module2.exports = {
+      DATABASE_PROFILE_LOCK_NAME,
+      createDatabaseProfileOperationLock,
+      databaseProfileConflict
+    };
+  }
+});
+
+// cgi-bin/src/db/validation-adapter.js
+var require_validation_adapter = __commonJS({
+  "cgi-bin/src/db/validation-adapter.js"(exports2, module2) {
+    "use strict";
+    var { error } = require_errors();
+    var NUMERIC_TYPES = /* @__PURE__ */ new Set([
+      "byte",
+      "short",
+      "ushort",
+      "integer",
+      "int",
+      "uint",
+      "long",
+      "ulong",
+      "float",
+      "double",
+      "number",
+      "numeric",
+      "decimal"
+    ]);
+    var INTEGER_TYPES = /* @__PURE__ */ new Set(["byte", "short", "ushort", "integer", "int", "uint", "long", "ulong"]);
+    var STRING_TYPES = /* @__PURE__ */ new Set(["char", "varchar", "text", "clob", "string"]);
+    function defaultDependencies(options) {
+      const settings = options || {};
+      const serverModule = require_server_store();
+      const metadataModule = require_metadata_reader();
+      const dataViewerModule = require_data_viewer();
+      const serverStore = serverModule.createServerStore({ cgiRoot: settings.cgiRoot });
+      return {
+        serverStore,
+        metadataReader: metadataModule.createMetadataReader({ cgiRoot: settings.cgiRoot }),
+        tableCreator: dataViewerModule.createDataViewer({ cgiRoot: settings.cgiRoot, serverStore })
+      };
+    }
+    function unavailable(reason) {
+      return error("DB_UNAVAILABLE", "DB \uC124\uC815\uC744 \uD655\uC778\uD560 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.", {
+        reason: reason && reason.message ? reason.message : String(reason || "DB dependency unavailable")
+      });
+    }
+    function invalid(reason, details) {
+      return error("JOB_INVALID", reason, details);
+    }
+    function callDependency(target, method, args, callback) {
+      let completed = false;
+      const done = (dependencyError, value) => {
+        if (completed) return;
+        completed = true;
+        callback(dependencyError, value);
+      };
+      try {
+        if (!target || typeof target[method] !== "function") {
+          done(new Error(`DB adapter dependency ${method}()\uC744 \uC0AC\uC6A9\uD560 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.`));
+          return;
+        }
+        target[method](...args, done);
+      } catch (dependencyError) {
+        done(dependencyError);
+      }
+    }
+    function columnByName(columns, name) {
+      const expected = String(name || "").toUpperCase();
+      return columns.find((column) => String(column && column.name || "").toUpperCase() === expected) || null;
+    }
+    function typeOf(column) {
+      return String(column && column.type || "").toLowerCase().replace(/\(.*/, "");
+    }
+    function validatedExistingMapping(database, metadata, options) {
+      const columns = metadata && metadata.columns;
+      if (!metadata || String(metadata.tableType || "").toUpperCase() !== "TAG" || !Array.isArray(columns)) {
+        throw invalid("\uC120\uD0DD\uD55C table\uC740 TAG table\uC774\uC5B4\uC57C \uD569\uB2C8\uB2E4.", { table: database.table });
+      }
+      const primary = columns.find((column) => column && (column.primaryKey === true || column.primary === true));
+      const basetime = columns.find((column) => column && column.basetime === true);
+      const valueColumn = columnByName(columns, database.valueColumn);
+      const configuredStringColumn = String(database.stringValueColumn || "").trim();
+      const stringColumn = configuredStringColumn ? columnByName(columns, configuredStringColumn) : null;
+      if (!primary || !STRING_TYPES.has(typeOf(primary))) {
+        throw invalid("TAG name primary column\uC744 \uCC3E\uC744 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.", { table: database.table });
+      }
+      if (!basetime) {
+        throw invalid("TAG basetime column\uC744 \uCC3E\uC744 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.", { table: database.table });
+      }
+      if (!valueColumn || !NUMERIC_TYPES.has(typeOf(valueColumn))) {
+        throw invalid("database.valueColumn\uC740 \uC120\uD0DD\uD55C TAG table\uC758 \uC22B\uC790 column\uC774\uC5B4\uC57C \uD569\uB2C8\uB2E4.", {
+          problem: "value-column",
+          table: database.table,
+          valueColumn: database.valueColumn
+        });
+      }
+      if (INTEGER_TYPES.has(typeOf(valueColumn)) && options && options.fractionalValuePossible === true) {
+        throw invalid("\uC815\uC218 VALUE column\uC5D0\uB294 \uC18C\uC218 \uACB0\uACFC\uAC00 \uAC00\uB2A5\uD55C Tag Transform\uC744 \uC0AC\uC6A9\uD560 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.", {
+          problem: "fractional-value",
+          table: database.table,
+          valueColumn: database.valueColumn
+        });
+      }
+      if (configuredStringColumn && (!stringColumn || !STRING_TYPES.has(typeOf(stringColumn)))) {
+        throw invalid("database.stringValueColumn\uC740 \uBB38\uC790\uC5F4 column\uC774\uC5B4\uC57C \uD569\uB2C8\uB2E4.", {
+          problem: "string-value-column",
+          table: database.table,
+          stringValueColumn: database.stringValueColumn
+        });
+      }
+      return {
+        server: database.server,
+        table: database.table,
+        tagNameColumn: primary.name,
+        basetimeColumn: basetime.name,
+        valueColumn: valueColumn.name,
+        stringValueColumn: stringColumn ? stringColumn.name : null
+      };
+    }
+    function createDatabaseValidationAdapter(options) {
+      const settings = options || {};
+      let dependencies = null;
+      let dependencyError = null;
+      try {
+        dependencies = settings.serverStore && settings.metadataReader ? settings : (settings.loadDependencies || defaultDependencies)(settings);
+        if (!dependencies || !dependencies.serverStore || !dependencies.metadataReader) {
+          throw new Error("DB validation dependencies\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4.");
+        }
+      } catch (loadError) {
+        dependencyError = loadError;
+      }
+      return {
+        validate(database, callback) {
+          if (dependencyError) {
+            callback(unavailable(dependencyError));
+            return;
+          }
+          callDependency(dependencies.serverStore, "get", [database.server], (serverError, server) => {
+            if (serverError) {
+              callback(unavailable(serverError));
+              return;
+            }
+            if (!server) {
+              callback(invalid("\uB4F1\uB85D\uB41C DB server\uB97C \uCC3E\uC744 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.", { server: database.server }));
+              return;
+            }
+            callDependency(dependencies.metadataReader, "columns", [server, database.table], (metadataError, metadata) => {
+              if (metadataError) {
+                callback(unavailable(metadataError));
+                return;
+              }
+              if (String(metadata && metadata.tableType || "").toUpperCase() === "NOT_FOUND") {
+                callback(error("TABLE_NOT_FOUND", "Database Table\uC744 \uCC3E\uC744 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.", {
+                  server: database.server,
+                  table: database.table
+                }));
+                return;
+              }
+              try {
+                callback(null, validatedExistingMapping(database, metadata));
+              } catch (validationError) {
+                callback(validationError);
+              }
+            });
+          });
+        },
+        ensure(database, options2, callback) {
+          if (dependencyError) {
+            callback(unavailable(dependencyError));
+            return;
+          }
+          callDependency(dependencies.serverStore, "get", [database.server], (serverError, server) => {
+            if (serverError) {
+              callback(unavailable(serverError));
+              return;
+            }
+            if (!server) {
+              callback(invalid("\uB4F1\uB85D\uB41C DB server\uB97C \uCC3E\uC744 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.", { server: database.server }));
+              return;
+            }
+            callDependency(dependencies.metadataReader, "columns", [server, database.table], (metadataError, metadata) => {
+              if (metadataError) {
+                callback(unavailable(metadataError));
+                return;
+              }
+              if (!metadata || !metadata.tableType) {
+                callback(unavailable(new Error("DB Table \uC870\uD68C \uACB0\uACFC\uAC00 \uBE44\uC5B4 \uC788\uC2B5\uB2C8\uB2E4.")));
+                return;
+              }
+              if (String(metadata.tableType).toUpperCase() !== "NOT_FOUND") {
+                database.table = String(database.table).trim().toUpperCase();
+                database.valueColumn = String(database.valueColumn).trim().toUpperCase();
+                database.stringValueColumn = String(database.stringValueColumn || "").trim().toUpperCase();
+                try {
+                  callback(null, validatedExistingMapping(database, metadata, options2));
+                } catch (validationError) {
+                  callback(validationError);
+                }
+                return;
+              }
+              if (!dependencies.tableCreator) {
+                callback(unavailable(new Error("DB table creator\uB97C \uC0AC\uC6A9\uD560 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.")));
+                return;
+              }
+              const needsStringValueColumn = options2 && options2.needsStringValueColumn === true;
+              database.valueColumn = "VALUE";
+              database.stringValueColumn = needsStringValueColumn ? "STR_VALUE" : "";
+              database.table = String(database.table).trim().toUpperCase();
+              const request = {
+                server: database.server,
+                table: database.table,
+                valueColumn: "VALUE",
+                stringValueColumn: needsStringValueColumn ? "STR_VALUE" : null
+              };
+              callDependency(dependencies.tableCreator, "createTable", [request], (createError, created) => {
+                if (createError && createError.code !== "TABLE_ALREADY_EXISTS") {
+                  callback(createError);
+                  return;
+                }
+                if (createError) {
+                  callDependency(dependencies.metadataReader, "columns", [server, request.table], (raceReadError, raceMetadata) => {
+                    if (raceReadError) {
+                      callback(unavailable(raceReadError));
+                      return;
+                    }
+                    try {
+                      callback(null, validatedExistingMapping(database, raceMetadata, options2));
+                    } catch (validationError) {
+                      callback(validationError);
+                    }
+                  });
+                  return;
+                }
+                database.table = String(created && created.table || request.table).trim().toUpperCase();
+                const complete = () => callback(null, {
+                  server: database.server,
+                  table: database.table,
+                  valueColumn: database.valueColumn,
+                  stringValueColumn: database.stringValueColumn
+                });
+                if (typeof dependencies.serverStore.setDefaultTableColumns !== "function" || String(server.defaultTable || "").trim().toUpperCase() !== database.table) {
+                  complete();
+                  return;
+                }
+                callDependency(dependencies.serverStore, "setDefaultTableColumns", [
+                  database.server,
+                  database.table,
+                  database.valueColumn,
+                  database.stringValueColumn
+                ], (defaultError) => {
+                  if (defaultError) {
+                    callback(defaultError);
+                    return;
+                  }
+                  complete();
+                });
+              });
+            });
+          });
+        }
+      };
+    }
+    module2.exports = { createDatabaseValidationAdapter, validatedExistingMapping };
   }
 });
 
@@ -2828,7 +3160,7 @@ var require_settings_loader = __commonJS({
         // is copied into the Go collector policy file but is not exposed in the UI.
         ls: {
           interval: { useTaskCycle: true },
-          writer: { queueCapacity: 64, flushMaxRows: 1024, flushIntervalMs: 1e3 },
+          writer: { queueCapacity: 512, flushMaxRows: 8192, flushIntervalMs: 1e3 },
           performance: { enabled: true, jobSampleCount: 1e3, writerSummaryIntervalMs: 3e4 }
         }
       };
@@ -3397,41 +3729,16 @@ var require_ls_runtime = __commonJS({
             controller.stop(LS_SERVICE_NAME, callback);
           });
         },
-        activeNames() {
-          return readActiveJobs(files.active);
+        databaseChangeBlockers() {
+          const blocked = new Set(readActiveJobs(files.active));
+          const runtime = readRuntime(files.runtime);
+          Object.keys(runtime.jobs || {}).forEach((name) => {
+            const state = String(runtime.jobs[name]?.state || "").toLowerCase();
+            if (["starting", "running", "stopping"].includes(state)) blocked.add(name);
+          });
+          return [...blocked].sort();
         },
         overview,
-        reloadAllActive(callback) {
-          let names;
-          try {
-            names = readActiveJobs(files.active);
-            this.syncConfig();
-          } catch (snapshotError) {
-            callback(snapshotError);
-            return;
-          }
-          daemonStatus((_unused, state) => {
-            if (state.statusError) {
-              callback(state.statusError);
-              return;
-            }
-            if (!["RUNNING", "STARTING"].includes(state.controllerState)) {
-              callback(null, { names, reloaded: false });
-              return;
-            }
-            let index = 0;
-            const next = (reloadError) => {
-              if (reloadError || index >= names.length) {
-                callback(reloadError || null, { names, reloaded: true });
-                return;
-              }
-              const name = names[index];
-              index += 1;
-              this.reload(name, next);
-            };
-            next(null);
-          });
-        },
         uninstall
       };
     }
@@ -3449,6 +3756,191 @@ var require_ls_runtime = __commonJS({
   }
 });
 
+// cgi-bin/src/jobs/index-repository.js
+var require_index_repository = __commonJS({
+  "cgi-bin/src/jobs/index-repository.js"(exports2, module2) {
+    "use strict";
+    var fs = require("fs");
+    var path = require("path");
+    var { writeJsonAtomic } = require_atomic_json();
+    var { error } = require_errors();
+    var { validateJobName } = require_validator();
+    var INDEX_SCHEMA_VERSION = 1;
+    function tagsForCall(call) {
+      if (Array.isArray(call && call.outputSelections)) {
+        return call.outputSelections.flatMap((selection) => Array.isArray(selection.tags) ? selection.tags : []);
+      }
+      return Array.isArray(call && call.tags) ? call.tags : [];
+    }
+    function fromDocument(document) {
+      const calls = Array.isArray(document && document.methodCalls) ? document.methodCalls : [];
+      return {
+        schemaVersion: INDEX_SCHEMA_VERSION,
+        name: document.name,
+        profileId: document.profileId || "",
+        revision: document.revision,
+        intervalMs: document.schedule && document.schedule.intervalMs,
+        methodCallCount: calls.length,
+        tagCount: calls.reduce((total, call) => total + tagsForCall(call).length, 0),
+        interfaceIds: [...new Set(calls.map((call) => call.interfaceId).filter(Boolean))].sort(),
+        methodReferences: calls.map((call) => ({
+          interfaceId: call.interfaceId,
+          methodId: call.methodId,
+          callId: call.id
+        })),
+        database: {
+          server: document.database && document.database.server,
+          table: document.database && document.database.table,
+          valueColumn: document.database && document.database.valueColumn,
+          stringValueColumn: document.database && document.database.stringValueColumn || ""
+        },
+        execution: {
+          savePolicy: document.execution && document.execution.savePolicy,
+          onMethodError: document.execution && document.execution.onMethodError,
+          test: document.execution && document.execution.test === true
+        },
+        logLevel: document.log && document.log.level || "info"
+      };
+    }
+    function validateIndex(name, value) {
+      if (!value || typeof value !== "object" || Array.isArray(value) || value.schemaVersion !== INDEX_SCHEMA_VERSION || value.name !== name || !Number.isSafeInteger(value.revision) || value.revision < 1 || !Number.isInteger(value.methodCallCount) || value.methodCallCount < 0 || !Number.isInteger(value.tagCount) || value.tagCount < 0 || typeof value.profileId !== "string" || !Number.isSafeInteger(value.intervalMs) || value.intervalMs < 1 || !Array.isArray(value.interfaceIds) || !Array.isArray(value.methodReferences) || value.interfaceIds.some((item) => typeof item !== "string" || !item) || value.methodReferences.length !== value.methodCallCount || value.methodReferences.some((item) => !item || typeof item !== "object" || Array.isArray(item) || typeof item.interfaceId !== "string" || !item.interfaceId || typeof item.methodId !== "string" || !item.methodId || typeof item.callId !== "string" || !item.callId) || !value.database || typeof value.database !== "object" || Array.isArray(value.database) || ["server", "table", "valueColumn", "stringValueColumn"].some((field) => typeof value.database[field] !== "string") || !value.execution || typeof value.execution !== "object" || Array.isArray(value.execution) || typeof value.execution.savePolicy !== "string" || typeof value.execution.onMethodError !== "string" || value.execution.test !== void 0 && typeof value.execution.test !== "boolean" || typeof value.logLevel !== "string" || !value.logLevel) {
+        throw error("JOB_INVALID_CONFIG", "Job summary\uB97C \uC77D\uC744 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4. Job\uC744 \uB2E4\uC2DC \uC800\uC7A5\uD558\uC2ED\uC2DC\uC624.", {
+          name,
+          summaryUnavailable: true
+        });
+      }
+      value.execution.test = value.execution.test === true;
+      return value;
+    }
+    var JobIndexRepository = class {
+      constructor(options) {
+        const settings = options || {};
+        this.directory = settings.directory || path.join(settings.cgiRoot, "conf.d", "job-index");
+        this.jobDirectory = settings.jobDirectory || path.join(settings.cgiRoot, "conf.d", "jobs");
+        fs.mkdirSync(this.directory, { recursive: true });
+      }
+      file(name) {
+        return path.join(this.directory, `${validateJobName(name)}.json`);
+      }
+      jobFile(name) {
+        return path.join(this.jobDirectory, `${validateJobName(name)}.json`);
+      }
+      exists(name) {
+        return fs.existsSync(this.file(name));
+      }
+      registered(name) {
+        return fs.existsSync(this.jobFile(name)) && this.exists(name);
+      }
+      read(name) {
+        validateJobName(name);
+        let value;
+        try {
+          value = JSON.parse(fs.readFileSync(this.file(name), "utf8"));
+        } catch (failure) {
+          if (failure && failure.code === "ENOENT") {
+            throw error("JOB_NOT_FOUND", "Job summary\uB97C \uCC3E\uC744 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.", { name, summaryUnavailable: true });
+          }
+          throw error("JOB_INVALID_CONFIG", "Job summary\uB97C \uC77D\uC744 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4. Job\uC744 \uB2E4\uC2DC \uC800\uC7A5\uD558\uC2ED\uC2DC\uC624.", {
+            name,
+            summaryUnavailable: true
+          });
+        }
+        return validateIndex(name, value);
+      }
+      write(document) {
+        validateJobName(document && document.name);
+        const value = validateIndex(document.name, fromDocument(document));
+        writeJsonAtomic(this.file(document.name), value);
+        return value;
+      }
+      remove(name) {
+        const target = this.file(name);
+        try {
+          fs.unlinkSync(target);
+        } catch (failure) {
+          if (!failure || failure.code !== "ENOENT") throw failure;
+        }
+      }
+      list() {
+        if (!fs.existsSync(this.directory)) return [];
+        return fs.readdirSync(this.directory).filter((entry) => entry.endsWith(".json")).sort().flatMap((entry) => {
+          const name = entry.slice(0, -5);
+          try {
+            validateJobName(name);
+            if (!fs.existsSync(this.jobFile(name))) return [];
+            return [{ name, index: this.read(name), error: null }];
+          } catch (failure) {
+            return [{ name, index: null, error: failure }];
+          }
+        });
+      }
+    };
+    module2.exports = { INDEX_SCHEMA_VERSION, JobIndexRepository, fromDocument, validateIndex };
+  }
+});
+
+// cgi-bin/src/jobs/test-mode-normalizer.js
+var require_test_mode_normalizer = __commonJS({
+  "cgi-bin/src/jobs/test-mode-normalizer.js"(exports2, module2) {
+    "use strict";
+    var path = require("path");
+    var { createJobOperationLock } = require_operation_lock();
+    var { JobIndexRepository } = require_index_repository();
+    var { JobRepository, revisionOf } = require_repository();
+    function createTestModeNormalizer(options) {
+      const settings = options || {};
+      const policy = settings.productPolicy;
+      const repository = settings.repository || new JobRepository({
+        cgiRoot: settings.cgiRoot,
+        jobDir: settings.jobDir
+      });
+      const indexRepository = settings.indexRepository || new JobIndexRepository({
+        cgiRoot: settings.cgiRoot,
+        jobDirectory: repository.directory,
+        directory: settings.jobIndexDir
+      });
+      const operationLock = settings.operationLock || createJobOperationLock({
+        directory: path.join(settings.cgiRoot, "conf.d", ".job-operation-locks")
+      });
+      function disableForDatabase(serverName, effectiveTable) {
+        if (!policy || policy.target !== "ls" || typeof policy.normalizeTestMode !== "function") return [];
+        const table = String(effectiveTable || "").trim().toUpperCase();
+        if (table === policy.testTable) return [];
+        const changed = [];
+        repository.list().forEach((record) => {
+          if (record.error || !record.document || !indexRepository.registered(record.name)) return;
+          if (record.document.database?.server !== serverName || record.document.execution?.test !== true) return;
+          const handle = operationLock.acquire(record.name);
+          try {
+            const current = repository.read(record.name);
+            if (current.database?.server !== serverName || current.execution?.test !== true) return;
+            const effective = {
+              ...current,
+              database: { ...current.database, table },
+              execution: { ...current.execution }
+            };
+            policy.normalizeTestMode(effective);
+            if (effective.execution.test === true) return;
+            const revision = revisionOf(current);
+            const document = repository.save(record.name, {
+              ...current,
+              execution: { ...current.execution, test: false },
+              revision: revision + 1
+            }, revision);
+            indexRepository.write(document);
+            changed.push(record.name);
+          } finally {
+            handle.release();
+          }
+        });
+        return changed;
+      }
+      return { disableForDatabase };
+    }
+    module2.exports = { createTestModeNormalizer };
+  }
+});
+
 // cgi-bin/src/cgi/db-api.js
 var require_db_api = __commonJS({
   "cgi-bin/src/cgi/db-api.js"(exports2, module2) {
@@ -3457,12 +3949,20 @@ var require_db_api = __commonJS({
     var httpDefault = require_http();
     var { createDataViewer } = require_data_viewer();
     var { createMetadataReader } = require_metadata_reader();
+    var {
+      DATABASE_PROFILE_LOCK_NAME,
+      createDatabaseProfileOperationLock,
+      databaseProfileConflict
+    } = require_profile_operation_lock();
+    var { validatedExistingMapping } = require_validation_adapter();
     var { MAX_SERVER_JSON_BYTES, createServerStore } = require_server_store();
     var { loadSettings } = require_settings_loader();
     var { loadProductPolicy } = require_product_policy();
     var { createLsRuntime } = require_ls_runtime();
     var { createControllerAdapter } = require_controller_adapter();
     var { JobRepository } = require_repository();
+    var { JobIndexRepository } = require_index_repository();
+    var { createTestModeNormalizer } = require_test_mode_normalizer();
     var { error } = require_errors();
     var path = require("path");
     function requestMethod() {
@@ -3476,6 +3976,14 @@ var require_db_api = __commonJS({
       const viewer = settings.viewer || createDataViewer({ cgiRoot: settings.cgiRoot, serverStore: store, productPolicy });
       const metadataReader = settings.metadataReader || createMetadataReader({ clientFactory: settings.clientFactory });
       const method = settings.method || requestMethod;
+      const repository = settings.repository || (settings.cgiRoot ? new JobRepository({ cgiRoot: settings.cgiRoot, jobDir: settings.jobDir }) : null);
+      const indexRepository = settings.indexRepository || (settings.cgiRoot ? new JobIndexRepository({
+        cgiRoot: settings.cgiRoot,
+        jobDirectory: repository.directory,
+        directory: settings.jobIndexDir
+      }) : null);
+      const testModeNormalizer = settings.testModeNormalizer || (settings.cgiRoot && productPolicy?.target === "ls" ? createTestModeNormalizer({ cgiRoot: settings.cgiRoot, repository, productPolicy }) : null);
+      const databaseProfileLock = settings.databaseProfileLock || (settings.cgiRoot && productPolicy?.target === "ls" ? createDatabaseProfileOperationLock({ cgiRoot: settings.cgiRoot }) : null);
       function lsRuntime() {
         if (settings.lsRuntime) return settings.lsRuntime;
         if (!settings.cgiRoot) return null;
@@ -3485,7 +3993,7 @@ var require_db_api = __commonJS({
           cgiRoot: settings.cgiRoot,
           controller: createControllerAdapter(),
           serverStore: store,
-          repository: settings.repository || new JobRepository({ cgiRoot: settings.cgiRoot, jobDir: settings.jobDir })
+          repository
         });
       }
       function run(kind) {
@@ -3536,6 +4044,79 @@ var require_db_api = __commonJS({
           }
           return { host: payload.host, port, user: payload.user, password: payload.password };
         };
+        const normalizeLsProfile = (payload) => {
+          const defaultTable = typeof payload.defaultTable === "string" ? payload.defaultTable.trim().toUpperCase() : "";
+          return {
+            ...payload,
+            defaultTable,
+            valueColumn: defaultTable ? String(payload.valueColumn || "VALUE").trim().toUpperCase() || "VALUE" : "",
+            // LS stores numeric PLC values only. STR_VALUE remains a generic-only
+            // option and must not leak back in from an older profile document.
+            stringValueColumn: ""
+          };
+        };
+        const hasRegisteredLsJobs = () => {
+          if (!indexRepository || typeof indexRepository.list !== "function") return false;
+          return indexRepository.list().length > 0;
+        };
+        const ensureLsDefaultTable = (profileName, payload, done) => {
+          let normalized;
+          let connection;
+          try {
+            normalized = normalizeLsProfile(payload);
+            if (!normalized.defaultTable || !hasRegisteredLsJobs()) {
+              done(null, normalized);
+              return;
+            }
+            connection = previewConnection(normalized);
+          } catch (validationError) {
+            done(validationError);
+            return;
+          }
+          const database = {
+            server: profileName,
+            table: normalized.defaultTable,
+            valueColumn: normalized.valueColumn,
+            stringValueColumn: ""
+          };
+          const validateExisting = (metadata) => {
+            try {
+              validatedExistingMapping(database, metadata, { fractionalValuePossible: false });
+              done(null, normalized);
+            } catch (mappingError) {
+              done(mappingError);
+            }
+          };
+          metadataReader.columns(connection, normalized.defaultTable, (metadataError, metadata) => {
+            if (metadataError) {
+              done(error("DB_UNAVAILABLE", "Database Table\uC744 \uD655\uC778\uD560 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.", { reason: metadataError.message }));
+              return;
+            }
+            if (String(metadata && metadata.tableType || "").toUpperCase() !== "NOT_FOUND") {
+              validateExisting(metadata);
+              return;
+            }
+            metadataReader.createTagTable(connection, normalized.defaultTable, {
+              includeStringValueColumn: false
+            }, (createError) => {
+              if (!createError) {
+                done(null, normalized);
+                return;
+              }
+              if (createError.code !== "TABLE_ALREADY_EXISTS") {
+                done(createError);
+                return;
+              }
+              metadataReader.columns(connection, normalized.defaultTable, (raceError, raceMetadata) => {
+                if (raceError) {
+                  done(error("DB_UNAVAILABLE", "Database Table\uC744 \uD655\uC778\uD560 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.", { reason: raceError.message }));
+                  return;
+                }
+                validateExisting(raceMetadata);
+              });
+            });
+          });
+        };
         try {
           const verb = method();
           if (kind === "server") {
@@ -3559,38 +4140,77 @@ var require_db_api = __commonJS({
                 store.update(params2.name, payload, callback(200));
                 return;
               }
-              let active;
+              let profileHandle = null;
               try {
-                active = runtime.activeNames();
-              } catch (activeError) {
-                fail(activeError);
+                if (databaseProfileLock) profileHandle = databaseProfileLock.acquire(DATABASE_PROFILE_LOCK_NAME);
+              } catch (lockError) {
+                if (lockError && lockError.code === "JOB_CONFLICT") fail(databaseProfileConflict("update"), 409);
+                else fail(lockError);
                 return;
               }
-              if (active.length && payload.restartRunningJobs !== true) {
-                fail(error("LS_DATABASE_RESTART_REQUIRED", "Database \uC124\uC815\uC744 \uC800\uC7A5\uD558\uBA74 \uC2E4\uD589 \uC911\uC778 LS Job\uC774 \uC7AC\uC2DC\uC791\uB429\uB2C8\uB2E4.", { jobs: active }), 409);
+              let profileFinished = false;
+              const finishProfileUpdate = (failure, value, status) => {
+                if (profileFinished) return;
+                profileFinished = true;
+                let releaseError = null;
+                if (profileHandle) {
+                  try {
+                    profileHandle.release();
+                  } catch (cleanupError) {
+                    releaseError = cleanupError;
+                  }
+                }
+                if (failure && releaseError && (typeof failure === "object" || typeof failure === "function")) {
+                  failure.cleanupError = releaseError;
+                }
+                if (failure || releaseError) fail(failure || releaseError, status);
+                else reply(200, value);
+              };
+              let blocked;
+              try {
+                blocked = runtime.databaseChangeBlockers();
+              } catch (stateError) {
+                finishProfileUpdate(stateError);
                 return;
               }
-              store.update(params2.name, payload, (updateError, value) => {
-                if (updateError) {
-                  fail(updateError);
+              if (blocked.length) {
+                finishProfileUpdate(error("LS_DATABASE_JOBS_NOT_STOPPED", "Database \uC124\uC815\uC744 \uC218\uC815\uD558\uB824\uBA74 \uBAA8\uB4E0 Job\uC744 \uBA3C\uC800 \uC911\uC9C0\uD574\uC57C \uD569\uB2C8\uB2E4.", { jobs: blocked }), null, 409);
+                return;
+              }
+              ensureLsDefaultTable(params2.name, payload, (provisionError, normalizedPayload) => {
+                if (provisionError) {
+                  finishProfileUpdate(provisionError);
                   return;
                 }
-                if (!active.length) {
+                let lateBlocked;
+                try {
+                  lateBlocked = runtime.databaseChangeBlockers();
+                } catch (stateError) {
+                  finishProfileUpdate(stateError);
+                  return;
+                }
+                if (lateBlocked.length) {
+                  finishProfileUpdate(error("LS_DATABASE_JOBS_NOT_STOPPED", "Database \uC124\uC815\uC744 \uC218\uC815\uD558\uB824\uBA74 \uBAA8\uB4E0 Job\uC744 \uBA3C\uC800 \uC911\uC9C0\uD574\uC57C \uD569\uB2C8\uB2E4.", { jobs: lateBlocked }), null, 409);
+                  return;
+                }
+                store.update(params2.name, normalizedPayload, (updateError, value) => {
+                  if (updateError) {
+                    finishProfileUpdate(updateError);
+                    return;
+                  }
+                  try {
+                    testModeNormalizer?.disableForDatabase(params2.name, value.defaultTable);
+                  } catch (normalizationError) {
+                    finishProfileUpdate(normalizationError);
+                    return;
+                  }
                   try {
                     runtime.syncConfig();
                   } catch (snapshotError) {
-                    fail(snapshotError);
+                    finishProfileUpdate(snapshotError);
                     return;
                   }
-                  reply(200, value);
-                  return;
-                }
-                runtime.reloadAllActive((reloadError) => {
-                  if (reloadError) {
-                    fail(reloadError);
-                    return;
-                  }
-                  reply(200, value);
+                  finishProfileUpdate(null, value);
                 });
               });
             } else if (verb === "DELETE") {
@@ -4049,258 +4669,6 @@ var require_interval_policy = __commonJS({
   }
 });
 
-// cgi-bin/src/db/validation-adapter.js
-var require_validation_adapter = __commonJS({
-  "cgi-bin/src/db/validation-adapter.js"(exports2, module2) {
-    "use strict";
-    var { error } = require_errors();
-    var NUMERIC_TYPES = /* @__PURE__ */ new Set([
-      "byte",
-      "short",
-      "ushort",
-      "integer",
-      "int",
-      "uint",
-      "long",
-      "ulong",
-      "float",
-      "double",
-      "number",
-      "numeric",
-      "decimal"
-    ]);
-    var INTEGER_TYPES = /* @__PURE__ */ new Set(["byte", "short", "ushort", "integer", "int", "uint", "long", "ulong"]);
-    var STRING_TYPES = /* @__PURE__ */ new Set(["char", "varchar", "text", "clob", "string"]);
-    function defaultDependencies(options) {
-      const settings = options || {};
-      const serverModule = require_server_store();
-      const metadataModule = require_metadata_reader();
-      const dataViewerModule = require_data_viewer();
-      const serverStore = serverModule.createServerStore({ cgiRoot: settings.cgiRoot });
-      return {
-        serverStore,
-        metadataReader: metadataModule.createMetadataReader({ cgiRoot: settings.cgiRoot }),
-        tableCreator: dataViewerModule.createDataViewer({ cgiRoot: settings.cgiRoot, serverStore })
-      };
-    }
-    function unavailable(reason) {
-      return error("DB_UNAVAILABLE", "DB \uC124\uC815\uC744 \uD655\uC778\uD560 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.", {
-        reason: reason && reason.message ? reason.message : String(reason || "DB dependency unavailable")
-      });
-    }
-    function invalid(reason, details) {
-      return error("JOB_INVALID", reason, details);
-    }
-    function callDependency(target, method, args, callback) {
-      let completed = false;
-      const done = (dependencyError, value) => {
-        if (completed) return;
-        completed = true;
-        callback(dependencyError, value);
-      };
-      try {
-        if (!target || typeof target[method] !== "function") {
-          done(new Error(`DB adapter dependency ${method}()\uC744 \uC0AC\uC6A9\uD560 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.`));
-          return;
-        }
-        target[method](...args, done);
-      } catch (dependencyError) {
-        done(dependencyError);
-      }
-    }
-    function columnByName(columns, name) {
-      const expected = String(name || "").toUpperCase();
-      return columns.find((column) => String(column && column.name || "").toUpperCase() === expected) || null;
-    }
-    function typeOf(column) {
-      return String(column && column.type || "").toLowerCase().replace(/\(.*/, "");
-    }
-    function validatedExistingMapping(database, metadata, options) {
-      const columns = metadata && metadata.columns;
-      if (!metadata || String(metadata.tableType || "").toUpperCase() !== "TAG" || !Array.isArray(columns)) {
-        throw invalid("\uC120\uD0DD\uD55C table\uC740 TAG table\uC774\uC5B4\uC57C \uD569\uB2C8\uB2E4.", { table: database.table });
-      }
-      const primary = columns.find((column) => column && (column.primaryKey === true || column.primary === true));
-      const basetime = columns.find((column) => column && column.basetime === true);
-      const valueColumn = columnByName(columns, database.valueColumn);
-      const configuredStringColumn = String(database.stringValueColumn || "").trim();
-      const stringColumn = configuredStringColumn ? columnByName(columns, configuredStringColumn) : null;
-      if (!primary || !STRING_TYPES.has(typeOf(primary))) {
-        throw invalid("TAG name primary column\uC744 \uCC3E\uC744 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.", { table: database.table });
-      }
-      if (!basetime) {
-        throw invalid("TAG basetime column\uC744 \uCC3E\uC744 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.", { table: database.table });
-      }
-      if (!valueColumn || !NUMERIC_TYPES.has(typeOf(valueColumn))) {
-        throw invalid("database.valueColumn\uC740 \uC120\uD0DD\uD55C TAG table\uC758 \uC22B\uC790 column\uC774\uC5B4\uC57C \uD569\uB2C8\uB2E4.", {
-          problem: "value-column",
-          table: database.table,
-          valueColumn: database.valueColumn
-        });
-      }
-      if (INTEGER_TYPES.has(typeOf(valueColumn)) && options && options.fractionalValuePossible === true) {
-        throw invalid("\uC815\uC218 VALUE column\uC5D0\uB294 \uC18C\uC218 \uACB0\uACFC\uAC00 \uAC00\uB2A5\uD55C Tag Transform\uC744 \uC0AC\uC6A9\uD560 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.", {
-          problem: "fractional-value",
-          table: database.table,
-          valueColumn: database.valueColumn
-        });
-      }
-      if (configuredStringColumn && (!stringColumn || !STRING_TYPES.has(typeOf(stringColumn)))) {
-        throw invalid("database.stringValueColumn\uC740 \uBB38\uC790\uC5F4 column\uC774\uC5B4\uC57C \uD569\uB2C8\uB2E4.", {
-          problem: "string-value-column",
-          table: database.table,
-          stringValueColumn: database.stringValueColumn
-        });
-      }
-      return {
-        server: database.server,
-        table: database.table,
-        tagNameColumn: primary.name,
-        basetimeColumn: basetime.name,
-        valueColumn: valueColumn.name,
-        stringValueColumn: stringColumn ? stringColumn.name : null
-      };
-    }
-    function createDatabaseValidationAdapter(options) {
-      const settings = options || {};
-      let dependencies = null;
-      let dependencyError = null;
-      try {
-        dependencies = settings.serverStore && settings.metadataReader ? settings : (settings.loadDependencies || defaultDependencies)(settings);
-        if (!dependencies || !dependencies.serverStore || !dependencies.metadataReader) {
-          throw new Error("DB validation dependencies\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4.");
-        }
-      } catch (loadError) {
-        dependencyError = loadError;
-      }
-      return {
-        validate(database, callback) {
-          if (dependencyError) {
-            callback(unavailable(dependencyError));
-            return;
-          }
-          callDependency(dependencies.serverStore, "get", [database.server], (serverError, server) => {
-            if (serverError) {
-              callback(unavailable(serverError));
-              return;
-            }
-            if (!server) {
-              callback(invalid("\uB4F1\uB85D\uB41C DB server\uB97C \uCC3E\uC744 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.", { server: database.server }));
-              return;
-            }
-            callDependency(dependencies.metadataReader, "columns", [server, database.table], (metadataError, metadata) => {
-              if (metadataError) {
-                callback(unavailable(metadataError));
-                return;
-              }
-              try {
-                callback(null, validatedExistingMapping(database, metadata));
-              } catch (validationError) {
-                callback(validationError);
-              }
-            });
-          });
-        },
-        ensure(database, options2, callback) {
-          if (dependencyError) {
-            callback(unavailable(dependencyError));
-            return;
-          }
-          callDependency(dependencies.serverStore, "get", [database.server], (serverError, server) => {
-            if (serverError) {
-              callback(unavailable(serverError));
-              return;
-            }
-            if (!server) {
-              callback(invalid("\uB4F1\uB85D\uB41C DB server\uB97C \uCC3E\uC744 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.", { server: database.server }));
-              return;
-            }
-            callDependency(dependencies.metadataReader, "columns", [server, database.table], (metadataError, metadata) => {
-              if (metadataError) {
-                callback(unavailable(metadataError));
-                return;
-              }
-              if (!metadata || !metadata.tableType) {
-                callback(unavailable(new Error("DB Table \uC870\uD68C \uACB0\uACFC\uAC00 \uBE44\uC5B4 \uC788\uC2B5\uB2C8\uB2E4.")));
-                return;
-              }
-              if (String(metadata.tableType).toUpperCase() !== "NOT_FOUND") {
-                database.table = String(database.table).trim().toUpperCase();
-                database.valueColumn = String(database.valueColumn).trim().toUpperCase();
-                database.stringValueColumn = String(database.stringValueColumn || "").trim().toUpperCase();
-                try {
-                  callback(null, validatedExistingMapping(database, metadata, options2));
-                } catch (validationError) {
-                  callback(validationError);
-                }
-                return;
-              }
-              if (!dependencies.tableCreator) {
-                callback(unavailable(new Error("DB table creator\uB97C \uC0AC\uC6A9\uD560 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.")));
-                return;
-              }
-              const needsStringValueColumn = options2 && options2.needsStringValueColumn === true;
-              database.valueColumn = "VALUE";
-              database.stringValueColumn = needsStringValueColumn ? "STR_VALUE" : "";
-              database.table = String(database.table).trim().toUpperCase();
-              const request = {
-                server: database.server,
-                table: database.table,
-                valueColumn: "VALUE",
-                stringValueColumn: needsStringValueColumn ? "STR_VALUE" : null
-              };
-              callDependency(dependencies.tableCreator, "createTable", [request], (createError, created) => {
-                if (createError && createError.code !== "TABLE_ALREADY_EXISTS") {
-                  callback(createError);
-                  return;
-                }
-                if (createError) {
-                  callDependency(dependencies.metadataReader, "columns", [server, request.table], (raceReadError, raceMetadata) => {
-                    if (raceReadError) {
-                      callback(unavailable(raceReadError));
-                      return;
-                    }
-                    try {
-                      callback(null, validatedExistingMapping(database, raceMetadata, options2));
-                    } catch (validationError) {
-                      callback(validationError);
-                    }
-                  });
-                  return;
-                }
-                database.table = String(created && created.table || request.table).trim().toUpperCase();
-                const complete = () => callback(null, {
-                  server: database.server,
-                  table: database.table,
-                  valueColumn: database.valueColumn,
-                  stringValueColumn: database.stringValueColumn
-                });
-                if (typeof dependencies.serverStore.setDefaultTableColumns !== "function" || String(server.defaultTable || "").trim().toUpperCase() !== database.table) {
-                  complete();
-                  return;
-                }
-                callDependency(dependencies.serverStore, "setDefaultTableColumns", [
-                  database.server,
-                  database.table,
-                  database.valueColumn,
-                  database.stringValueColumn
-                ], (defaultError) => {
-                  if (defaultError) {
-                    callback(defaultError);
-                    return;
-                  }
-                  complete();
-                });
-              });
-            });
-          });
-        }
-      };
-    }
-    module2.exports = { createDatabaseValidationAdapter };
-  }
-});
-
 // cgi-bin/src/output/storage-policy.js
 var require_storage_policy = __commonJS({
   "cgi-bin/src/output/storage-policy.js"(exports2, module2) {
@@ -4719,7 +5087,7 @@ var require_defaults = __commonJS({
         schemaVersion: 1,
         schedule: { intervalMs: 1e3 },
         retry: { initialDelayMs: 5e3, maximumDelayMs: 3e4, multiplier: 2 },
-        execution: { savePolicy: "perMethod", onMethodError: "stop" },
+        execution: { savePolicy: "perMethod", onMethodError: "stop", test: false },
         methodCalls: [],
         database: { server: "", table: "TAG", valueColumn: "VALUE", stringValueColumn: "STR_VALUE" },
         // maxFiles is retained in Job documents for backward compatibility.
@@ -4728,127 +5096,6 @@ var require_defaults = __commonJS({
       };
     }
     module2.exports = { jobDefaults };
-  }
-});
-
-// cgi-bin/src/jobs/index-repository.js
-var require_index_repository = __commonJS({
-  "cgi-bin/src/jobs/index-repository.js"(exports2, module2) {
-    "use strict";
-    var fs = require("fs");
-    var path = require("path");
-    var { writeJsonAtomic } = require_atomic_json();
-    var { error } = require_errors();
-    var { validateJobName } = require_validator();
-    var INDEX_SCHEMA_VERSION = 1;
-    function tagsForCall(call) {
-      if (Array.isArray(call && call.outputSelections)) {
-        return call.outputSelections.flatMap((selection) => Array.isArray(selection.tags) ? selection.tags : []);
-      }
-      return Array.isArray(call && call.tags) ? call.tags : [];
-    }
-    function fromDocument(document) {
-      const calls = Array.isArray(document && document.methodCalls) ? document.methodCalls : [];
-      return {
-        schemaVersion: INDEX_SCHEMA_VERSION,
-        name: document.name,
-        profileId: document.profileId || "",
-        revision: document.revision,
-        intervalMs: document.schedule && document.schedule.intervalMs,
-        methodCallCount: calls.length,
-        tagCount: calls.reduce((total, call) => total + tagsForCall(call).length, 0),
-        interfaceIds: [...new Set(calls.map((call) => call.interfaceId).filter(Boolean))].sort(),
-        methodReferences: calls.map((call) => ({
-          interfaceId: call.interfaceId,
-          methodId: call.methodId,
-          callId: call.id
-        })),
-        database: {
-          server: document.database && document.database.server,
-          table: document.database && document.database.table,
-          valueColumn: document.database && document.database.valueColumn,
-          stringValueColumn: document.database && document.database.stringValueColumn || ""
-        },
-        execution: {
-          savePolicy: document.execution && document.execution.savePolicy,
-          onMethodError: document.execution && document.execution.onMethodError
-        },
-        logLevel: document.log && document.log.level || "info"
-      };
-    }
-    function validateIndex(name, value) {
-      if (!value || typeof value !== "object" || Array.isArray(value) || value.schemaVersion !== INDEX_SCHEMA_VERSION || value.name !== name || !Number.isSafeInteger(value.revision) || value.revision < 1 || !Number.isInteger(value.methodCallCount) || value.methodCallCount < 0 || !Number.isInteger(value.tagCount) || value.tagCount < 0 || typeof value.profileId !== "string" || !Number.isSafeInteger(value.intervalMs) || value.intervalMs < 1 || !Array.isArray(value.interfaceIds) || !Array.isArray(value.methodReferences) || value.interfaceIds.some((item) => typeof item !== "string" || !item) || value.methodReferences.length !== value.methodCallCount || value.methodReferences.some((item) => !item || typeof item !== "object" || Array.isArray(item) || typeof item.interfaceId !== "string" || !item.interfaceId || typeof item.methodId !== "string" || !item.methodId || typeof item.callId !== "string" || !item.callId) || !value.database || typeof value.database !== "object" || Array.isArray(value.database) || ["server", "table", "valueColumn", "stringValueColumn"].some((field) => typeof value.database[field] !== "string") || !value.execution || typeof value.execution !== "object" || Array.isArray(value.execution) || typeof value.execution.savePolicy !== "string" || typeof value.execution.onMethodError !== "string" || typeof value.logLevel !== "string" || !value.logLevel) {
-        throw error("JOB_INVALID_CONFIG", "Job summary\uB97C \uC77D\uC744 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4. Job\uC744 \uB2E4\uC2DC \uC800\uC7A5\uD558\uC2ED\uC2DC\uC624.", {
-          name,
-          summaryUnavailable: true
-        });
-      }
-      return value;
-    }
-    var JobIndexRepository = class {
-      constructor(options) {
-        const settings = options || {};
-        this.directory = settings.directory || path.join(settings.cgiRoot, "conf.d", "job-index");
-        this.jobDirectory = settings.jobDirectory || path.join(settings.cgiRoot, "conf.d", "jobs");
-        fs.mkdirSync(this.directory, { recursive: true });
-      }
-      file(name) {
-        return path.join(this.directory, `${validateJobName(name)}.json`);
-      }
-      jobFile(name) {
-        return path.join(this.jobDirectory, `${validateJobName(name)}.json`);
-      }
-      exists(name) {
-        return fs.existsSync(this.file(name));
-      }
-      registered(name) {
-        return fs.existsSync(this.jobFile(name)) && this.exists(name);
-      }
-      read(name) {
-        validateJobName(name);
-        let value;
-        try {
-          value = JSON.parse(fs.readFileSync(this.file(name), "utf8"));
-        } catch (failure) {
-          if (failure && failure.code === "ENOENT") {
-            throw error("JOB_NOT_FOUND", "Job summary\uB97C \uCC3E\uC744 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.", { name, summaryUnavailable: true });
-          }
-          throw error("JOB_INVALID_CONFIG", "Job summary\uB97C \uC77D\uC744 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4. Job\uC744 \uB2E4\uC2DC \uC800\uC7A5\uD558\uC2ED\uC2DC\uC624.", {
-            name,
-            summaryUnavailable: true
-          });
-        }
-        return validateIndex(name, value);
-      }
-      write(document) {
-        validateJobName(document && document.name);
-        const value = validateIndex(document.name, fromDocument(document));
-        writeJsonAtomic(this.file(document.name), value);
-        return value;
-      }
-      remove(name) {
-        const target = this.file(name);
-        try {
-          fs.unlinkSync(target);
-        } catch (failure) {
-          if (!failure || failure.code !== "ENOENT") throw failure;
-        }
-      }
-      list() {
-        if (!fs.existsSync(this.directory)) return [];
-        return fs.readdirSync(this.directory).filter((entry) => entry.endsWith(".json")).sort().flatMap((entry) => {
-          const name = entry.slice(0, -5);
-          try {
-            validateJobName(name);
-            if (!fs.existsSync(this.jobFile(name))) return [];
-            return [{ name, index: this.read(name), error: null }];
-          } catch (failure) {
-            return [{ name, index: null, error: failure }];
-          }
-        });
-      }
-    };
-    module2.exports = { INDEX_SCHEMA_VERSION, JobIndexRepository, fromDocument, validateIndex };
   }
 });
 
@@ -4862,6 +5109,11 @@ var require_manager = __commonJS({
     var { loadProductPolicy } = require_product_policy();
     var { resolveIntervalPolicy } = require_interval_policy();
     var { createDatabaseValidationAdapter } = require_validation_adapter();
+    var {
+      DATABASE_PROFILE_LOCK_NAME,
+      createDatabaseProfileOperationLock,
+      databaseProfileConflict
+    } = require_profile_operation_lock();
     var { jobMayProduceFractionalValue, jobNeedsStringValueColumn } = require_storage_policy();
     var { InterfaceStore } = require_store();
     var { profileLockKey: interfaceLockKey } = require_profile_lock_key();
@@ -4973,6 +5225,7 @@ var require_manager = __commonJS({
         this.operationLock = settings.operationLock || createJobOperationLock({
           directory: path.join(this.cgiRoot, "conf.d", ".job-operation-locks")
         });
+        this.databaseProfileLock = this.isLs ? settings.databaseProfileLock || createDatabaseProfileOperationLock({ cgiRoot: this.cgiRoot }) : null;
         this.packageLifecycleLock = settings.packageLifecycleLock || createJobOperationLock({
           directory: path.join(this.cgiRoot, "conf.d", ".package-lifecycle-locks")
         });
@@ -5027,6 +5280,19 @@ var require_manager = __commonJS({
           this.database.validate(config.database, callback);
           return;
         }
+        this.applyLsDatabaseProfile(config, (profileError) => {
+          if (profileError) {
+            callback(profileError);
+            return;
+          }
+          this.database.validate(config.database, callback);
+        });
+      }
+      applyLsDatabaseProfile(config, callback) {
+        if (!this.isLs) {
+          callback(null);
+          return;
+        }
         this.serverStore.get(config.database.server, (serverError, server) => {
           if (serverError) {
             callback(serverError);
@@ -5042,7 +5308,24 @@ var require_manager = __commonJS({
             valueColumn: server.valueColumn || config.database.valueColumn,
             stringValueColumn: server.stringValueColumn || config.database.stringValueColumn
           };
-          this.database.validate(config.database, callback);
+          if (typeof this.productPolicy.normalizeTestMode === "function") {
+            this.productPolicy.normalizeTestMode(config);
+          }
+          callback(null);
+        });
+      }
+      ensureDatabase(config, callback) {
+        const ensure = () => this.database.ensure(config.database, this.databaseOptions(config), callback);
+        if (!this.isLs) {
+          ensure();
+          return;
+        }
+        this.applyLsDatabaseProfile(config, (profileError) => {
+          if (profileError) {
+            callback(profileError);
+            return;
+          }
+          ensure();
         });
       }
       databaseOptions(config) {
@@ -5668,7 +5951,7 @@ var require_manager = __commonJS({
                 }));
                 return;
               }
-              this.database.ensure(config.database, this.databaseOptions(config), (databaseError) => {
+              this.ensureDatabase(config, (databaseError) => {
                 if (databaseError) {
                   done(databaseError);
                   return;
@@ -5838,7 +6121,7 @@ var require_manager = __commonJS({
                 const merged = deepMerge(deepMerge(jobDefaults(), existing), configPatch);
                 holdInterfaces(merged);
                 const config = this.validateConfig(merged);
-                this.database.ensure(config.database, this.databaseOptions(config), (databaseError) => {
+                this.ensureDatabase(config, (databaseError) => {
                   if (databaseError) {
                     done(databaseError);
                     return;
@@ -6416,7 +6699,7 @@ var require_manager = __commonJS({
               done(cleanupError);
               return;
             }
-            this.database.ensure(config.database, this.databaseOptions(config), (databaseError) => {
+            this.ensureDatabase(config, (databaseError) => {
               if (databaseError) {
                 done(databaseError);
                 return;
@@ -6490,7 +6773,29 @@ var require_manager = __commonJS({
       startLs(name, callback) {
         this.callback(callback, () => {
           this.validateName(name);
-          this.withMutation(name, callback, (handle, done) => {
+          let profileHandle;
+          try {
+            profileHandle = this.databaseProfileLock.acquire(DATABASE_PROFILE_LOCK_NAME);
+          } catch (lockError) {
+            callback(lockError && lockError.code === "JOB_CONFLICT" ? databaseProfileConflict("start", name) : lockError);
+            return;
+          }
+          let profileFinished = false;
+          const finishStart = (failure, value) => {
+            if (profileFinished) return;
+            profileFinished = true;
+            let releaseError = null;
+            try {
+              profileHandle.release();
+            } catch (cleanupError) {
+              releaseError = cleanupError;
+            }
+            if (failure && releaseError && (typeof failure === "object" || typeof failure === "function")) {
+              failure.cleanupError = releaseError;
+            }
+            callback(failure || releaseError, value);
+          };
+          this.withMutation(name, finishStart, (handle, done) => {
             let index;
             try {
               index = this.readIndex(name);
@@ -6498,28 +6803,69 @@ var require_manager = __commonJS({
               done(readError);
               return;
             }
-            try {
-              handle.assertOwned();
-            } catch (ownershipError) {
-              done(ownershipError);
-              return;
-            }
-            this.lsRuntime.ensureRunning((startError) => {
-              if (startError) {
-                done(controllerFailure("CONTROLLER_UNAVAILABLE", "LS collector daemon\uC744 \uC2DC\uC791\uD558\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.", name, "UNKNOWN", startError.message));
+            const startRuntime = () => {
+              try {
+                handle.assertOwned();
+              } catch (ownershipError) {
+                done(ownershipError);
                 return;
               }
-              this.lsRuntime.start(name, (controlError) => {
-                if (controlError) {
-                  done(controllerFailure("CONTROLLER_OPERATION_FAILED", "LS Job \uC2DC\uC791 \uC81C\uC5B4\uC5D0 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4.", name, "STOPPED", controlError.message));
+              this.lsRuntime.ensureRunning((startError) => {
+                if (startError) {
+                  done(controllerFailure("CONTROLLER_UNAVAILABLE", "LS collector daemon\uC744 \uC2DC\uC791\uD558\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.", name, "UNKNOWN", startError.message));
                   return;
                 }
-                this.inspect(name, (_ignored, after) => {
-                  if (after.statusError || !["STARTING", "RUNNING"].includes(after.controllerState)) {
-                    done(after.statusError || controllerFailure("CONTROLLER_OPERATION_FAILED", "LS Job \uC2DC\uC791 \uC0C1\uD0DC\uB97C \uD655\uC778\uD558\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.", name, after.controllerState, after.controllerDetail));
-                  } else done(null, this.view(name, this.configFromIndex(index), after, null, index.revision));
+                this.lsRuntime.start(name, (controlError) => {
+                  if (controlError) {
+                    done(controllerFailure("CONTROLLER_OPERATION_FAILED", "LS Job \uC2DC\uC791 \uC81C\uC5B4\uC5D0 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4.", name, "STOPPED", controlError.message));
+                    return;
+                  }
+                  this.inspect(name, (_ignored, after) => {
+                    if (after.statusError || !["STARTING", "RUNNING"].includes(after.controllerState)) {
+                      done(after.statusError || controllerFailure("CONTROLLER_OPERATION_FAILED", "LS Job \uC2DC\uC791 \uC0C1\uD0DC\uB97C \uD655\uC778\uD558\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.", name, after.controllerState, after.controllerDetail));
+                    } else done(null, this.view(name, this.configFromIndex(index), after, null, index.revision));
+                  });
                 });
               });
+            };
+            if (index.execution.test !== true) {
+              startRuntime();
+              return;
+            }
+            let current;
+            try {
+              current = this.readValidated(name);
+            } catch (readError) {
+              done(readError);
+              return;
+            }
+            const effective = deepMerge({}, current.config);
+            this.applyLsDatabaseProfile(effective, (profileError) => {
+              if (profileError) {
+                done(profileError);
+                return;
+              }
+              if (effective.execution.test === true) {
+                startRuntime();
+                return;
+              }
+              try {
+                handle.assertOwned();
+                const nextConfig = {
+                  ...current.config,
+                  execution: { ...current.config.execution, test: false }
+                };
+                const document = this.repository.save(
+                  name,
+                  { ...nextConfig, name, revision: current.revision + 1 },
+                  current.revision
+                );
+                index = this.syncIndex(document);
+              } catch (saveError) {
+                done(saveError);
+                return;
+              }
+              startRuntime();
             });
           });
         });

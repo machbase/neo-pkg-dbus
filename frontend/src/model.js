@@ -1,6 +1,30 @@
 const TRANSITION_STATES = new Set(["STARTING", "STOPPING"]);
 const BLOCKING_REFERENCE_STATES = new Set(["RUNNING", "STARTING", "STOPPING", "UNKNOWN"]);
 export const MAX_TAG_NAME_LENGTH = 100;
+export const MAX_INTERVAL_MS = 86400000;
+
+export function taskPeriodMs(value) {
+  const period = Number(value);
+  return Number.isInteger(period) && period >= 1 && period <= MAX_INTERVAL_MS ? period : 1;
+}
+
+export function maxIntervalMultiplier(periodMs) {
+  return Math.max(1, Math.floor(MAX_INTERVAL_MS / taskPeriodMs(periodMs)));
+}
+
+export function intervalMultiplier(periodMs, intervalMs) {
+  const period = taskPeriodMs(periodMs);
+  const interval = Number(intervalMs);
+  const multiplier = Number.isFinite(interval) ? Math.ceil(interval / period) : 1;
+  return Math.min(maxIntervalMultiplier(period), Math.max(1, multiplier));
+}
+
+export function intervalMsFromMultiplier(periodMs, multiplier) {
+  const period = taskPeriodMs(periodMs);
+  const numericMultiplier = Number(multiplier);
+  const normalizedMultiplier = Number.isFinite(numericMultiplier) ? Math.ceil(numericMultiplier) : 1;
+  return period * Math.min(maxIntervalMultiplier(period), Math.max(1, normalizedMultiplier));
+}
 
 export function nextDefaultJobName(jobs = []) {
   const maximum = jobs.reduce((current, job) => {
@@ -141,18 +165,26 @@ export function createDefaultJobConfig(provider, server = "local-db", initialMet
     schemaVersion: 1,
     schedule: { intervalMs },
     retry: { initialDelayMs: 5000, maximumDelayMs: 30000, multiplier: 2 },
-    execution: { savePolicy: "perMethod", onMethodError: "stop" },
+    execution: { savePolicy: "perMethod", onMethodError: "stop", test: false },
     methodCalls: fixedCall,
     database: databaseDefaults(server),
     log: { level: "info", maxFiles: 3 },
   };
 }
 
-const TAG_FIELDS = ["name", "bias", "multiplier", "transformOrder", "signed"];
+const TAG_FIELDS = ["name", "bias", "multiplier", "transformOrder", "conversion", "signed"];
+
+function serializeTag(tag) {
+  const output = Object.fromEntries(TAG_FIELDS.filter((field) => field !== "signed" && tag[field] !== undefined)
+    .map((field) => [field, tag[field]]));
+  output.signed = tag.signed === true;
+  return output;
+}
 
 export function serializeJobConfig(config) {
   const cloned = typeof structuredClone === "function" ? structuredClone(config) : JSON.parse(JSON.stringify(config));
   delete cloned.name;
+  cloned.execution = { ...(cloned.execution || {}), test: cloned.execution?.test === true };
   cloned.methodCalls = (cloned.methodCalls || []).map((call) => ({
     id: call.id,
     name: call.name,
@@ -160,14 +192,15 @@ export function serializeJobConfig(config) {
     methodId: call.methodId,
     inputs: { ...(call.inputs || {}) },
     ...(Array.isArray(call.outputSelections)
-      ? { outputSelections: call.outputSelections.map((selection) => ({ id: selection.id, sourceIndex: selection.sourceIndex, interpretation: selection.interpretation || "native", ...(selection.selector !== undefined ? { selector: selection.selector } : {}), ...(selection.valueType !== undefined ? { valueType: selection.valueType } : {}), ...(selection.elementType ? { elementType: selection.elementType } : {}), tags: (selection.tags || []).map((tag) => ({ ...Object.fromEntries(TAG_FIELDS.filter((field) => field !== "signed").map((field) => [field, tag[field]])), signed: tag.signed === true })) })) }
-      : { tags: (call.tags || []).map((tag) => ({ ...Object.fromEntries(TAG_FIELDS.filter((field) => field !== "signed").map((field) => [field, tag[field]])), signed: tag.signed === true })) }),
+      ? { outputSelections: call.outputSelections.map((selection) => ({ id: selection.id, sourceIndex: selection.sourceIndex, interpretation: selection.interpretation || "native", ...(selection.selector !== undefined ? { selector: selection.selector } : {}), ...(selection.valueType !== undefined ? { valueType: selection.valueType } : {}), ...(selection.elementType ? { elementType: selection.elementType } : {}), tags: (selection.tags || []).map(serializeTag) })) }
+      : { tags: (call.tags || []).map(serializeTag) }),
   }));
   return cloned;
 }
 
 export function hydrateJobConfig(config) {
   const cloned = typeof structuredClone === "function" ? structuredClone(config) : JSON.parse(JSON.stringify(config));
+  cloned.execution = { ...(cloned.execution || {}), test: cloned.execution?.test === true };
   cloned.methodCalls = (cloned.methodCalls || []).map((call) => ({
     ...call,
     outputSelections: call.outputSelections && call.outputSelections.map((selection) => {

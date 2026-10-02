@@ -16,7 +16,7 @@ const vite = await createServer({
   appType: "custom",
   logLevel: "error",
 });
-const { AppProvider, ConnectedSide, DbusInterfaceFormModal, DbusInterfacesModal, JobSide, MainRoutes, MemoryRouter } = await vite.ssrLoadModule("/src/App.jsx");
+const { AppProvider, ConnectedSide, databaseEditBlockingJobs, DbusInterfaceFormModal, DbusInterfacesModal, JobSide, MainRoutes, MemoryRouter } = await vite.ssrLoadModule("/src/App.jsx");
 const { default: DataViewerPage } = await vite.ssrLoadModule("/src/data-viewer/DataViewerPage.jsx");
 const { api } = await vite.ssrLoadModule("/src/api.js");
 
@@ -75,6 +75,23 @@ test("Database 영역은 읽기 전용 요약과 편집 모달을 제공한다",
   assert.match(styles, /\.neo-job-section-summary/);
 });
 
+test("LS Database 설정 편집은 모든 Job이 정지된 경우에만 허용한다", () => {
+  const source = fs.readFileSync(new URL("../src/App.jsx", import.meta.url), "utf8");
+  const jobs = [
+    { name: "stopped", statusKnown: true, running: false, executionState: "stopped", controllerState: "STOPPED" },
+    { name: "failed", statusKnown: true, running: false, executionState: "failed", controllerState: "FAILED" },
+    { name: "running", statusKnown: true, running: true, executionState: "running", controllerState: "RUNNING" },
+    { name: "starting", statusKnown: true, running: false, executionState: "starting", controllerState: "STARTING" },
+    { name: "stopping", statusKnown: true, running: false, executionState: "stopping", controllerState: "STOPPING" },
+    { name: "unknown", statusKnown: false, running: false, executionState: null, controllerState: "UNKNOWN" },
+  ];
+  assert.deepEqual(databaseEditBlockingJobs(jobs).map((job) => job.name), ["running", "starting", "stopping", "unknown"]);
+  assert.match(source, /const databaseEditBlockers = fixedProvider \? databaseEditBlockingJobs\(app\.jobs\) : \[\]/);
+  assert.match(source, /Stop all Jobs before editing Database settings\./);
+  assert.match(source, /disabled=\{databaseEditBlocked\}/);
+  assert.doesNotMatch(source, /restartRunningJobs|LS_DATABASE_RESTART_REQUIRED/);
+});
+
 test("Job Configuration은 읽기 전용 요약과 편집 모달을 제공한다", () => {
   const source = fs.readFileSync(new URL("../src/App.jsx", import.meta.url), "utf8");
   const styles = fs.readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
@@ -83,7 +100,7 @@ test("Job Configuration은 읽기 전용 요약과 편집 모달을 제공한다
   assert.match(source, /<Modal title="Edit Job Configuration"[^>]*variant="job-section-editor"/);
   assert.match(source, /className="neo-job-configuration-summary"/);
   assert.match(source, /\{ label: "JOB NAME", value: name \|\| "—" \}/);
-  assert.match(source, /\{ label: "RUN INTERVAL", value: `\$\{config\.schedule\.intervalMs\} ms` \}/);
+  assert.match(source, /\{ label: "RUN INTERVAL", value: `\$\{config\.schedule\.intervalMs\} ms \(= \$\{intervalTaskPeriodMs\} ms × \$\{intervalMultiplier\(intervalTaskPeriodMs, config\.schedule\.intervalMs\)\}\)` \}/);
   assert.match(source, /\{ label: "SAVE POLICY", value: config\.execution\.savePolicy \}/);
   assert.match(styles, /\.neo-job-section-summary/);
 });
@@ -214,8 +231,16 @@ test("LS Job Configuration은 retry 입력을 숨기고 정해진 주기마다 �
   assert.match(source, /retryConfigurable as productRetryConfigurable/);
   assert.match(source, /\{productRetryConfigurable \? <>\s*<Field label="Retry Initial/);
   assert.match(lsProduct, /export const retryConfigurable = false;/);
-  assert.match(collector, /if connection == nil \{[\s\S]*connection, connectError = d\.connectDBus\(name\)/);
+  assert.match(collector, /if !config\.Execution\.Test && connection == nil \{[\s\S]*connection, connectError = d\.connectDBus\(name\)/);
   assert.doesNotMatch(collector, /func \(d \*daemon\) connectDBus\(ctx context\.Context, config jobConfig/);
+});
+
+test("LS 내부 TEST source는 전용 table에서만 표시되고 Monitoring에서 식별된다", () => {
+  const source = fs.readFileSync(new URL("../src/App.jsx", import.meta.url), "utf8");
+  assert.match(source, /const testModeAvailable = productCanUseTestMode\(config\.database\?\.table\)/);
+  assert.match(source, /testModeAvailable \? <label className="neo-test-toggle" title="Generate test data without DBUS\. Available only for the internal benchmark table\."/);
+  assert.match(source, /config\.execution\?\.test === true \? <span className="neo-test-badge"/);
+  assert.match(source, /normalizeProductTestMode\(\{ \.\.\.current, database: databaseDraft \}\)/);
 });
 
 test("Job 저장은 중복 제출과 경로 전환 취소를 막고 최신 revision을 계속 사용한다", () => {
@@ -371,10 +396,10 @@ test("Job 저장 중 선택한 다른 Job은 저장 완료 뒤 열리고 PUT 요
   }
 });
 
-test("LS Tag 표는 Signed 변환을 계산 Transform보다 먼저 표시한다", () => {
+test("LS Tag 표는 Type Conversion과 Signed를 계산 Transform보다 먼저 표시한다", () => {
   const source = fs.readFileSync(new URL("../src/App.jsx", import.meta.url), "utf8");
-  assert.match(source, /neo-fixed-tag-list__name" \/><col className="neo-fixed-tag-list__signed" \/><col className="neo-fixed-tag-list__transform"/);
-  assert.match(source, /<th>TAG NAME<\/th><th>SIGNED<\/th><th>TRANSFORM<\/th>/);
+  assert.match(source, /neo-fixed-tag-list__name" \/><col className="neo-fixed-tag-list__conversion" \/><col className="neo-fixed-tag-list__signed" \/><col className="neo-fixed-tag-list__transform"/);
+  assert.match(source, /<th>TAG NAME<\/th><th>TYPE CONVERSION<\/th><th>SIGNED<\/th><th>TRANSFORM<\/th>/);
 });
 
 test("Start와 Stop은 현재 Side 목록을 다시 읽지 않고 응답 Job 상태를 반영한다", () => {
@@ -425,7 +450,7 @@ test("새 Job의 Database Mapping은 빈 직접 입력 콤보박스로 시작한
   assert.match(source, /if \(!configForSave\.database\.table\) validation\.push\("Select or enter a Table\."\);/);
   assert.match(source, /if \(!configForSave\.database\.valueColumn\) validation\.push\("Select a Value Column\."\);/);
   assert.match(source, /const needsStringValueColumn = jobNeedsStringValueColumn\(config\.methodCalls, interfaceDetails\);/);
-  assert.match(source, /const configForSave = tableWillBeCreated[\s\S]*valueColumn: "VALUE", stringValueColumn: needsStringValueColumn \? "STR_VALUE" : ""/);
+  assert.match(source, /const configForSave = normalizeProductTestMode\(tableWillBeCreated[\s\S]*valueColumn: "VALUE", stringValueColumn: needsStringValueColumn \? "STR_VALUE" : ""/);
   assert.match(source, /const payload = serializeJobConfig\(configForSave\);/);
   assert.match(source, /table: table\.toUpperCase\(\), valueColumn: "", stringValueColumn: ""/);
 });
@@ -1494,7 +1519,7 @@ test("Job Configuration 모달은 Apply한 값을 summary에 반영하고 Edit �
     serversList: api.db.servers.list,
   };
   let listedJobs = [{ name: "job-1" }, { name: "job-2" }];
-  Object.assign(api.settings, { get: async () => ({ provider: null, defaults: { database: { server: "local-db" } }, limits: {} }) });
+  Object.assign(api.settings, { get: async () => ({ provider: null, defaults: { database: { server: "local-db" } }, limits: {}, intervalPolicy: { cycleMs: 4 } }) });
   Object.assign(api.interfaces, { list: async () => [] });
   Object.assign(api.jobs, {
     list: async () => listedJobs,
@@ -1519,18 +1544,24 @@ test("Job Configuration 모달은 Apply한 값을 summary에 반영하고 Edit �
     assert.equal(jobNameInput(), undefined);
     await act(async () => { button(renderer.root, "Edit Job Configuration").props.onClick(); });
     assert.equal(jobNameInput().props.value, "job-3");
+    assert.equal(renderer.root.findAll((node) => node.type === "span" && node.children.join("") === "Task Period 4 ms").length, 1);
+    const intervalFormula = renderer.root.findAll((node) => node.props.className === "neo-interval-formula")[0];
+    assert.equal(intervalFormula.findAll((node) => node.type === "strong")[0].children.join(""), "12 ms");
 
     await act(async () => { jobNameInput().props.onChange({ target: { value: "custom-job" } }); });
-    const intervalInput = renderer.root.findAll((node) => node.type === "input" && node.props["aria-label"] === "Run Interval (ms)")[0];
+    const intervalInput = renderer.root.findAll((node) => node.type === "input" && node.props["aria-label"] === "Run Interval Multiplier")[0];
+    assert.deepEqual({ min: intervalInput.props.min, max: intervalInput.props.max, step: intervalInput.props.step, value: intervalInput.props.value }, { min: "1", max: "21600000", step: "1", value: 3 });
+    await act(async () => { button(renderer.root, "Run Interval Multiplier Increase").props.onClick(); });
+    assert.equal(intervalFormula.findAll((node) => node.type === "strong")[0].children.join(""), "16 ms");
     const savePolicySelect = renderer.root.findAll((node) => node.type === "select" && node.props.value === "perMethod")[0];
     await act(async () => {
-      intervalInput.props.onChange({ target: { value: "2500" } });
+      intervalInput.props.onChange({ target: { value: "625" } });
       savePolicySelect.props.onChange({ target: { value: "afterAllMethods" } });
     });
     await act(async () => { buttonText(renderer.root, "Apply").props.onClick(); });
     assert.equal(jobNameInput(), undefined);
     const summary = renderer.root.findAll((node) => node.props["aria-label"] === "Job Configuration summary")[0];
-    assert.deepEqual(summary.findAll((node) => node.type === "strong").map((node) => node.children.join("")), ["custom-job", "2500 ms", "afterAllMethods"]);
+    assert.deepEqual(summary.findAll((node) => node.type === "strong").map((node) => node.children.join("")), ["custom-job", "2500 ms (= 4 ms × 625)", "afterAllMethods"]);
 
     await act(async () => { button(renderer.root, "Edit Job Configuration").props.onClick(); });
     listedJobs = [...listedJobs, { name: "job-3" }];

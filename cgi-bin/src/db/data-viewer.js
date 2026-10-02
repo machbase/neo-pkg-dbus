@@ -14,6 +14,9 @@ const FLAG_BASETIME = 0x1000000;
 const FLAG_SUMMARIZED = 0x2000000;
 const FLAG_METADATA = 0x4000000;
 const FLAG_PRIMARY = 0x8000000;
+const TIME_NS_ALIAS = '__DBUS_TIME_NS';
+const MIN_TIME_NS_ALIAS = '__DBUS_MIN_TIME_NS';
+const MAX_TIME_NS_ALIAS = '__DBUS_MAX_TIME_NS';
 const TYPE_NAMES = {
   4: 'short', 104: 'ushort', 8: 'integer', 108: 'uinteger', 12: 'long', 112: 'ulong',
   6: 'datetime', 16: 'float', 20: 'double', 5: 'varchar', 49: 'text', 53: 'clob',
@@ -82,10 +85,36 @@ function escapeSqlString(value) {
   return String(value === undefined || value === null ? '' : value).replace(/'/g, "''");
 }
 
-function formatSqlDateLiteral(value) {
+function formatSqlTimestampLiteral(value) {
   if (!(value instanceof Date)) return '';
-  const iso = value.toISOString().replace('T', ' ').replace('Z', '');
-  return `to_date('${escapeSqlString(iso)}')`;
+  const milliseconds = value.getTime();
+  if (!Number.isFinite(milliseconds)) return '';
+  const nanoseconds = BigInt(milliseconds) * BigInt(1000000);
+  return `FROM_TIMESTAMP(${nanoseconds.toString()})`;
+}
+
+// Machbase DATETIME is an absolute Unix epoch value, but a DB/JSH combination may
+// expose it as a timezone-less wall-clock string. Parsing that string with Date
+// makes the result depend on the Neo process timezone. Query DATETIME through
+// TO_TIMESTAMP/TO_CHAR instead and only convert the exact epoch-nanosecond text
+// after BigInt has reduced it to JavaScript Date's millisecond precision.
+function epochNanosecondsToIso(value) {
+  if (value === undefined || value === null || value === '') return null;
+  const source = String(value).trim();
+  if (!/^-?\d+$/.test(source)) return null;
+  try {
+    const milliseconds = BigInt(source) / BigInt(1000000);
+    const numeric = Number(milliseconds);
+    if (!Number.isSafeInteger(numeric)) return null;
+    const date = new Date(numeric);
+    return Number.isFinite(date.getTime()) ? date.toISOString() : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function timeAsNanoseconds(columnName, alias) {
+  return `TO_CHAR(TO_TIMESTAMP(${columnName})) AS ${alias}`;
 }
 
 function namesOf(value) {
@@ -469,14 +498,14 @@ function createDataViewer(options) {
     return { sql: `(${time.name} < ? OR (${time.name} = ? AND ${primary.name} < ?))`, values: [parsed.cursorTime, parsed.cursorTime, parsed.cursorName], orderTime: 'DESC', orderName: 'DESC', reverse: true };
   }
 
-  function mapViewerRow(row, primary, time, numeric, stringValue) {
-    const date = new Date(rowValue(row, time.name));
-    if (!Number.isFinite(date.getTime())) return null;
+  function mapViewerRow(row, primary, numeric, stringValue) {
+    const timestamp = epochNanosecondsToIso(rowValue(row, TIME_NS_ALIAS));
+    if (!timestamp) return null;
     const numberValue = numeric ? rowValue(row, numeric.name) : null;
     const textValue = stringValue ? rowValue(row, stringValue.name) : null;
     return {
       name: String(rowValue(row, primary.name)),
-      time: date.toISOString(),
+      time: timestamp,
       value: numberValue === undefined ? null : numberValue,
       stringValue: textValue === undefined ? null : textValue,
     };
@@ -500,7 +529,7 @@ function createDataViewer(options) {
     if (cursor) { clauses.push(cursor.sql); values.push(...cursor.values); }
     const orderTime = cursor ? cursor.orderTime : (parsed.direction === 'oldest' ? 'ASC' : 'DESC');
     const orderName = cursor ? cursor.orderName : 'ASC';
-    const selected = [primary.name, time.name, numeric.name];
+    const selected = [primary.name, timeAsNanoseconds(time.name, TIME_NS_ALIAS), numeric.name];
     if (stringValue) selected.push(stringValue.name);
     let limit = '';
     if (!parsed.boundedRange) {
@@ -523,7 +552,7 @@ function createDataViewer(options) {
       direction: parsed.direction,
       page: parsed.page,
       pageSize: parsed.pageSize,
-      rows: ordered.map((row) => mapViewerRow(row, primary, time, numeric, stringValue)).filter(Boolean),
+      rows: ordered.map((row) => mapViewerRow(row, primary, numeric, stringValue)).filter(Boolean),
     };
   }
 
@@ -708,7 +737,7 @@ function createDataViewer(options) {
           if (parsed.from) { clauses.push(`${time.name} >= ?`); values.push(parsed.from); }
           if (parsed.to) { clauses.push(`${time.name} <= ?`); values.push(parsed.to); }
           values.push(parsed.offset, parsed.rowsPerTag + 1);
-          const selected = [primary.name, time.name];
+          const selected = [primary.name, timeAsNanoseconds(time.name, TIME_NS_ALIAS)];
           if (numeric) selected.push(numeric.name);
           if (stringValue) selected.push(stringValue.name);
           const fetchedRows = rowsOf(connection.query(
@@ -719,13 +748,13 @@ function createDataViewer(options) {
           if (fetchedRows.length > parsed.rowsPerTag) anyHasMore = true;
           const rows = fetchedRows.slice(0, parsed.rowsPerTag);
           rows.forEach((row) => {
-            const date = new Date(rowValue(row, time.name));
-            if (!Number.isFinite(date.getTime())) return;
+            const timestamp = epochNanosecondsToIso(rowValue(row, TIME_NS_ALIAS));
+            if (!timestamp) return;
             const numberValue = numeric ? rowValue(row, numeric.name) : null;
             const textValue = stringValue ? rowValue(row, stringValue.name) : null;
             pageRows.push({
               name: String(rowValue(row, primary.name)),
-              time: date.toISOString(),
+              time: timestamp,
               value: numberValue === undefined ? null : numberValue,
               stringValue: textValue === undefined ? null : textValue,
             });
@@ -764,23 +793,19 @@ function createDataViewer(options) {
         const primary = roleColumn(value.columns, params.primaryColumn, 'primaryKey', 'primaryColumn');
         const time = roleColumn(value.columns, params.timeColumn, 'basetime', 'timeColumn');
         const rows = rowsOf(connection.query(
-          `SELECT MIN(${time.name}) AS MIN_TIME, MAX(${time.name}) AS MAX_TIME FROM ${value.target.table} `
+          `SELECT TO_CHAR(TO_TIMESTAMP(MIN(${time.name}))) AS ${MIN_TIME_NS_ALIAS}, `
+          + `TO_CHAR(TO_TIMESTAMP(MAX(${time.name}))) AS ${MAX_TIME_NS_ALIAS} FROM ${value.target.table} `
           + `WHERE ${primary.name} IN (${selectedJob.names.map(() => '?').join(', ')})`,
           ...selectedJob.names,
         ));
         const row = rows[0] || {};
-        const asIso = (source) => {
-          if (source === undefined || source === null || source === '') return null;
-          const date = new Date(source);
-          return Number.isFinite(date.getTime()) ? date.toISOString() : null;
-        };
         return {
           server: server.name,
           job: selectedJob.name,
           table: value.target.table,
           names: selectedJob.names,
-          minTime: asIso(rowValue(row, 'MIN_TIME')),
-          maxTime: asIso(rowValue(row, 'MAX_TIME')),
+          minTime: epochNanosecondsToIso(rowValue(row, MIN_TIME_NS_ALIAS)),
+          maxTime: epochNanosecondsToIso(rowValue(row, MAX_TIME_NS_ALIAS)),
         };
       }, callback);
     },
@@ -835,8 +860,8 @@ function createDataViewer(options) {
         const time = roleColumn(value.columns, params.timeColumn, 'basetime', 'timeColumn');
         const numeric = column(value.columns, selectedJob.database.valueColumn, null, (item) => item.numeric, 'valueColumn');
         const clauses = [`${primary.name} IN (${parsed.names.map((name) => `'${escapeSqlString(name)}'`).join(', ')})`];
-        if (parsed.from) clauses.push(`${time.name} >= ${formatSqlDateLiteral(parsed.from)}`);
-        if (parsed.to) clauses.push(`${time.name} <= ${formatSqlDateLiteral(parsed.to)}`);
+        if (parsed.from) clauses.push(`${time.name} >= ${formatSqlTimestampLiteral(parsed.from)}`);
+        if (parsed.to) clauses.push(`${time.name} <= ${formatSqlTimestampLiteral(parsed.to)}`);
         const query = `SELECT ${time.name} AS TIME, ${primary.name} AS NAME, ${numeric.name} AS VALUE `
           + `FROM ${value.target.table} WHERE ${clauses.join(' AND ')} ORDER BY ${time.name} ASC, ${primary.name} ASC`;
         return {

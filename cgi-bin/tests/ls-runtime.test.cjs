@@ -141,6 +141,21 @@ test('LS runtime은 password 없는 snapshot과 0600 secret을 분리하고 logi
     lastOverrunAt: '2026-09-01T00:00:00.010Z',
     methodCalls: [],
   });
+  fs.writeFileSync(files.active, JSON.stringify({ schemaVersion: 1, names: ['line-a'] }), 'utf8');
+  fs.writeFileSync(files.runtime, JSON.stringify({ jobs: {
+    'line-a': { state: 'stopped' },
+    'line-b': { state: 'starting' },
+    'line-c': { state: 'running' },
+    'line-d': { state: 'stopping' },
+    'line-e': { state: 'failed' },
+  } }), 'utf8');
+  assert.deepEqual(runtime.databaseChangeBlockers(), ['line-a', 'line-b', 'line-c', 'line-d']);
+  fs.writeFileSync(files.active, JSON.stringify({ schemaVersion: 1, names: [] }), 'utf8');
+  fs.writeFileSync(files.runtime, JSON.stringify({ jobs: {
+    'line-a': { state: 'stopped' },
+    'line-e': { state: 'failed' },
+  } }), 'utf8');
+  assert.deepEqual(runtime.databaseChangeBlockers(), []);
   await call((done) => runtime.stop('line-a', done));
   assert.deepEqual(JSON.parse(fs.readFileSync(files.active, 'utf8')).names, []);
   await call((done) => runtime.stopDaemon(done));

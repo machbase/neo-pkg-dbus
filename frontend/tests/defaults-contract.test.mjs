@@ -35,6 +35,17 @@ test("LS fixed Provider는 새 Job과 기존 Job 편집 모두 fixed다", () => 
   assert.equal(ls.resolveJobFormMode({ settings, settingsLoading: false, settingsError: null, editing: true }), "fixed");
 });
 
+test("내부 TEST source는 LS 전용 table에서만 유지된다", () => {
+  assert.equal(ls.canUseTestMode("t4_dbus_test_"), true);
+  assert.equal(ls.canUseTestMode("TAG"), false);
+  assert.equal(generic.canUseTestMode("T4_DBUS_TEST_"), false);
+  const enabled = ls.normalizeProductTestMode({ database: { table: "T4_DBUS_TEST_" }, execution: { test: true } });
+  assert.equal(enabled.execution.test, true);
+  const disabled = ls.normalizeProductTestMode({ database: { table: "TAG" }, execution: { test: true } });
+  assert.equal(disabled.execution.test, false);
+  assert.equal(generic.normalizeProductTestMode(enabled).execution.test, false);
+});
+
 test("generic 새 Job은 Database 기본값만 복사한다", () => {
   const config = createDefaultJobConfig(null, databaseServer, generic.createInitialMethodCalls(null));
   assert.deepEqual(config.database, {

@@ -333,30 +333,16 @@ function createLsRuntime(options) {
         controller.stop(LS_SERVICE_NAME, callback);
       });
     },
-    activeNames() { return readActiveJobs(files.active); },
-    overview,
-    reloadAllActive(callback) {
-      let names;
-      try { names = readActiveJobs(files.active); this.syncConfig(); } catch (snapshotError) { callback(snapshotError); return; }
-      // A saved active-job checkpoint survives a package/service stop. In that
-      // state there is no daemon to reload, and the new snapshot must merely
-      // be ready for the next package start rather than causing an accidental
-      // service start from a Database profile edit.
-      daemonStatus((_unused, state) => {
-        if (state.statusError) { callback(state.statusError); return; }
-        if (!['RUNNING', 'STARTING'].includes(state.controllerState)) {
-          callback(null, { names, reloaded: false });
-          return;
-        }
-        let index = 0;
-        const next = (reloadError) => {
-          if (reloadError || index >= names.length) { callback(reloadError || null, { names, reloaded: true }); return; }
-          const name = names[index]; index += 1;
-          this.reload(name, next);
-        };
-        next(null);
+    databaseChangeBlockers() {
+      const blocked = new Set(readActiveJobs(files.active));
+      const runtime = readRuntime(files.runtime);
+      Object.keys(runtime.jobs || {}).forEach((name) => {
+        const state = String(runtime.jobs[name]?.state || '').toLowerCase();
+        if (['starting', 'running', 'stopping'].includes(state)) blocked.add(name);
       });
+      return [...blocked].sort();
     },
+    overview,
     uninstall,
   };
 }

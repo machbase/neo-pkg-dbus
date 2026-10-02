@@ -41,8 +41,8 @@ const (
 	activeFileName         = "go-collector-active-jobs.json"
 	runtimeFileName        = "go-collector-runtime.json"
 	socketFileName         = "neo-dbus-collector.sock"
-	queueCapacity          = 64
-	defaultFlushMaxRows    = 1024
+	queueCapacity          = 512
+	defaultFlushMaxRows    = 8192
 	defaultFlushInterval   = time.Second
 	defaultMaxLogFileBytes = 1024 * 1024
 	defaultMaxLogFiles     = 3
@@ -52,6 +52,9 @@ const (
 	minimumJobSampleCount  = 500
 	minimumWriterPerfEvery = 10 * time.Second
 	maxDurableSamples      = 4096
+	testTableName          = "T4_DBUS_TEST_"
+	initialJobRowBuffers   = 4
+	maximumJobRowBuffers   = 32
 )
 
 type snapshot struct {
@@ -77,9 +80,13 @@ type jobConfig struct {
 	Revision      int       `json:"revision"`
 	Schedule      schedule  `json:"schedule"`
 	Retry         retry     `json:"retry"`
+	Execution     execution `json:"execution"`
 	Database      database  `json:"database"`
 	MethodCalls   []method  `json:"methodCalls"`
 	Log           logConfig `json:"log"`
+}
+type execution struct {
+	Test bool `json:"test"`
 }
 
 type logConfig struct {
@@ -177,46 +184,136 @@ type tag struct {
 	Bias           float64  `json:"bias"`
 	Multiplier     float64  `json:"multiplier"`
 	TransformOrder []string `json:"transformOrder"`
+	Conversion     string   `json:"conversion"`
 	Signed         bool     `json:"signed"`
+	registryIndex  uint32
 }
 
 type row struct {
-	Name  string
-	Time  time.Time
-	Value any
+	TagIndex uint32
+	Time     time.Time
+	Value    any
+}
+
+func requiredTagCount(rows []row) int {
+	required := 0
+	for index := range rows {
+		candidate := uint64(rows[index].TagIndex) + 1
+		if candidate > uint64(required) {
+			if candidate > uint64(^uint(0)>>1) {
+				return -1
+			}
+			required = int(candidate)
+		}
+	}
+	return required
+}
+
+// tagRegistry owns one stable numeric identity for every TAG name seen during
+// the daemon lifetime. Job edits may add names, but existing indices never move;
+// batches already queued before an edit therefore remain valid without retaining
+// one copy of the TAG string in every row.
+type tagRegistry struct {
+	mu      sync.RWMutex
+	names   []string
+	indices map[string]uint32
 }
 type lsValueCodec struct {
 	bits uint
 }
+
+type callPlan struct {
+	count   int
+	address string
+	tags    []tag
+	codec   lsValueCodec
+	offset  int
+}
+
+type readPlan struct {
+	calls    []callPlan
+	rowCount int
+	tagIDs   []uint32
+}
+
+// rowBufferPool retains a small per-Job working set and grows only when writer
+// stalls make more buffers concurrently necessary. Empty-pool acquisition never
+// blocks a reader; overflow buffers are temporary and become GC candidates when
+// the retained cache has reached its limit.
+type rowBufferPool struct {
+	rowCount int
+	tagIDs   []uint32
+	idle     chan []row
+	mu       sync.Mutex
+	closed   atomic.Bool
+	leased   atomic.Int64
+}
+
+type rowBufferLease struct {
+	pool *rowBufferPool
+	rows []row
+	once sync.Once
+}
+
+type queueReservation struct {
+	daemon *daemon
+	once   sync.Once
+}
+
 type batch struct {
 	Job              string
 	Database         database
+	Registry         *tagRegistry
 	Rows             []row
+	RowCount         int
+	rowLease         *rowBufferLease
+	queueReservation *queueReservation
+	Owner            *activeJob
 	Finished         chan error
 	EnqueuedAt       time.Time
 	FlushAfterAppend bool
 }
 
 type readTiming struct {
-	DBus          time.Duration
-	Parse         time.Duration
-	DBusMeasured  bool
-	ParseMeasured bool
+	DBus                time.Duration
+	Parse               time.Duration
+	Generate            time.Duration
+	ReaderTotal         time.Duration
+	DBusMeasured        bool
+	ParseMeasured       bool
+	GenerateMeasured    bool
+	ReaderTotalMeasured bool
 }
 
 type jobPerformance struct {
-	Attempts          int
-	DBusUS            []int64
-	ParseTotalUS      int64
-	ParseSamples      int
-	OverIntervalCount uint64
-	ErrorCount        uint64
+	Source             string
+	Attempts           int
+	DBusUS             []int64
+	ParseTotalUS       int64
+	ParseMaxUS         int64
+	ParseSamples       int
+	GenerateTotalUS    int64
+	GenerateMaxUS      int64
+	GenerateSamples    int
+	ReaderTotalUS      []int64
+	OverIntervalCount  uint64
+	QueueFullSkipCount uint64
+	ErrorCount         uint64
 }
 
 type writerPerformance struct {
 	StartedAt     time.Time
 	Busy          time.Duration
+	AppendBusy    time.Duration
 	MaxQueueDepth int
+	AppendUS      []int64
+	AppendNext    int
+	AppendBatches uint64
+	AppendRows    uint64
+	FlushUS       []int64
+	FlushNext     int
+	FlushCount    uint64
+	FlushErrors   uint64
 	DurableUS     []int64
 	DurableNext   int
 }
@@ -247,8 +344,21 @@ type command struct {
 type appenderPrepareRequest struct {
 	Context  context.Context
 	Database database
-	Tags     []string
+	Registry *tagRegistry
+	TagCount int
 	Result   chan error
+	Stats    chan tagPreparationStats
+}
+
+type tagPreparationStats struct {
+	Required             int
+	Candidates           int
+	ExistingCandidates   int
+	Missing              int
+	Registered           int
+	MetadataDuration     time.Duration
+	RegistrationDuration time.Duration
+	Reused               bool
 }
 
 type reply struct {
@@ -260,8 +370,11 @@ type reply struct {
 type daemon struct {
 	root                   string
 	queue                  chan *batch
+	queueSlots             chan struct{}
+	queueSlotsOnce         sync.Once
 	flushNow               chan struct{}
 	appenderPrepare        chan appenderPrepareRequest
+	tagRegistry            *tagRegistry
 	appenderOpener         func(string, database, int) (appenderStream, error)
 	writerPolicy           writerPolicy
 	performancePolicy      performancePolicy
@@ -305,6 +418,148 @@ type activeJob struct {
 	work         sync.WaitGroup
 	flushOnQueue atomic.Bool
 	config       jobConfig
+	registry     *tagRegistry
+	plan         *readPlan
+	buffers      *rowBufferPool
+}
+
+func buildReadPlan(config jobConfig) (*readPlan, error) {
+	plan := &readPlan{calls: make([]callPlan, 0, len(config.MethodCalls))}
+	for _, call := range config.MethodCalls {
+		count, address, tags, codec, err := lsCall(call)
+		if err != nil {
+			return nil, err
+		}
+		if count > int(^uint(0)>>1)-plan.rowCount {
+			return nil, errors.New("LS Job row count is too large")
+		}
+		plan.calls = append(plan.calls, callPlan{count: count, address: address, tags: tags, codec: codec, offset: plan.rowCount})
+		plan.rowCount += count
+	}
+	if plan.rowCount == 0 {
+		return nil, errors.New("LS Job has no rows")
+	}
+	plan.tagIDs = make([]uint32, plan.rowCount)
+	for _, call := range plan.calls {
+		for index := range call.tags {
+			plan.tagIDs[call.offset+index] = call.tags[index].registryIndex
+		}
+	}
+	return plan, nil
+}
+
+func newRowBufferPool(plan *readPlan) *rowBufferPool {
+	pool := &rowBufferPool{rowCount: plan.rowCount, tagIDs: append([]uint32(nil), plan.tagIDs...), idle: make(chan []row, maximumJobRowBuffers)}
+	for index := 0; index < initialJobRowBuffers; index++ {
+		pool.idle <- pool.allocate()
+	}
+	return pool
+}
+
+func (p *rowBufferPool) allocate() []row {
+	rows := make([]row, p.rowCount)
+	for index := range rows {
+		rows[index].TagIndex = p.tagIDs[index]
+	}
+	return rows
+}
+
+func (p *rowBufferPool) acquire() *rowBufferLease {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var rows []row
+	select {
+	case rows = <-p.idle:
+	default:
+		rows = p.allocate()
+	}
+	p.leased.Add(1)
+	return &rowBufferLease{pool: p, rows: rows}
+}
+
+func (l *rowBufferLease) release() {
+	if l == nil {
+		return
+	}
+	l.once.Do(func() {
+		p, rows := l.pool, l.rows
+		l.rows = nil
+		for index := range rows {
+			rows[index].Time = time.Time{}
+			rows[index].Value = nil
+		}
+		p.leased.Add(-1)
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		if p.closed.Load() {
+			for index := range rows {
+				rows[index] = row{}
+			}
+			return
+		}
+		select {
+		case p.idle <- rows:
+		default:
+			// The retained cache is full. Clear stable indices as well so this
+			// temporary backing array owns no useful Job state before collection.
+			for index := range rows {
+				rows[index] = row{}
+			}
+		}
+	})
+}
+
+func (p *rowBufferPool) dispose() int64 {
+	if p == nil {
+		return 0
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.closed.Store(true)
+	for {
+		select {
+		case rows := <-p.idle:
+			for index := range rows {
+				rows[index] = row{}
+			}
+		default:
+			return p.leased.Load()
+		}
+	}
+}
+
+func (d *daemon) reserveQueue() *queueReservation {
+	if d == nil || d.queue == nil || cap(d.queue) == 0 {
+		return nil
+	}
+	d.queueSlotsOnce.Do(func() { d.queueSlots = make(chan struct{}, cap(d.queue)) })
+	select {
+	case d.queueSlots <- struct{}{}:
+		return &queueReservation{daemon: d}
+	default:
+		return nil
+	}
+}
+
+func (r *queueReservation) release() {
+	if r == nil || r.daemon == nil {
+		return
+	}
+	r.once.Do(func() {
+		select {
+		case <-r.daemon.queueSlots:
+		default:
+		}
+	})
+}
+
+func (b *batch) releaseRows() {
+	if b == nil || b.rowLease == nil {
+		return
+	}
+	b.rowLease.release()
+	b.rowLease = nil
+	b.Rows = nil
 }
 
 func main() {
@@ -380,7 +635,7 @@ func runDaemon(root string, parentPID int) (retErr error) {
 	if err != nil {
 		return err
 	}
-	d := &daemon{root: root, queue: make(chan *batch, writerPolicy.QueueCapacity), flushNow: make(chan struct{}, 1), appenderPrepare: make(chan appenderPrepareRequest), writerPolicy: writerPolicy, performancePolicy: performancePolicy, performanceCorrections: corrections, jobs: map[string]*activeJob{}, runtime: runtimeState{Jobs: map[string]jobRuntime{}}, logConfigs: map[string]logConfig{}, logPolicy: (logPolicy{}).normalized(), logSummaries: map[string]logSummary{}, jobPerformance: map[string]*jobPerformance{}, writerPerformance: writerPerformance{StartedAt: time.Now(), DurableUS: make([]int64, 0, maxDurableSamples)}, controls: map[string]*sync.Mutex{}, runtimeDirty: make(chan struct{}, 1), runtimeForce: make(chan chan error), runtimeStop: make(chan struct{})}
+	d := &daemon{root: root, queue: make(chan *batch, writerPolicy.QueueCapacity), flushNow: make(chan struct{}, 1), appenderPrepare: make(chan appenderPrepareRequest), tagRegistry: newTagRegistry(), writerPolicy: writerPolicy, performancePolicy: performancePolicy, performanceCorrections: corrections, jobs: map[string]*activeJob{}, runtime: runtimeState{Jobs: map[string]jobRuntime{}}, logConfigs: map[string]logConfig{}, logPolicy: (logPolicy{}).normalized(), logSummaries: map[string]logSummary{}, jobPerformance: map[string]*jobPerformance{}, writerPerformance: newWriterPerformance(time.Now()), controls: map[string]*sync.Mutex{}, runtimeDirty: make(chan struct{}, 1), runtimeForce: make(chan chan error), runtimeStop: make(chan struct{})}
 	if err := d.writeRuntime(); err != nil {
 		return err
 	}
@@ -520,6 +775,18 @@ func (d *daemon) start(name string) error {
 	if config.Schedule.IntervalMS < 1 {
 		return errors.New("intervalMs must be at least 1")
 	}
+	registry := d.tagRegistry
+	if registry == nil {
+		registry = newTagRegistry()
+		d.tagRegistry = registry
+	}
+	if err := registry.bindJob(&config); err != nil {
+		return err
+	}
+	plan, err := buildReadPlan(config)
+	if err != nil {
+		return err
+	}
 	d.mu.Lock()
 	if _, exists := d.jobs[name]; exists {
 		d.mu.Unlock()
@@ -542,7 +809,7 @@ func (d *daemon) start(name string) error {
 		return nil
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	a := &activeJob{cancel: cancel, done: make(chan struct{}), config: config}
+	a := &activeJob{cancel: cancel, done: make(chan struct{}), config: config, registry: registry, plan: plan, buffers: newRowBufferPool(plan)}
 	d.jobs[name] = a
 	d.logConfigs[name] = config.Log
 	if policy, policyErr := loadLogPolicy(d.root); policyErr == nil {
@@ -550,7 +817,7 @@ func (d *daemon) start(name string) error {
 	}
 	d.logSummaries[name] = logSummary{StartedAt: time.Now()}
 	d.performanceMu.Lock()
-	d.jobPerformance[name] = &jobPerformance{DBusUS: make([]int64, 0, d.performancePolicy.JobSampleCount)}
+	d.jobPerformance[name] = newJobPerformance(d.performancePolicy.JobSampleCount, sourceForConfig(config))
 	d.performanceMu.Unlock()
 	// A logical Job start begins a new monitoring period. The checkpoint is
 	// intentionally in-memory runtime state, so do not carry a previous
@@ -570,6 +837,7 @@ func (d *daemon) start(name string) error {
 		delete(d.jobs, name)
 		d.mu.Unlock()
 		cancel()
+		a.buffers.dispose()
 		return err
 	}
 	d.wg.Add(1)
@@ -580,12 +848,28 @@ func (d *daemon) start(name string) error {
 func (d *daemon) startJob(ctx context.Context, name string, active *activeJob) {
 	defer d.wg.Done()
 	defer close(active.done)
-	if err := d.ensureAppenderReady(ctx, active.config.Database, configuredTagNames(active.config)); err != nil {
+	defer func() {
+		if outstanding := active.buffers.dispose(); outstanding != 0 {
+			d.logAlways(name, "ERROR", "collector", fmt.Sprintf("row buffer ownership leak detected at Job stop: outstanding=%d", outstanding))
+		}
+	}()
+	requiredTags := active.registry.count()
+	d.logAlways(name, "INFO", "collector", fmt.Sprintf("TAG preparation started; table=%s requiredTags=%d", active.config.Database.Table, requiredTags))
+	prepareStarted := time.Now()
+	prepareStats, err := d.ensureAppenderReadyMeasured(ctx, active.config.Database, active.registry)
+	prepareElapsed := time.Since(prepareStarted)
+	if err != nil {
 		if ctx.Err() == nil {
+			d.logAlways(name, "ERROR", "collector", formatTagPreparationLog("TAG preparation failed", active.config.Database.Table, prepareElapsed, prepareStats)+" error="+err.Error())
 			d.failStart(name, active, fmt.Errorf("prepare native appender: %w", err))
 		}
 		return
 	}
+	prepareLevel := "INFO"
+	if prepareElapsed >= 10*time.Second {
+		prepareLevel = "WARN"
+	}
+	d.logAlways(name, prepareLevel, "collector", formatTagPreparationLog("TAG preparation completed", active.config.Database.Table, prepareElapsed, prepareStats))
 	if ctx.Err() != nil {
 		return
 	}
@@ -603,9 +887,9 @@ func (d *daemon) startJob(ctx context.Context, name string, active *activeJob) {
 		d.failStart(name, active, fmt.Errorf("publish running state: %w", err))
 		return
 	}
-	d.log(name, "INFO", "collector", "collector started")
+	d.log(name, "INFO", "collector", "collector started; source="+sourceForConfig(active.config))
 	if d.performancePolicy.Enabled {
-		message := fmt.Sprintf("performance logging enabled; jobSampleCount=%d writerSummaryIntervalMs=%d", d.performancePolicy.JobSampleCount, d.performancePolicy.WriterSummaryIntervalMS)
+		message := fmt.Sprintf("performance logging enabled; jobSampleCount=%d writerSummaryIntervalMs=%d writerFlushIntervalMs=%d", d.performancePolicy.JobSampleCount, d.performancePolicy.WriterSummaryIntervalMS, d.writerPolicy.normalized().FlushIntervalMS)
 		if len(d.performanceCorrections) > 0 {
 			message += " corrections=" + strings.Join(d.performanceCorrections, ",")
 		}
@@ -653,33 +937,124 @@ func configuredTagNames(config jobConfig) []string {
 	return names
 }
 
-func (d *daemon) ensureAppenderReady(ctx context.Context, database database, tags []string) error {
+func newTagRegistry() *tagRegistry {
+	return &tagRegistry{indices: make(map[string]uint32)}
+}
+
+func (r *tagRegistry) bindJob(config *jobConfig) error {
+	if r == nil || config == nil {
+		return errors.New("TAG registry is unavailable")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.indices == nil {
+		r.indices = make(map[string]uint32)
+	}
+	bind := func(tags []tag) error {
+		for index := range tags {
+			name := strings.TrimSpace(tags[index].Name)
+			if name == "" {
+				return errors.New("TAG name is empty")
+			}
+			id, exists := r.indices[name]
+			if !exists {
+				if len(r.names) >= int(^uint32(0)) {
+					return errors.New("TAG registry is full")
+				}
+				id = uint32(len(r.names))
+				r.indices[name] = id
+				r.names = append(r.names, name)
+			}
+			tags[index].registryIndex = id
+		}
+		return nil
+	}
+	for callIndex := range config.MethodCalls {
+		call := &config.MethodCalls[callIndex]
+		if len(call.OutputSelections) == 0 {
+			if err := bind(call.Tags); err != nil {
+				return err
+			}
+			continue
+		}
+		for selectionIndex := range call.OutputSelections {
+			if err := bind(call.OutputSelections[selectionIndex].Tags); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (r *tagRegistry) snapshot() []string {
+	if r == nil {
+		return nil
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return append([]string(nil), r.names...)
+}
+
+func (r *tagRegistry) count() int {
+	if r == nil {
+		return 0
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return len(r.names)
+}
+
+func (r *tagRegistry) name(index uint32) (string, bool) {
+	if r == nil {
+		return "", false
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if uint64(index) >= uint64(len(r.names)) {
+		return "", false
+	}
+	return r.names[index], true
+}
+
+func (d *daemon) ensureAppenderReady(ctx context.Context, database database, registry *tagRegistry) error {
+	_, err := d.ensureAppenderReadyMeasured(ctx, database, registry)
+	return err
+}
+
+func (d *daemon) ensureAppenderReadyMeasured(ctx context.Context, database database, registry *tagRegistry) (tagPreparationStats, error) {
 	if d.appenderPrepare == nil {
-		return errors.New("writer appender preparation is unavailable")
+		return tagPreparationStats{}, errors.New("writer appender preparation is unavailable")
 	}
 	d.mu.Lock()
 	closed := d.closed
 	d.mu.Unlock()
 	if closed {
-		return errors.New("collector is shutting down")
+		return tagPreparationStats{}, errors.New("collector is shutting down")
 	}
 	result := make(chan error, 1)
-	request := appenderPrepareRequest{Context: ctx, Database: database, Tags: tags, Result: result}
+	stats := make(chan tagPreparationStats, 1)
+	request := appenderPrepareRequest{Context: ctx, Database: database, Registry: registry, TagCount: registry.count(), Result: result, Stats: stats}
 	select {
 	case d.appenderPrepare <- request:
 	case <-ctx.Done():
-		return ctx.Err()
+		return tagPreparationStats{}, ctx.Err()
 	case <-d.runtimeStop:
-		return errors.New("collector is shutting down")
+		return tagPreparationStats{}, errors.New("collector is shutting down")
 	}
 	select {
 	case err := <-result:
-		return err
+		return <-stats, err
 	case <-ctx.Done():
-		return ctx.Err()
+		return tagPreparationStats{}, ctx.Err()
 	case <-d.runtimeStop:
-		return errors.New("collector is shutting down")
+		return tagPreparationStats{}, errors.New("collector is shutting down")
 	}
+}
+
+func formatTagPreparationLog(prefix string, table string, elapsed time.Duration, stats tagPreparationStats) string {
+	return fmt.Sprintf("%s; table=%s requiredTags=%d candidates=%d existing=%d missing=%d registered=%d reused=%t metadataUs=%d registrationUs=%d totalUs=%d",
+		prefix, table, stats.Required, stats.Candidates, stats.ExistingCandidates, stats.Missing, stats.Registered, stats.Reused,
+		stats.MetadataDuration.Microseconds(), stats.RegistrationDuration.Microseconds(), elapsed.Microseconds())
 }
 
 func (d *daemon) reload(name string) error {
@@ -847,12 +1222,12 @@ func (d *daemon) reader(ctx context.Context, config jobConfig, name string, acti
 			return
 		case <-timer.C:
 			if !primed {
-				if connection == nil {
+				if !config.Execution.Test && connection == nil {
 					var connectError error
 					connection, connectError = d.connectDBus(name)
 					if connectError != nil {
 						if ctx.Err() == nil {
-							d.recordJobPerformance(name, interval, readTiming{}, connectError)
+							d.recordJobPerformance(name, readTiming{}, connectError)
 						}
 						timer.Reset(nextAligned(time.Now(), interval))
 						continue
@@ -866,12 +1241,12 @@ func (d *daemon) reader(ctx context.Context, config jobConfig, name string, acti
 				go func() {
 					defer active.work.Done()
 					defer busy.Store(false)
-					if connection == nil {
+					if !config.Execution.Test && connection == nil {
 						var connectError error
 						connection, connectError = d.connectDBus(name)
 						if connectError != nil {
 							if ctx.Err() == nil {
-								d.recordJobPerformance(name, interval, readTiming{}, connectError)
+								d.recordJobPerformance(name, readTiming{}, connectError)
 							}
 							return
 						}
@@ -907,15 +1282,53 @@ func nextAligned(now time.Time, interval time.Duration) time.Duration {
 }
 
 func (d *daemon) readOnce(ctx context.Context, config jobConfig, name string, connection *dbus.Conn, active *activeJob, awaitDurable bool) bool {
-	rows, timing, err := readDBus(ctx, config, connection)
-	if ctx.Err() == nil {
-		d.recordJobPerformance(name, time.Duration(config.Schedule.IntervalMS)*time.Millisecond, timing, err)
+	if ctx.Err() != nil {
+		return false
+	}
+	reservation := d.reserveQueue()
+	if reservation == nil {
+		if ctx.Err() == nil {
+			d.recordOverrun(name, true)
+		}
+		return false
+	}
+	if active.plan == nil {
+		plan, err := buildReadPlan(config)
+		if err != nil {
+			reservation.release()
+			d.recordError(name, err)
+			return false
+		}
+		active.plan = plan
+	}
+	if active.buffers == nil {
+		active.buffers = newRowBufferPool(active.plan)
+	}
+	lease := active.buffers.acquire()
+	rows := lease.rows
+	readerStarted := time.Now()
+	var timing readTiming
+	var err error
+	if config.Execution.Test {
+		timing, err = generateTestRowsInto(active.plan, rows)
+	} else {
+		timing, err = readDBusInto(ctx, active.plan, connection, rows)
 	}
 	if err != nil {
+		lease.release()
+		reservation.release()
 		if ctx.Err() != nil {
 			return false
 		}
+		timing.ReaderTotal = time.Since(readerStarted)
+		timing.ReaderTotalMeasured = true
+		d.recordJobPerformance(name, timing, err)
 		d.recordError(name, err)
+		return false
+	}
+	if ctx.Err() != nil {
+		lease.release()
+		reservation.release()
 		return false
 	}
 	d.mu.Lock()
@@ -923,13 +1336,21 @@ func (d *daemon) readOnce(ctx context.Context, config jobConfig, name string, co
 	// previous writer error here; only a successful Flush may do that.
 	d.updateLocked(name, func(v *jobRuntime) { v.LastReadAt = time.Now().UTC().Format(time.RFC3339Nano) })
 	d.mu.Unlock()
-	b := &batch{Job: name, Database: config.Database, Rows: rows, Finished: make(chan error, 1), EnqueuedAt: time.Now(), FlushAfterAppend: awaitDurable}
+	b := &batch{Job: name, Database: config.Database, Registry: active.registry, Rows: rows, RowCount: len(rows), rowLease: lease, queueReservation: reservation, Owner: active, EnqueuedAt: time.Now(), FlushAfterAppend: awaitDurable}
+	if awaitDurable {
+		b.Finished = make(chan error, 1)
+	}
 	// The reader has completed its responsibility after a bounded queue accepts
 	// the typed batch. Keep a separate drain reference so Job stop waits for
 	// durable completion without making the scheduler wait for writer Flush.
 	active.work.Add(1)
 	select {
 	case d.queue <- b:
+		if ctx.Err() == nil {
+			timing.ReaderTotal = time.Since(readerStarted)
+			timing.ReaderTotalMeasured = true
+			d.recordJobPerformance(name, timing, nil)
+		}
 		d.recordQueueDepth(len(d.queue))
 		if awaitDurable {
 			writeErr := <-b.Finished
@@ -938,23 +1359,30 @@ func (d *daemon) readOnce(ctx context.Context, config jobConfig, name string, co
 				d.recordError(name, writeErr)
 				return false
 			}
-			d.recordSuccess(name, len(rows))
+			d.recordSuccess(name, b.RowCount)
 			return true
 		}
 		if active.flushOnQueue.Load() {
 			d.requestFlush()
 		}
-		go func() {
-			defer active.work.Done()
-			if writeErr := <-b.Finished; writeErr != nil {
-				d.recordError(name, writeErr)
-				return
-			}
-			d.recordSuccess(name, len(rows))
-		}()
-	default:
+		// Non-priming batches are completed by the single writer. Do not create
+		// one flush-waiting goroutine per cycle: at a 10ms interval and a 1s
+		// flush period that would retain about 100 goroutines per active Job.
+	case <-ctx.Done():
+		b.releaseRows()
+		reservation.release()
 		active.work.Done()
-		d.recordOverrun(name, true)
+		return false
+	default:
+		b.releaseRows()
+		reservation.release()
+		if ctx.Err() == nil {
+			timing.ReaderTotal = time.Since(readerStarted)
+			timing.ReaderTotalMeasured = true
+			d.recordOverrun(name, true)
+			d.recordJobPerformance(name, timing, nil)
+		}
+		active.work.Done()
 		return false
 	}
 	return true
@@ -994,14 +1422,29 @@ func durationSummaryUS(values []int64) (minimum, p50, average, p99, maximum int6
 	return minimum, percentileUS(values, 0.50), total / int64(len(values)), percentileUS(values, 0.99), maximum
 }
 
-func (d *daemon) recordJobPerformance(name string, interval time.Duration, timing readTiming, readErr error) {
+func sourceForConfig(config jobConfig) string {
+	if config.Execution.Test {
+		return "test"
+	}
+	return "dbus"
+}
+
+func newJobPerformance(sampleCount int, source string) *jobPerformance {
+	return &jobPerformance{
+		Source:        source,
+		DBusUS:        make([]int64, 0, sampleCount),
+		ReaderTotalUS: make([]int64, 0, sampleCount),
+	}
+}
+
+func (d *daemon) recordJobPerformance(name string, timing readTiming, readErr error) {
 	if !d.performancePolicy.Enabled {
 		return
 	}
 	d.performanceMu.Lock()
 	stats := d.jobPerformance[name]
 	if stats == nil {
-		stats = &jobPerformance{DBusUS: make([]int64, 0, d.performancePolicy.JobSampleCount)}
+		stats = newJobPerformance(d.performancePolicy.JobSampleCount, "dbus")
 		d.jobPerformance[name] = stats
 	}
 	stats.Attempts++
@@ -1009,11 +1452,23 @@ func (d *daemon) recordJobPerformance(name string, interval time.Duration, timin
 		stats.DBusUS = append(stats.DBusUS, timing.DBus.Microseconds())
 	}
 	if timing.ParseMeasured {
-		stats.ParseTotalUS += timing.Parse.Microseconds()
+		parseUS := timing.Parse.Microseconds()
+		stats.ParseTotalUS += parseUS
+		if parseUS > stats.ParseMaxUS {
+			stats.ParseMaxUS = parseUS
+		}
 		stats.ParseSamples++
 	}
-	if timing.DBusMeasured && timing.DBus > interval {
-		stats.OverIntervalCount++
+	if timing.GenerateMeasured {
+		generateUS := timing.Generate.Microseconds()
+		stats.GenerateTotalUS += generateUS
+		if generateUS > stats.GenerateMaxUS {
+			stats.GenerateMaxUS = generateUS
+		}
+		stats.GenerateSamples++
+	}
+	if timing.ReaderTotalMeasured {
+		stats.ReaderTotalUS = append(stats.ReaderTotalUS, timing.ReaderTotal.Microseconds())
 	}
 	if readErr != nil {
 		stats.ErrorCount++
@@ -1023,18 +1478,37 @@ func (d *daemon) recordJobPerformance(name string, interval time.Duration, timin
 		return
 	}
 	snapshot := *stats
-	d.jobPerformance[name] = &jobPerformance{DBusUS: make([]int64, 0, d.performancePolicy.JobSampleCount)}
+	d.jobPerformance[name] = newJobPerformance(d.performancePolicy.JobSampleCount, snapshot.Source)
 	d.performanceMu.Unlock()
 
-	minimum, p50, average, p99, maximum := durationSummaryUS(snapshot.DBusUS)
+	_, _, average, p99, maximum := durationSummaryUS(snapshot.DBusUS)
 	parseAverage := int64(0)
 	if snapshot.ParseSamples > 0 {
 		parseAverage = snapshot.ParseTotalUS / int64(snapshot.ParseSamples)
 	}
+	_, _, _, readerTotalP99, readerTotalMax := durationSummaryUS(snapshot.ReaderTotalUS)
 	d.logAlways(name, "INFO", "performance", fmt.Sprintf(
-		"job=%s job summary; samples=%d dbusUs[min=%d p50=%d avg=%d p99=%d max=%d] parseAvgUs=%d overIntervalCount=%d errorCount=%d",
-		name, snapshot.Attempts, minimum, p50, average, p99, maximum, parseAverage, snapshot.OverIntervalCount, snapshot.ErrorCount,
+		"job=%s job summary; source=%s samples=%d dbusUs[avg=%d p99=%d max=%d] parseUs[avg=%d max=%d] readerTotalUs[p99=%d max=%d] skipCount=%d overIntervalCount=%d queueFullSkipCount=%d errorCount=%d",
+		name, snapshot.Source, snapshot.Attempts, average, p99, maximum, parseAverage, snapshot.ParseMaxUS, readerTotalP99, readerTotalMax, snapshot.OverIntervalCount+snapshot.QueueFullSkipCount, snapshot.OverIntervalCount, snapshot.QueueFullSkipCount, snapshot.ErrorCount,
 	))
+}
+
+func (d *daemon) recordPerformanceSkip(name string, queueFull bool) {
+	if !d.performancePolicy.Enabled {
+		return
+	}
+	d.performanceMu.Lock()
+	stats := d.jobPerformance[name]
+	if stats == nil {
+		stats = newJobPerformance(d.performancePolicy.JobSampleCount, "dbus")
+		d.jobPerformance[name] = stats
+	}
+	if queueFull {
+		stats.QueueFullSkipCount++
+	} else {
+		stats.OverIntervalCount++
+	}
+	d.performanceMu.Unlock()
 }
 
 func (d *daemon) recordQueueDepth(depth int) {
@@ -1048,12 +1522,55 @@ func (d *daemon) recordQueueDepth(depth int) {
 	d.performanceMu.Unlock()
 }
 
-func (d *daemon) recordWriterBusy(duration time.Duration) {
+func (d *daemon) recordWriterFlush(duration time.Duration, flushErr error) {
 	if !d.performancePolicy.Enabled {
 		return
 	}
 	d.performanceMu.Lock()
-	d.writerPerformance.Busy += duration
+	stats := &d.writerPerformance
+	stats.Busy += duration
+	stats.FlushCount++
+	if flushErr != nil {
+		stats.FlushErrors++
+	}
+	value := duration.Microseconds()
+	if len(stats.FlushUS) < maxDurableSamples {
+		stats.FlushUS = append(stats.FlushUS, value)
+	} else {
+		stats.FlushUS[stats.FlushNext] = value
+		stats.FlushNext = (stats.FlushNext + 1) % maxDurableSamples
+	}
+	d.performanceMu.Unlock()
+}
+
+func newWriterPerformance(startedAt time.Time) writerPerformance {
+	return writerPerformance{
+		StartedAt: startedAt,
+		AppendUS:  make([]int64, 0, maxDurableSamples),
+		FlushUS:   make([]int64, 0, maxDurableSamples),
+		DurableUS: make([]int64, 0, maxDurableSamples),
+	}
+}
+
+func (d *daemon) recordWriterAppend(duration time.Duration, rows int) {
+	if !d.performancePolicy.Enabled {
+		return
+	}
+	d.performanceMu.Lock()
+	stats := &d.writerPerformance
+	stats.Busy += duration
+	stats.AppendBusy += duration
+	stats.AppendBatches++
+	if rows > 0 {
+		stats.AppendRows += uint64(rows)
+	}
+	value := duration.Microseconds()
+	if len(stats.AppendUS) < maxDurableSamples {
+		stats.AppendUS = append(stats.AppendUS, value)
+	} else {
+		stats.AppendUS[stats.AppendNext] = value
+		stats.AppendNext = (stats.AppendNext + 1) % maxDurableSamples
+	}
 	d.performanceMu.Unlock()
 }
 
@@ -1085,14 +1602,25 @@ func (d *daemon) flushWriterPerformance(force bool) {
 		d.performanceMu.Unlock()
 		return
 	}
-	d.writerPerformance = writerPerformance{StartedAt: now, DurableUS: make([]int64, 0, maxDurableSamples)}
+	d.writerPerformance = newWriterPerformance(now)
 	d.performanceMu.Unlock()
 	if duration <= 0 {
 		return
 	}
 	busyRatio := float64(stats.Busy) * 100 / float64(duration)
-	durableP99 := percentileUS(stats.DurableUS, 0.99)
-	message := fmt.Sprintf("scope=shared writer summary; duration=%s maxQueueDepth=%d busyRatio=%.2f%% queueToDurableP99Us=%d", duration.Round(time.Millisecond), stats.MaxQueueDepth, busyRatio, durableP99)
+	_, _, _, durableP99, durableMax := durationSummaryUS(stats.DurableUS)
+	_, _, appendAvg, appendP99, appendMax := durationSummaryUS(stats.AppendUS)
+	_, _, _, _, flushMax := durationSummaryUS(stats.FlushUS)
+	appendRowsPerSecond := float64(0)
+	if stats.AppendBusy > 0 {
+		appendRowsPerSecond = float64(stats.AppendRows) / stats.AppendBusy.Seconds()
+	}
+	message := fmt.Sprintf(
+		"scope=shared writer summary; duration=%s maxQueueDepth=%d queueCapacity=%d busyRatio=%.2f%% appendBatches=%d appendRows=%d appendRowsPerSec=%.0f appendUs[avg=%d p99=%d max=%d] flushIntervalMs=%d flushCount=%d flushErrorCount=%d flushMaxUs=%d queueToDurableUs[p99=%d max=%d]",
+		duration.Round(time.Millisecond), stats.MaxQueueDepth, d.writerPolicy.normalized().QueueCapacity, busyRatio,
+		stats.AppendBatches, stats.AppendRows, appendRowsPerSecond, appendAvg, appendP99, appendMax,
+		d.writerPolicy.normalized().FlushIntervalMS, stats.FlushCount, stats.FlushErrors, flushMax, durableP99, durableMax,
+	)
 	d.mu.Lock()
 	names := make([]string, 0, len(d.jobs))
 	for name := range d.jobs {
@@ -1113,13 +1641,36 @@ func (d *daemon) writer() {
 	defer performanceTicker.Stop()
 	var active appenderStream
 	pending := make([]*batch, 0)
+	finish := func(item *batch, writeErr error) {
+		if item == nil {
+			return
+		}
+		rowCount := item.RowCount
+		if rowCount == 0 {
+			rowCount = len(item.Rows)
+		}
+		item.releaseRows()
+		if item.Finished != nil {
+			item.Finished <- writeErr
+			return
+		}
+		if item.Owner == nil {
+			return
+		}
+		if writeErr != nil {
+			d.recordError(item.Job, writeErr)
+		} else {
+			d.recordSuccess(item.Job, rowCount)
+		}
+		item.Owner.work.Done()
+	}
 	complete := func(writeErr error) {
 		completedAt := time.Now()
 		for _, item := range pending {
 			if writeErr == nil {
 				d.recordDurable(item, completedAt)
 			}
-			item.Finished <- writeErr
+			finish(item, writeErr)
 		}
 		pending = pending[:0]
 	}
@@ -1129,7 +1680,7 @@ func (d *daemon) writer() {
 		}
 		started := time.Now()
 		writeErr := active.flush()
-		d.recordWriterBusy(time.Since(started))
+		d.recordWriterFlush(time.Since(started), writeErr)
 		if writeErr != nil {
 			// A native write/flush failure can leave the stream unusable. Close it
 			// in the sole writer, then let the next queued batch establish a fresh
@@ -1142,10 +1693,16 @@ func (d *daemon) writer() {
 	}
 	prepare := func(configDB database) error {
 		if active != nil && !active.same(configDB) {
-			_ = flush()
+			if acceptsForcedFlush(active) {
+				_ = flush()
+			}
 			if active != nil {
-				_ = active.close()
+				closeErr := active.close()
 				active = nil
+				complete(closeErr)
+				if closeErr != nil {
+					return closeErr
+				}
 			}
 		}
 		if active != nil {
@@ -1168,8 +1725,18 @@ func (d *daemon) writer() {
 		select {
 		case request := <-d.appenderPrepare:
 			prepareErr := prepare(request.Database)
-			if prepareErr != nil || len(request.Tags) == 0 {
+			if prepareErr != nil {
+				if request.Stats != nil {
+					request.Stats <- tagPreparationStats{Required: request.TagCount}
+				}
 				request.Result <- prepareErr
+				continue
+			}
+			if request.Registry == nil {
+				if request.Stats != nil {
+					request.Stats <- tagPreparationStats{Required: request.TagCount}
+				}
+				request.Result <- errors.New("TAG registry is unavailable")
 				continue
 			}
 			// TAG metadata I/O can take several seconds for thousands of new
@@ -1181,46 +1748,82 @@ func (d *daemon) writer() {
 			if ctx == nil {
 				ctx = context.Background()
 			}
-			configDB, tags, result := request.Database, append([]string(nil), request.Tags...), request.Result
+			configDB, registry, tagCount, result, statsResult := request.Database, request.Registry, request.TagCount, request.Result, request.Stats
 			go func() {
 				release, lockErr := d.acquireTagRegistration(ctx, configDB)
 				if lockErr != nil {
+					if statsResult != nil {
+						statsResult <- tagPreparationStats{Required: tagCount}
+					}
 					result <- lockErr
 					return
 				}
 				defer release()
-				result <- registrar.registerTags(ctx, tags)
+				stats := tagPreparationStats{Required: tagCount}
+				var err error
+				if measured, ok := registrar.(measuredRegistryPreparer); ok {
+					stats, err = measured.prepareRegistryMeasured(ctx, registry, tagCount)
+				} else {
+					err = registrar.prepareRegistry(ctx, registry, tagCount)
+				}
+				if statsResult != nil {
+					statsResult <- stats
+				}
+				result <- err
 			}()
 		case b, open := <-d.queue:
 			if !open {
-				_ = flush()
+				if acceptsForcedFlush(active) {
+					_ = flush()
+				}
 				if active != nil {
-					_ = active.close()
+					closeErr := active.close()
+					active = nil
+					complete(closeErr)
 				}
 				return
 			}
+			b.queueReservation.release()
+			b.queueReservation = nil
 			if prepareErr := prepare(b.Database); prepareErr != nil {
-				b.Finished <- prepareErr
+				finish(b, prepareErr)
+				continue
+			}
+			if registryErr := active.prepareRegistry(context.Background(), b.Registry, requiredTagCount(b.Rows)); registryErr != nil {
+				_ = active.close()
+				active = nil
+				complete(registryErr)
+				finish(b, registryErr)
 				continue
 			}
 			started := time.Now()
-			appendErr := active.append(b.Rows)
-			d.recordWriterBusy(time.Since(started))
+			appendErr := active.append(b.Rows, b.Registry)
+			rowCount := b.RowCount
+			if rowCount == 0 {
+				rowCount = len(b.Rows)
+			}
+			d.recordWriterAppend(time.Since(started), rowCount)
 			if appendErr != nil {
 				_ = active.close()
 				active = nil
 				complete(appendErr)
-				b.Finished <- appendErr
+				finish(b, appendErr)
 				continue
 			}
+			// Native append consumes the complete Go slice synchronously. Flush
+			// durability needs only batch metadata, so return the large row buffer
+			// before waiting for the periodic Flush.
+			b.releaseRows()
 			pending = append(pending, b)
-			if b.FlushAfterAppend {
+			if b.FlushAfterAppend && acceptsForcedFlush(active) {
 				_ = flush()
 			}
 		case <-ticker.C:
 			_ = flush()
 		case <-d.flushNow:
-			_ = flush()
+			if acceptsForcedFlush(active) {
+				_ = flush()
+			}
 		case <-performanceTicker.C:
 			// The ticker already owns the interval. A second wall-clock guard can
 			// observe a duration a few microseconds short of the configured value
@@ -1238,38 +1841,101 @@ func (d *daemon) requestFlush() {
 }
 
 func readDBus(ctx context.Context, config jobConfig, connection *dbus.Conn) ([]row, readTiming, error) {
-	all := make([]row, 0)
+	plan, err := buildReadPlan(config)
+	if err != nil {
+		return nil, readTiming{}, err
+	}
+	rows := make([]row, plan.rowCount)
+	timing, err := readDBusInto(ctx, plan, connection, rows)
+	return rows, timing, err
+}
+
+func readDBusInto(ctx context.Context, plan *readPlan, connection *dbus.Conn, rows []row) (readTiming, error) {
 	timing := readTiming{}
-	for _, call := range config.MethodCalls {
-		count, address, tags, codec, err := lsCall(call)
-		if err != nil {
-			return nil, timing, err
-		}
+	if plan == nil || len(rows) != plan.rowCount {
+		return timing, errors.New("LS read buffer does not match the prepared Job layout")
+	}
+	for _, call := range plan.calls {
 		object := connection.Object("ls.plc", dbus.ObjectPath("/ls/plc/device"))
 		dbusStarted := time.Now()
-		result := object.CallWithContext(ctx, "ls.plc.device.GetDeviceData", 0, uint16(count), address)
+		result := object.CallWithContext(ctx, "ls.plc.device.GetDeviceData", 0, uint16(call.count), call.address)
 		timing.DBus += time.Since(dbusStarted)
 		timing.DBusMeasured = true
 		if result.Err != nil {
-			return nil, timing, fmt.Errorf("DBus GetDeviceData: %w", result.Err)
+			return timing, fmt.Errorf("DBus GetDeviceData: %w", result.Err)
 		}
 		if len(result.Body) != 1 {
-			return nil, timing, errors.New("DBus GetDeviceData returned unexpected body")
+			return timing, errors.New("DBus GetDeviceData returned unexpected body")
 		}
 		body, ok := result.Body[0].(string)
 		if !ok {
-			return nil, timing, errors.New("DBus GetDeviceData result is not a string")
+			return timing, errors.New("DBus GetDeviceData result is not a string")
 		}
 		parseStarted := time.Now()
-		rows, err := decodeLSDeviceRows(body, count, tags, codec)
+		segment := rows[call.offset : call.offset+call.count]
+		err := decodeLSDeviceRowsInto(body, call.count, call.tags, call.codec, segment)
 		timing.Parse += time.Since(parseStarted)
 		timing.ParseMeasured = true
 		if err != nil {
-			return nil, timing, err
+			return timing, err
 		}
-		all = append(all, rows...)
 	}
-	return all, timing, nil
+	return timing, nil
+}
+
+// generateTestRows is the internal non-PLC benchmark source. It deliberately
+// skips both DBus and DBus JSON parsing, then enters the exact same conversion,
+// transform, bounded-queue, native append, and flush path as production data.
+// The dedicated table check is repeated by JSH and loadJob; this function is
+// never selected from UI visibility alone.
+func generateTestRows(config jobConfig) ([]row, readTiming, error) {
+	plan, err := buildReadPlan(config)
+	if err != nil {
+		return nil, readTiming{}, err
+	}
+	rows := make([]row, plan.rowCount)
+	timing, err := generateTestRowsInto(plan, rows)
+	return rows, timing, err
+}
+
+func generateTestRowsInto(plan *readPlan, rows []row) (readTiming, error) {
+	started := time.Now()
+	timestamp := time.Now().UTC()
+	if plan == nil || len(rows) != plan.rowCount {
+		return readTiming{}, errors.New("LS test buffer does not match the prepared Job layout")
+	}
+	for _, call := range plan.calls {
+		for index := 0; index < call.count; index++ {
+			tag := call.tags[index]
+			raw := syntheticRawValue(index, call.codec, tag.Conversion)
+			value, err := decodeLSRawValue(raw, call.codec, tag.Conversion, tag.Signed)
+			if err != nil {
+				return readTiming{}, fmt.Errorf("TEST value %d: %w", index, err)
+			}
+			value, err = transform(value, tag)
+			if err != nil {
+				return readTiming{}, fmt.Errorf("TEST value %d transform: %w", index, err)
+			}
+			rows[call.offset+index] = row{TagIndex: tag.registryIndex, Time: timestamp, Value: value}
+		}
+	}
+	return readTiming{Generate: time.Since(started), GenerateMeasured: true}, nil
+}
+
+func syntheticRawValue(index int, codec lsValueCodec, conversion string) uint64 {
+	switch conversion {
+	case "DWORD2REAL":
+		return uint64(math.Float32bits(float32(index)))
+	case "LWORD2LREAL":
+		return math.Float64bits(float64(index))
+	}
+	if codec.bits == 1 {
+		return uint64(index & 1)
+	}
+	if codec.bits < 64 {
+		return uint64(index) & ((uint64(1) << codec.bits) - 1)
+	}
+	return uint64(index)
 }
 
 // decodeLSDeviceRows uses the timestamp supplied by the PLC, not the time at
@@ -1277,6 +1943,14 @@ func readDBus(ctx context.Context, config jobConfig, connection *dbus.Conn) ([]r
 // Unix epoch value in microseconds; every value in one GetDeviceData reply is
 // a snapshot at that same PLC timestamp.
 func decodeLSDeviceRows(body string, count int, tags []tag, codec lsValueCodec) ([]row, error) {
+	rows := make([]row, count)
+	if err := decodeLSDeviceRowsInto(body, count, tags, codec, rows); err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
+func decodeLSDeviceRowsInto(body string, count int, tags []tag, codec lsValueCodec, rows []row) error {
 	var parsed struct {
 		Result      int           `json:"rtn"`
 		Count       int           `json:"data-count"`
@@ -1286,31 +1960,30 @@ func decodeLSDeviceRows(body string, count int, tags []tag, codec lsValueCodec) 
 	decoder := json.NewDecoder(strings.NewReader(body))
 	decoder.UseNumber()
 	if err := decoder.Decode(&parsed); err != nil {
-		return nil, fmt.Errorf("DBus JSON parse: %w", err)
+		return fmt.Errorf("DBus JSON parse: %w", err)
 	}
-	if parsed.Result != 1 || parsed.Count != count || len(parsed.Data) != count || len(tags) != count {
-		return nil, errors.New("DBus GetDeviceData result count mismatch")
+	if parsed.Result != 1 || parsed.Count != count || len(parsed.Data) != count || len(tags) != count || len(rows) != count {
+		return errors.New("DBus GetDeviceData result count mismatch")
 	}
 	if parsed.TimestampUS <= 0 {
-		return nil, errors.New("DBus GetDeviceData result timestamp is missing or invalid")
+		return errors.New("DBus GetDeviceData result timestamp is missing or invalid")
 	}
 	timestamp := time.Unix(parsed.TimestampUS/1_000_000, (parsed.TimestampUS%1_000_000)*1_000).UTC()
-	rows := make([]row, 0, len(parsed.Data))
 	for index, encoded := range parsed.Data {
-		value, err := decodeLSValue(encoded, codec, tags[index].Signed)
+		value, err := decodeLSValue(encoded, codec, tags[index].Conversion, tags[index].Signed)
 		if err != nil {
-			return nil, fmt.Errorf("DBus GetDeviceData value %d: %w", index, err)
+			return fmt.Errorf("DBus GetDeviceData value %d: %w", index, err)
 		}
 		value, err = transform(value, tags[index])
 		if err != nil {
-			return nil, fmt.Errorf("DBus GetDeviceData value %d transform: %w", index, err)
+			return fmt.Errorf("DBus GetDeviceData value %d transform: %w", index, err)
 		}
-		rows = append(rows, row{Name: tags[index].Name, Time: timestamp, Value: value})
+		rows[index] = row{TagIndex: tags[index].registryIndex, Time: timestamp, Value: value}
 	}
-	return rows, nil
+	return nil
 }
 
-func decodeLSValue(encoded json.Number, codec lsValueCodec, signed bool) (any, error) {
+func decodeLSValue(encoded json.Number, codec lsValueCodec, conversion string, signed bool) (any, error) {
 	if codec.bits == 0 || codec.bits > 64 {
 		return nil, errors.New("invalid LS value codec")
 	}
@@ -1320,6 +1993,53 @@ func decodeLSValue(encoded json.Number, codec lsValueCodec, signed bool) (any, e
 	}
 	if codec.bits < 64 && raw > (uint64(1)<<codec.bits)-1 {
 		return nil, fmt.Errorf("DBus value %d exceeds %d-bit address type", raw, codec.bits)
+	}
+	return decodeLSRawValue(raw, codec, conversion, signed)
+}
+
+func decodeLSRawValue(raw uint64, codec lsValueCodec, conversion string, signed bool) (any, error) {
+	if codec.bits == 0 || codec.bits > 64 {
+		return nil, errors.New("invalid LS value codec")
+	}
+	if codec.bits < 64 && raw > (uint64(1)<<codec.bits)-1 {
+		return nil, fmt.Errorf("value %d exceeds %d-bit address type", raw, codec.bits)
+	}
+	if conversion == "" {
+		conversion = map[uint]string{8: "BYTE2INT", 16: "WORD2INT", 32: "DWORD2INT", 64: "LWORD2INT"}[codec.bits]
+	}
+	switch conversion {
+	case "DWORD2REAL":
+		if codec.bits != 32 {
+			return nil, errors.New("DWORD2REAL requires a 32-bit address type")
+		}
+		return float64(math.Float32frombits(uint32(raw))), nil
+	case "LWORD2LREAL":
+		if codec.bits != 64 {
+			return nil, errors.New("LWORD2LREAL requires a 64-bit address type")
+		}
+		return math.Float64frombits(raw), nil
+	case "BYTE2INT":
+		if codec.bits != 8 {
+			return nil, errors.New("BYTE2INT requires an 8-bit address type")
+		}
+	case "WORD2INT":
+		if codec.bits != 16 {
+			return nil, errors.New("WORD2INT requires a 16-bit address type")
+		}
+	case "DWORD2INT":
+		if codec.bits != 32 {
+			return nil, errors.New("DWORD2INT requires a 32-bit address type")
+		}
+	case "LWORD2INT":
+		if codec.bits != 64 {
+			return nil, errors.New("LWORD2INT requires a 64-bit address type")
+		}
+	case "":
+		if codec.bits != 1 {
+			return nil, errors.New("LS integer conversion is missing")
+		}
+	default:
+		return nil, fmt.Errorf("unsupported LS value conversion %q", conversion)
 	}
 	// A Bit is always 0 or 1. Signed is deliberately ignored for X addresses.
 	if !signed || codec.bits == 1 {
@@ -1414,59 +2134,142 @@ func transform(value any, tag tag) (any, error) {
 }
 
 type nativeAppender struct {
-	database  database
-	appender  *client.Appender
-	dsn       string
-	primary   string
-	hasString bool
-	valueType api.ColumnType
+	database      database
+	appender      *client.Appender
+	dsn           string
+	primary       string
+	columnValues  []any
+	primaryIndex  int
+	basetimeIndex int
+	valueIndex    int
+	valueType     api.ColumnType
+	registryMu    sync.Mutex
+	registry      atomic.Pointer[tagRegistry]
+	preparedTags  atomic.Int64
 }
 
 type appenderStream interface {
 	same(database) bool
 	close() error
 	flush() error
-	append([]row) error
-	registerTags(context.Context, []string) error
+	append([]row, *tagRegistry) error
+	prepareRegistry(context.Context, *tagRegistry, int) error
+}
+
+type measuredRegistryPreparer interface {
+	prepareRegistryMeasured(context.Context, *tagRegistry, int) (tagPreparationStats, error)
+}
+
+type periodicFlushOnlyAppender interface {
+	periodicFlushOnly()
+}
+
+func acceptsForcedFlush(stream appenderStream) bool {
+	if stream == nil {
+		return false
+	}
+	_, periodicOnly := stream.(periodicFlushOnlyAppender)
+	return !periodicOnly
 }
 
 func (a *nativeAppender) same(database database) bool { return a.database == database }
 func (a *nativeAppender) close() error                { _, _, err := a.appender.Close(); return err }
 func (a *nativeAppender) flush() error                { return a.appender.Flush() }
-func (a *nativeAppender) registerTags(ctx context.Context, tags []string) error {
-	if len(tags) == 0 {
-		return nil
+func (a *nativeAppender) prepareRegistry(ctx context.Context, registry *tagRegistry, required int) error {
+	_, err := a.prepareRegistryMeasured(ctx, registry, required)
+	return err
+}
+
+func (a *nativeAppender) prepareRegistryMeasured(ctx context.Context, registry *tagRegistry, required int) (tagPreparationStats, error) {
+	stats := tagPreparationStats{Required: required}
+	if registry == nil {
+		return stats, errors.New("TAG registry is unavailable")
 	}
-	db, err := sql.Open("machbase", a.dsn)
+	if required < 0 || required > registry.count() {
+		return stats, errors.New("invalid required TAG count")
+	}
+	if a.registry.Load() == registry && int64(required) <= a.preparedTags.Load() {
+		stats.Reused = true
+		return stats, nil
+	}
+	a.registryMu.Lock()
+	defer a.registryMu.Unlock()
+	preparedRegistry := a.registry.Load()
+	if preparedRegistry != nil && preparedRegistry != registry {
+		return stats, errors.New("native appender received a different TAG registry")
+	}
+	names := registry.snapshot()
+	names = names[:required]
+	prepared := int(a.preparedTags.Load())
+	if len(names) <= prepared {
+		stats.Reused = true
+		return stats, nil
+	}
+	registrationStats, err := registerTagsSQLMeasured(ctx, a.dsn, a.database, a.primary, names[prepared:])
+	registrationStats.Required = required
 	if err != nil {
-		return err
+		return registrationStats, err
+	}
+	a.registry.Store(registry)
+	a.preparedTags.Store(int64(len(names)))
+	return registrationStats, nil
+}
+
+func registerTagsSQL(ctx context.Context, dsn string, config database, primary string, tags []string) error {
+	_, err := registerTagsSQLMeasured(ctx, dsn, config, primary, tags)
+	return err
+}
+
+func registerTagsSQLMeasured(ctx context.Context, dsn string, config database, primary string, tags []string) (tagPreparationStats, error) {
+	stats := tagPreparationStats{Candidates: len(tags)}
+	if len(tags) == 0 {
+		stats.Reused = true
+		return stats, nil
+	}
+	db, err := sql.Open("machbase", dsn)
+	if err != nil {
+		return stats, err
 	}
 	defer db.Close()
-	tableName := quoteSQLIdentifier(a.database.Table)
-	primaryName := quoteSQLIdentifier(a.primary)
+	tableName := quoteSQLIdentifier(config.Table)
+	primaryName := quoteSQLIdentifier(primary)
+	metadataStarted := time.Now()
 	rows, err := db.QueryContext(ctx, fmt.Sprintf("SELECT %s FROM %s METADATA", primaryName, tableName))
 	if err != nil {
-		return fmt.Errorf("read TAG metadata: %w", err)
+		stats.MetadataDuration = time.Since(metadataStarted)
+		return stats, fmt.Errorf("read TAG metadata: %w", err)
 	}
 	existing := make(map[string]struct{})
 	for rows.Next() {
 		var name string
 		if err := rows.Scan(&name); err != nil {
 			rows.Close()
-			return fmt.Errorf("read TAG metadata name: %w", err)
+			stats.MetadataDuration = time.Since(metadataStarted)
+			return stats, fmt.Errorf("read TAG metadata name: %w", err)
 		}
 		existing[name] = struct{}{}
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
-		return fmt.Errorf("read TAG metadata: %w", err)
+		stats.MetadataDuration = time.Since(metadataStarted)
+		return stats, fmt.Errorf("read TAG metadata: %w", err)
 	}
 	if err := rows.Close(); err != nil {
-		return fmt.Errorf("close TAG metadata query: %w", err)
+		stats.MetadataDuration = time.Since(metadataStarted)
+		return stats, fmt.Errorf("close TAG metadata query: %w", err)
 	}
+	stats.MetadataDuration = time.Since(metadataStarted)
+	for _, name := range tags {
+		if _, exists := existing[name]; exists {
+			stats.ExistingCandidates++
+		}
+	}
+	stats.Missing = stats.Candidates - stats.ExistingCandidates
+	registrationStarted := time.Now()
 	statement, err := db.PrepareContext(ctx, fmt.Sprintf("INSERT INTO %s METADATA (%s) VALUES (?)", tableName, primaryName))
 	if err != nil {
-		return fmt.Errorf("prepare TAG metadata registration: %w", err)
+		stats.RegistrationDuration = time.Since(registrationStarted)
+		return stats, fmt.Errorf("prepare TAG metadata registration: %w", err)
 	}
 	defer statement.Close()
 	for _, name := range tags {
@@ -1474,11 +2277,14 @@ func (a *nativeAppender) registerTags(ctx context.Context, tags []string) error 
 			continue
 		}
 		if _, err := statement.ExecContext(ctx, name); err != nil {
-			return fmt.Errorf("register TAG %s: %w", name, err)
+			stats.RegistrationDuration = time.Since(registrationStarted)
+			return stats, fmt.Errorf("register TAG %s: %w", name, err)
 		}
 		existing[name] = struct{}{}
+		stats.Registered++
 	}
-	return nil
+	stats.RegistrationDuration = time.Since(registrationStarted)
+	return stats, nil
 }
 
 func tagRegistrationKey(config database) string {
@@ -1509,23 +2315,33 @@ func quoteSQLIdentifier(value string) string {
 	return `"` + strings.ReplaceAll(value, `"`, `""`) + `"`
 }
 
-func (a *nativeAppender) append(rows []row) error {
-	values := make([]any, len(rows))
-	for index, row := range rows {
+func (a *nativeAppender) append(rows []row, registry *tagRegistry) error {
+	if registry == nil {
+		return errors.New("TAG registry is unavailable")
+	}
+	registry.mu.RLock()
+	defer registry.mu.RUnlock()
+	// Validate and convert the whole logical batch before appending any row. A
+	// conversion failure therefore cannot leave a partially appended batch.
+	for index := range rows {
+		row := &rows[index]
+		if uint64(row.TagIndex) >= uint64(len(registry.names)) {
+			return fmt.Errorf("TAG registry index out of range: %d", row.TagIndex)
+		}
 		value, err := valueForColumn(row.Value, a.valueType)
 		if err != nil {
-			return fmt.Errorf("Tag %s: %w", row.Name, err)
+			return fmt.Errorf("Tag %s: %w", registry.names[row.TagIndex], err)
 		}
-		values[index] = value
+		row.Value = value
 	}
+	// WithInputColumns performs this full-column expansion and allocates a new
+	// []any for every Append call. The writer is single-threaded and Append
+	// encodes synchronously, so one full-column buffer can safely be reused.
 	for _, row := range rows {
-		value := values[0]
-		values = values[1:]
-		if a.hasString {
-			if err := a.appender.Append(row.Name, row.Time, value, nil); err != nil {
-				return err
-			}
-		} else if err := a.appender.Append(row.Name, row.Time, value); err != nil {
+		a.columnValues[a.primaryIndex] = registry.names[row.TagIndex]
+		a.columnValues[a.basetimeIndex] = row.Time
+		a.columnValues[a.valueIndex] = row.Value
+		if err := a.appender.Append(a.columnValues...); err != nil {
 			return err
 		}
 	}
@@ -1533,6 +2349,17 @@ func (a *nativeAppender) append(rows []row) error {
 }
 
 func valueForColumn(value any, typ api.ColumnType) (any, error) {
+	// Parsed JSON numeric values already use float64. Preserve the existing
+	// interface value on the common DOUBLE path to avoid boxing a replacement
+	// value for every row.
+	if typ == api.ColumnTypeDouble {
+		if number, ok := value.(float64); ok {
+			if math.IsNaN(number) || math.IsInf(number, 0) {
+				return nil, errors.New("value is not finite")
+			}
+			return value, nil
+		}
+	}
 	number, err := numericFloat(value)
 	if err != nil {
 		return nil, err
@@ -1580,7 +2407,7 @@ func valueForColumn(value any, typ api.ColumnType) (any, error) {
 	}
 }
 
-func openAppender(root string, database database, flushMaxRows int) (*nativeAppender, error) {
+func openGoAppender(root string, database database, flushMaxRows int) (*nativeAppender, error) {
 	secrets, err := loadSecrets(root)
 	if err != nil {
 		return nil, err
@@ -1596,23 +2423,27 @@ func openAppender(root string, database database, flushMaxRows int) (*nativeAppe
 	}
 	columns := ap.Columns()
 	primary, basetime := "", ""
+	primaryIndex, basetimeIndex, valueIndex := -1, -1, -1
 	var valueType api.ColumnType
-	for _, column := range columns {
+	for index, column := range columns {
 		if column.IsTagName() {
 			primary = column.Name
+			primaryIndex = index
 		}
 		if column.IsBaseTime() {
 			basetime = column.Name
+			basetimeIndex = index
 		}
 		if strings.EqualFold(column.Name, database.ValueColumn) {
 			valueType = column.Type
+			valueIndex = index
 		}
 	}
 	if primary == "" || basetime == "" {
 		_, _, _ = ap.Close()
 		return nil, errors.New("TAG primary/basetime column not found")
 	}
-	value, stringValue := strings.ToUpper(database.ValueColumn), strings.ToUpper(database.StringValueColumn)
+	value := strings.ToUpper(database.ValueColumn)
 	if value == "" {
 		_, _, _ = ap.Close()
 		return nil, errors.New("TAG value column not configured")
@@ -1621,16 +2452,15 @@ func openAppender(root string, database database, flushMaxRows int) (*nativeAppe
 		_, _, _ = ap.Close()
 		return nil, errors.New("TAG VALUE column type not found")
 	}
-	if stringValue != "" {
-		ap.WithInputColumns(primary, basetime, value, stringValue)
-	} else {
-		ap.WithInputColumns(primary, basetime, value)
-	}
 	// The writer goroutine owns the time-based Flush. Disable the connector's
 	// append-driven delay so the deployment setting has one unambiguous clock;
 	// the connector's byte cap remains a memory safety guard.
 	ap.WithBatchMaxRows(flushMaxRows).WithBatchMaxDelay(0)
-	return &nativeAppender{database: database, appender: ap, dsn: dsn, primary: primary, hasString: stringValue != "", valueType: valueType}, nil
+	return &nativeAppender{
+		database: database, appender: ap, dsn: dsn, primary: primary,
+		columnValues: make([]any, len(columns)), primaryIndex: primaryIndex,
+		basetimeIndex: basetimeIndex, valueIndex: valueIndex, valueType: valueType,
+	}, nil
 }
 
 func loadSnapshot(root string) (snapshot, error) {
@@ -1722,6 +2552,11 @@ func loadJob(root, name string) (jobConfig, error) {
 		job.Database.ValueColumn = server.ValueColumn
 	}
 	job.Database.StringValueColumn = server.StringValueColumn
+	// Final fail-closed boundary: the shared database profile is authoritative
+	// and may have changed since JSH saved the Job. Synthetic input is allowed
+	// only for the exact internal benchmark table and is never auto-enabled.
+	job.Execution.Test = job.Execution.Test &&
+		strings.EqualFold(strings.TrimSpace(job.Database.Table), testTableName)
 	if job.Schedule.IntervalMS < 1 || job.Database.Server == "" || job.Database.Table == "" || job.Database.ValueColumn == "" || len(job.MethodCalls) == 0 {
 		return jobConfig{}, errors.New("job runtime configuration is incomplete")
 	}
@@ -1838,6 +2673,7 @@ func (d *daemon) recordOverrun(name string, queue bool) {
 	first = summary.Skipped == 1
 	d.logSummaries[name] = summary
 	d.mu.Unlock()
+	d.recordPerformanceSkip(name, queue)
 	if first {
 		stage := "scheduler"
 		if queue {

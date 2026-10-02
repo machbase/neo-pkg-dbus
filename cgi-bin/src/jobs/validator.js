@@ -143,7 +143,7 @@ function validateInputValue(input, value) {
 
 function validateTag(tag, names) {
   assertObject(tag, 'Tag');
-  assertFields(tag, ['outputIndex', 'sourceAddress', 'name', 'bias', 'multiplier', 'calcOrder', 'transformOrder', 'signed'], 'Tag');
+  assertFields(tag, ['outputIndex', 'sourceAddress', 'name', 'bias', 'multiplier', 'calcOrder', 'transformOrder', 'conversion', 'signed'], 'Tag');
   if (typeof tag.name !== 'string' || !tag.name.trim()) {
     invalid('Tag name이 필요합니다.');
   }
@@ -159,8 +159,11 @@ function validateTag(tag, names) {
     || !tag.transformOrder.includes('bias') || !tag.transformOrder.includes('multiplier'))) {
     invalid('Tag transformOrder는 bias와 multiplier를 각각 한 번씩 가져야 합니다.');
   }
+  if (tag.conversion !== undefined && !['BYTE2INT', 'WORD2INT', 'DWORD2INT', 'DWORD2REAL', 'LWORD2INT', 'LWORD2LREAL'].includes(tag.conversion)) {
+    invalid('Tag conversion을 지원하지 않습니다.');
+  }
   if (tag.signed !== undefined && typeof tag.signed !== 'boolean') invalid('Tag signed는 boolean이어야 합니다.');
-  return { name: tag.name, bias: tag.bias, multiplier: tag.multiplier, signed: tag.signed === true, ...(tag.transformOrder ? { transformOrder: tag.transformOrder.slice() } : {}) };
+  return { name: tag.name, bias: tag.bias, multiplier: tag.multiplier, ...(tag.conversion ? { conversion: tag.conversion } : {}), signed: tag.signed === true, ...(tag.transformOrder ? { transformOrder: tag.transformOrder.slice() } : {}) };
 }
 
 function validateMethodCall(call, interfaceStore, options, callIds, callNames, tagNames) {
@@ -275,8 +278,9 @@ function validateJobConfig(value, options) {
     invalid('retry 설정 범위가 잘못되었습니다.');
   }
   assertObject(value.execution, 'execution');
-  assertFields(value.execution, ['savePolicy', 'onMethodError'], 'execution');
+  assertFields(value.execution, ['savePolicy', 'onMethodError', 'test'], 'execution');
   if (!SAVE_POLICIES.has(value.execution.savePolicy) || !METHOD_ERROR_POLICIES.has(value.execution.onMethodError)) invalid('execution policy가 잘못되었습니다.');
+  if (value.execution.test !== undefined && typeof value.execution.test !== 'boolean') invalid('execution.test는 boolean이어야 합니다.');
   if (!Array.isArray(value.methodCalls) || value.methodCalls.length < 1 || value.methodCalls.length > MAX_METHOD_CALLS) {
     invalid(`methodCalls는 1~${MAX_METHOD_CALLS}개여야 합니다.`);
   }
@@ -304,6 +308,7 @@ function validateJobConfig(value, options) {
   // Neo stores unquoted SQL identifiers in uppercase. Persist the same
   // canonical form for every Job creation and update path.
   normalized.database.table = normalized.database.table.toUpperCase();
+  normalized.execution.test = normalized.execution.test === true;
   normalized.methodCalls = methodCalls;
   return normalized;
 }

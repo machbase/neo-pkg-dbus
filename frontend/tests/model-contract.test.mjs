@@ -1,16 +1,29 @@
 import assert from "node:assert/strict";
-import { buildJobTree, createDefaultJobConfig, createMethodCall, hasCompleteNumericEvidence, hydrateJobConfig, jobActions, jobNeedsStringValueColumn, nextDefaultJobName, serializeJobConfig, validateJobTags, validateTags } from "../src/model.js";
+import { buildJobTree, createDefaultJobConfig, createMethodCall, hasCompleteNumericEvidence, hydrateJobConfig, intervalMsFromMultiplier, intervalMultiplier, jobActions, jobNeedsStringValueColumn, maxIntervalMultiplier, nextDefaultJobName, serializeJobConfig, taskPeriodMs, validateJobTags, validateTags } from "../src/model.js";
+
+assert.equal(taskPeriodMs(4), 4);
+assert.equal(taskPeriodMs(undefined), 1);
+assert.equal(taskPeriodMs(0), 1);
+assert.equal(intervalMultiplier(4, 12), 3);
+assert.equal(intervalMultiplier(4, 10), 3);
+assert.equal(intervalMsFromMultiplier(4, 3), 12);
+assert.equal(intervalMsFromMultiplier(4, 0), 4);
+assert.equal(intervalMsFromMultiplier(4, 2.1), 12);
+assert.equal(maxIntervalMultiplier(4), 21600000);
 
 const dbusInterface = { id: "plc", busType: "system", destination: "com.example.Plc", methods: [{ id: "read", member: "Read", inputs: [{ name: "count", type: "uint16", required: true }], outputs: [] }] };
 const config = createDefaultJobConfig(dbusInterface, "local-db");
 assert.equal(config.profileId, undefined);
 assert.equal(config.dbus, undefined);
 assert.deepEqual(config.methodCalls, []);
+assert.equal(config.execution.test, false);
 assert.deepEqual(config.database, { server: "local-db", table: "", valueColumn: "", stringValueColumn: "" });
 assert.deepEqual(createDefaultJobConfig(dbusInterface, { name: "local-db", defaultTable: "TAG_DATA" }).database, {
   server: "local-db", table: "TAG_DATA", valueColumn: "VALUE", stringValueColumn: "",
 });
 assert.deepEqual(serializeJobConfig(config).methodCalls, []);
+assert.equal(serializeJobConfig({ ...config, execution: { ...config.execution, test: true } }).execution.test, true);
+assert.equal(hydrateJobConfig({ ...config, execution: { savePolicy: "perMethod", onMethodError: "stop" } }).execution.test, false);
 assert.deepEqual(buildJobTree("line-a", config)[0].calls, []);
 assert.equal(createMethodCall(dbusInterface.methods[0], "call-a", "plc").interfaceId, "plc");
 const typedMethod = {

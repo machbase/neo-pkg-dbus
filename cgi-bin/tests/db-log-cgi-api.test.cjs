@@ -142,32 +142,228 @@ function run() {
   assert.equal(maximumGet.replies.length, 1);
   assert.equal(calls.find((call) => call.name === 'maximumData').args[0].names.length, 100);
 
-  const profileChangeRequired = harness({ query: { name: 'local-db' }, body: { name: 'local-db', host: 'localhost', port: 5656, user: 'sys', password: 'secret' } });
-  const activeRuntime = { activeNames() { return ['line-a', 'line-b']; } };
+  const profileChangeRequired = harness({ query: { name: 'local-db' }, body: { name: 'local-db', host: 'localhost', port: 5656, user: 'sys', password: 'secret', restartRunningJobs: true } });
+  let blockedUpdateCalled = false;
+  const activeRuntime = { databaseChangeBlockers() { return ['line-a', 'line-b']; } };
   createDbApi({
     http: profileChangeRequired.http,
     method: () => 'PUT',
-    store: {}, viewer: {}, lsRuntime: activeRuntime,
+    store: { update() { blockedUpdateCalled = true; } }, viewer: {}, lsRuntime: activeRuntime,
   }).run('server');
   assert.equal(profileChangeRequired.failures.length, 1);
-  assert.equal(profileChangeRequired.failures[0].failure.code, 'LS_DATABASE_RESTART_REQUIRED');
+  assert.equal(profileChangeRequired.failures[0].failure.code, 'LS_DATABASE_JOBS_NOT_STOPPED');
+  assert.deepEqual(profileChangeRequired.failures[0].failure.details.jobs, ['line-a', 'line-b']);
   assert.equal(profileChangeRequired.failures[0].status, 409);
+  assert.equal(blockedUpdateCalled, false, 'restartRunningJobs must not bypass the stopped-Job guard');
 
-  const profileChange = harness({ query: { name: 'local-db' }, body: { name: 'local-db', host: 'localhost', port: 5656, user: 'sys', password: 'secret', restartRunningJobs: true } });
-  let reloaded = false;
+  const profileChange = harness({ query: { name: 'local-db' }, body: { name: 'local-db', host: 'localhost', port: 5656, user: 'sys', password: 'secret' } });
+  const profileChangeOrder = [];
   createDbApi({
     http: profileChange.http,
     method: () => 'PUT',
-    store: { update(_name, payload, callback) { callback(null, { name: payload.name, defaultTable: 'TAG' }); } },
+    databaseProfileLock: {
+      acquire(name) {
+        profileChangeOrder.push(`lock:${name}`);
+        return { release() { profileChangeOrder.push('unlock'); } };
+      },
+    },
+    store: {
+      update(_name, payload, callback) {
+        profileChangeOrder.push('store');
+        callback(null, { name: payload.name, defaultTable: 'TAG' });
+      },
+    },
     viewer: {},
+    testModeNormalizer: {
+      disableForDatabase(name, table) {
+        profileChangeOrder.push(`normalize:${name}:${table}`);
+        return ['line-a'];
+      },
+    },
     lsRuntime: {
-      activeNames() { return ['line-a']; },
-      reloadAllActive(callback) { reloaded = true; callback(null, { names: ['line-a'], reloaded: true }); },
+      databaseChangeBlockers() { return []; },
+      syncConfig() { profileChangeOrder.push('sync'); },
     },
   }).run('server');
   assert.equal(profileChange.failures.length, 0);
   assert.equal(profileChange.replies[0].status, 200);
-  assert.equal(reloaded, true);
+  assert.deepEqual(profileChangeOrder, [
+    'lock:ls-shared-database-profile',
+    'store', 'normalize:local-db:TAG', 'sync', 'unlock',
+  ]);
+
+  const profileSaveConflict = harness({
+    query: { name: 'local-db' },
+    body: { name: 'local-db', host: 'localhost', port: 5656, user: 'sys', password: 'secret' },
+  });
+  let profileConflictTouchedRuntime = false;
+  createDbApi({
+    http: profileSaveConflict.http,
+    method: () => 'PUT',
+    store: { update() { throw new Error('conflicting save must not reach the store'); } },
+    viewer: {},
+    databaseProfileLock: {
+      acquire() { throw Object.assign(new Error('busy'), { code: 'JOB_CONFLICT' }); },
+    },
+    lsRuntime: {
+      databaseChangeBlockers() { profileConflictTouchedRuntime = true; return []; },
+      syncConfig() {},
+    },
+  }).run('server');
+  assert.equal(profileSaveConflict.replies.length, 0);
+  assert.equal(profileSaveConflict.failures.length, 1);
+  assert.equal(profileSaveConflict.failures[0].failure.code, 'JOB_CONFLICT');
+  assert.match(profileSaveConflict.failures[0].failure.message, /모든 Job을 중지한 후 다시 저장/);
+  assert.equal(profileConflictTouchedRuntime, false);
+
+  const profileCreateTable = harness({
+    query: { name: 'local-db' },
+    body: {
+      name: 'local-db', host: '10.0.0.5', port: 5656, user: 'sys', password: 'secret',
+      defaultTable: 'new_tag', valueColumn: '', stringValueColumn: 'LEGACY_STR',
+    },
+  });
+  const profileCreateOrder = [];
+  let createdTableArgs = null;
+  let storedProfilePayload = null;
+  createDbApi({
+    http: profileCreateTable.http,
+    method: () => 'PUT',
+    store: {
+      update(_name, payload, callback) {
+        profileCreateOrder.push('store');
+        storedProfilePayload = payload;
+        callback(null, {
+          name: 'local-db', defaultTable: payload.defaultTable,
+          valueColumn: payload.valueColumn, stringValueColumn: payload.stringValueColumn,
+        });
+      },
+    },
+    viewer: {},
+    indexRepository: { list() { return [{ name: 'line-a', index: {} }]; } },
+    metadataReader: {
+      columns(connection, table, callback) {
+        profileCreateOrder.push('columns');
+        assert.deepEqual(connection, { host: '10.0.0.5', port: 5656, user: 'sys', password: 'secret' });
+        callback(null, { table, tableType: 'NOT_FOUND', columns: [] });
+      },
+      createTagTable(connection, table, options, callback) {
+        profileCreateOrder.push('create');
+        createdTableArgs = { connection, table, options };
+        callback(null, { table, valueColumn: 'VALUE', stringValueColumn: '' });
+      },
+    },
+    testModeNormalizer: { disableForDatabase() { profileCreateOrder.push('normalize'); } },
+    lsRuntime: {
+      databaseChangeBlockers() { return []; },
+      syncConfig() { profileCreateOrder.push('sync'); },
+    },
+  }).run('server');
+  assert.equal(profileCreateTable.failures.length, 0);
+  assert.deepEqual(profileCreateOrder, ['columns', 'create', 'store', 'normalize', 'sync']);
+  assert.equal(createdTableArgs.table, 'NEW_TAG');
+  assert.deepEqual(createdTableArgs.options, { includeStringValueColumn: false });
+  assert.equal(storedProfilePayload.defaultTable, 'NEW_TAG');
+  assert.equal(storedProfilePayload.valueColumn, 'VALUE');
+  assert.equal(storedProfilePayload.stringValueColumn, '');
+
+  const profileNoJobs = harness({
+    query: { name: 'local-db' },
+    body: {
+      name: 'local-db', host: 'localhost', port: 5656, user: 'sys', password: 'secret',
+      defaultTable: 'later_tag', valueColumn: '', stringValueColumn: '',
+    },
+  });
+  let noJobsStored = null;
+  createDbApi({
+    http: profileNoJobs.http,
+    method: () => 'PUT',
+    store: { update(_name, payload, callback) { noJobsStored = payload; callback(null, payload); } },
+    viewer: {},
+    indexRepository: { list() { return []; } },
+    metadataReader: {
+      columns() { throw new Error('No Job means table creation must be deferred.'); },
+      createTagTable() { throw new Error('No Job means table creation must be deferred.'); },
+    },
+    lsRuntime: { databaseChangeBlockers() { return []; }, syncConfig() {} },
+  }).run('server');
+  assert.equal(profileNoJobs.failures.length, 0);
+  assert.equal(noJobsStored.defaultTable, 'LATER_TAG');
+  assert.equal(noJobsStored.valueColumn, 'VALUE');
+  assert.equal(noJobsStored.stringValueColumn, '');
+
+  const profileInvalidTable = harness({
+    query: { name: 'local-db' },
+    body: {
+      name: 'local-db', host: 'localhost', port: 5656, user: 'sys', password: 'secret',
+      defaultTable: 'wrong_tag', valueColumn: 'VALUE', stringValueColumn: '',
+    },
+  });
+  let invalidTableStored = false;
+  createDbApi({
+    http: profileInvalidTable.http,
+    method: () => 'PUT',
+    store: { update() { invalidTableStored = true; } },
+    viewer: {},
+    indexRepository: { list() { return [{ name: 'line-a', index: {} }]; } },
+    metadataReader: {
+      columns(_connection, table, callback) {
+        callback(null, {
+          table, tableType: 'TAG',
+          columns: [
+            { name: 'NAME', type: 'varchar(100)', primaryKey: true },
+            { name: 'TIME', type: 'datetime', basetime: true },
+            { name: 'TEXT_VALUE', type: 'varchar(100)' },
+          ],
+        });
+      },
+    },
+    lsRuntime: { databaseChangeBlockers() { return []; }, syncConfig() {} },
+  }).run('server');
+  assert.equal(profileInvalidTable.replies.length, 0);
+  assert.equal(profileInvalidTable.failures.length, 1);
+  assert.match(profileInvalidTable.failures[0].failure.message, /숫자 column/);
+  assert.equal(invalidTableStored, false, 'invalid table must not replace the working profile');
+
+  const profileLateStart = harness({
+    query: { name: 'local-db' },
+    body: {
+      name: 'local-db', host: 'localhost', port: 5656, user: 'sys', password: 'secret',
+      defaultTable: 'new_tag', valueColumn: 'VALUE', stringValueColumn: '',
+    },
+  });
+  let lateStartChecks = 0;
+  let lateStartStored = false;
+  createDbApi({
+    http: profileLateStart.http,
+    method: () => 'PUT',
+    store: { update() { lateStartStored = true; } },
+    viewer: {},
+    indexRepository: { list() { return [{ name: 'line-a', index: {} }]; } },
+    metadataReader: {
+      columns(_connection, table, callback) {
+        callback(null, {
+          table, tableType: 'TAG',
+          columns: [
+            { name: 'NAME', type: 'varchar(100)', primaryKey: true },
+            { name: 'TIME', type: 'datetime', basetime: true },
+            { name: 'VALUE', type: 'double' },
+          ],
+        });
+      },
+    },
+    lsRuntime: {
+      databaseChangeBlockers() {
+        lateStartChecks += 1;
+        return lateStartChecks === 1 ? [] : ['line-a'];
+      },
+      syncConfig() {},
+    },
+  }).run('server');
+  assert.equal(profileLateStart.failures.length, 1);
+  assert.equal(profileLateStart.failures[0].failure.code, 'LS_DATABASE_JOBS_NOT_STOPPED');
+  assert.deepEqual(profileLateStart.failures[0].failure.details.jobs, ['line-a']);
+  assert.equal(lateStartStored, false, 'a Job started during provisioning must keep the previous profile');
 
   const wrongMethod = harness();
   createDbApi({ http: wrongMethod.http, method: () => 'POST', store: {}, viewer: {} }).run('table-data');
