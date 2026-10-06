@@ -366,6 +366,21 @@ func TestPerformanceLogsStayBoundedAndSummarized(t *testing.T) {
 	d.recordPerformanceSkip("line-a", true)
 	d.recordPerformanceSkip("line-a", true)
 	for index := 0; index < 1000; index++ {
+		scheduledAt := time.Unix(100, 0).Add(time.Duration(index) * 20 * time.Millisecond)
+		wakeAt := scheduledAt.Add(200 * time.Microsecond)
+		startedAt := wakeAt.Add(50 * time.Microsecond)
+		if index == 997 {
+			wakeAt = scheduledAt.Add(2 * time.Millisecond)
+			startedAt = wakeAt.Add(500 * time.Microsecond)
+		} else if index == 998 {
+			wakeAt = scheduledAt.Add(4 * time.Millisecond)
+			startedAt = wakeAt.Add(time.Millisecond)
+		} else if index == 999 {
+			wakeAt = scheduledAt.Add(6 * time.Millisecond)
+			startedAt = wakeAt.Add(2 * time.Millisecond)
+		}
+		d.recordScheduleWake("line-a", scheduledAt, wakeAt)
+		d.recordScheduleStart("line-a", scheduledAt, wakeAt, startedAt)
 		d.recordJobPerformance("line-a", readTiming{
 			DBus: time.Duration(index+1) * time.Microsecond, Parse: 10 * time.Microsecond,
 			ReaderTotal:  time.Duration(index+21) * time.Microsecond,
@@ -394,7 +409,7 @@ func TestPerformanceLogsStayBoundedAndSummarized(t *testing.T) {
 	if strings.Count(text, "job summary;") != 1 || strings.Count(text, "writer summary;") != 1 {
 		t.Fatalf("performance must be summarized, got %q", text)
 	}
-	for _, field := range []string{"dbusUs[avg=500 p99=990 max=1000]", "parseUs[avg=10 max=10]", "readerTotalUs[p99=1010 max=1020]", "skipCount=5", "overIntervalCount=2", "queueFullSkipCount=3", "errorCount=", "maxQueueDepth=7", "queueCapacity=512", "busyRatio=", "appendBatches=1", "appendRows=4096", "appendRowsPerSec=2048000", "appendUs[avg=2000 p99=2000 max=2000]", "flushIntervalMs=1000", "flushCount=1", "flushErrorCount=0", "flushMaxUs=3000000", "queueToDurableUs[p99="} {
+	for _, field := range []string{"dbusUs[avg=500 p99=990 max=1000]", "parseUs[avg=10 max=10]", "readerTotalUs[p99=1010 max=1020]", "scheduleSamples[wake=1000 start=1000]", "scheduleLagUs[timerWakeP50=200 timerWakeP99=200 timerWakeMax=6000 dispatchP99=50 dispatchMax=2000 readerStartP99=250 readerStartMax=8000]", "lateCount[1ms=3 3ms=2 5ms=2]", "clockAnomalyCount=0", "skipCount=5", "overIntervalCount=2", "queueFullSkipCount=3", "errorCount=", "maxQueueDepth=7", "queueCapacity=512", "busyRatio=", "appendBatches=1", "appendRows=4096", "appendRowsPerSec=2048000", "appendUs[avg=2000 p99=2000 max=2000]", "flushIntervalMs=1000", "flushCount=1", "flushErrorCount=0", "flushMaxUs=3000000", "queueToDurableUs[p99="} {
 		if !strings.Contains(text, field) {
 			t.Fatalf("missing %s in %q", field, text)
 		}
@@ -430,6 +445,294 @@ func TestPerformanceExcludesUnmeasuredLatencyFromDistribution(t *testing.T) {
 	}
 	if stats.QueueFullSkipCount != 0 {
 		t.Fatalf("queue full skip count = %d", stats.QueueFullSkipCount)
+	}
+}
+
+func TestJobPerformanceSummaryIsQueuedOutsideReaderPath(t *testing.T) {
+	d := &daemon{
+		performancePolicy: performancePolicy{Enabled: true, JobSampleCount: 1, WriterSummaryIntervalMS: 30000},
+		jobPerformance:    map[string]*jobPerformance{"line-a": newJobPerformance(1, "test")},
+		performanceLogs:   make(chan performanceLogRecord, 1),
+	}
+	d.recordJobPerformance("line-a", readTiming{ReaderTotal: time.Millisecond, ReaderTotalMeasured: true}, nil)
+	select {
+	case record := <-d.performanceLogs:
+		if record.Name != "line-a" || record.Message != "" || record.Summary == nil || record.Summary.Attempts != 1 || record.Summary.ReaderTotalUS[0] != 1000 {
+			t.Fatalf("unexpected queued performance record: %#v", record)
+		}
+		if !strings.Contains(formatJobPerformance(record.Name, record.Summary), "job=line-a job summary;") {
+			t.Fatal("logger cannot format the detached snapshot")
+		}
+	default:
+		t.Fatal("performance summary was not queued")
+	}
+}
+
+func TestQueuedJobPerformanceOwnsDetachedSampleArrays(t *testing.T) {
+	d := &daemon{
+		performancePolicy: performancePolicy{Enabled: true, JobSampleCount: 2},
+		jobPerformance:    map[string]*jobPerformance{"line-a": newJobPerformance(2, "test")},
+		performanceLogs:   make(chan performanceLogRecord, 2),
+	}
+	for window := 0; window < 2; window++ {
+		for sample := 0; sample < 2; sample++ {
+			expected := time.Unix(100, 0)
+			lag := time.Duration(window*10+sample+1) * time.Microsecond
+			d.recordScheduleWake("line-a", expected, expected.Add(lag))
+			d.recordScheduleStart("line-a", expected, expected.Add(lag), expected.Add(lag+time.Microsecond))
+			d.recordJobPerformance("line-a", readTiming{DBus: lag, DBusMeasured: true, ReaderTotal: lag + time.Microsecond, ReaderTotalMeasured: true}, nil)
+		}
+	}
+	first, second := <-d.performanceLogs, <-d.performanceLogs
+	if first.Summary == second.Summary || first.Summary == d.jobPerformance["line-a"] {
+		t.Fatal("completed and active windows share a snapshot")
+	}
+	for _, samples := range [][]int64{first.Summary.DBusUS, first.Summary.TimerWakeLagUS} {
+		if len(samples) != 2 || samples[0] != 1 || samples[1] != 2 {
+			t.Fatalf("first window changed while accumulating second: %v", samples)
+		}
+	}
+	if first.Message != "" || second.Message != "" {
+		t.Fatal("summary was formatted on the producer path")
+	}
+	if text := formatJobPerformance(first.Name, first.Summary); !strings.Contains(text, "dbusUs[avg=1 p99=2 max=2]") {
+		t.Fatalf("incorrect first summary: %s", text)
+	}
+	if text := formatJobPerformance(second.Name, second.Summary); !strings.Contains(text, "dbusUs[avg=11 p99=12 max=12]") {
+		t.Fatalf("incorrect second summary: %s", text)
+	}
+}
+
+func TestPerformanceLoggerFormatsAndDrainsSnapshotsForMultipleJobs(t *testing.T) {
+	root := t.TempDir()
+	d := &daemon{
+		root:              filepath.Join(root, "cgi-bin"),
+		performancePolicy: performancePolicy{Enabled: true, JobSampleCount: 1},
+		jobPerformance:    map[string]*jobPerformance{},
+		performanceLogs:   make(chan performanceLogRecord, 1),
+	}
+	finished := make(chan struct{})
+	go func() { d.performanceLogger(); close(finished) }()
+	defer func() { close(d.performanceLogs); <-finished }()
+	for _, name := range []string{"line-a", "line-b"} {
+		for value := 1; value <= 3; value++ {
+			d.recordJobPerformance(name, readTiming{ReaderTotal: time.Duration(value) * time.Microsecond, ReaderTotalMeasured: true}, nil)
+		}
+	}
+	d.flushPerformanceLogs()
+	for _, name := range []string{"line-a", "line-b"} {
+		data, err := os.ReadFile(filepath.Join(root, "logs", name+".log"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := string(data)
+		if strings.Count(text, "job="+name+" job summary;") != 3 {
+			t.Fatalf("barrier did not drain all %s summaries: %s", name, text)
+		}
+		previous := -1
+		for value := 1; value <= 3; value++ {
+			position := strings.Index(text, fmt.Sprintf("readerTotalUs[p99=%d max=%d]", value, value))
+			if position <= previous {
+				t.Fatalf("summary order lost: %s", text)
+			}
+			previous = position
+		}
+	}
+}
+
+func TestFullPerformanceQueuePreservesSnapshotUntilLoggerResumes(t *testing.T) {
+	d := &daemon{
+		root:              filepath.Join(t.TempDir(), "cgi-bin"),
+		performancePolicy: performancePolicy{Enabled: true, JobSampleCount: 1},
+		jobPerformance:    map[string]*jobPerformance{},
+		performanceLogs:   make(chan performanceLogRecord, 1),
+	}
+	d.recordJobPerformance("line-a", readTiming{ReaderTotal: time.Microsecond, ReaderTotalMeasured: true}, nil)
+	queued := make(chan struct{})
+	go func() {
+		d.recordJobPerformance("line-b", readTiming{ReaderTotal: 2 * time.Microsecond, ReaderTotalMeasured: true}, nil)
+		close(queued)
+	}()
+	loggerDone := make(chan struct{})
+	// Start the consumer even if an assertion fails, so a bounded queue cannot
+	// strand the producer goroutine in the test runner.
+	defer func() {
+		go func() { d.performanceLogger(); close(loggerDone) }()
+		<-queued
+		d.flushPerformanceLogs()
+		close(d.performanceLogs)
+		<-loggerDone
+		for _, name := range []string{"line-a", "line-b"} {
+			data, err := os.ReadFile(filepath.Join(filepath.Dir(d.root), "logs", name+".log"))
+			if err != nil || strings.Count(string(data), "job summary;") != 1 {
+				t.Errorf("backpressure lost %s summary: %s, %v", name, data, err)
+			}
+		}
+	}()
+	select {
+	case <-queued:
+		t.Fatal("full lossless queue unexpectedly accepted another record")
+	case <-time.After(20 * time.Millisecond):
+	}
+}
+
+func TestReaderPerformanceLoggingWithFourJobsAndMultipleCalls(t *testing.T) {
+	d := &daemon{
+		root:  filepath.Join(t.TempDir(), "cgi-bin"),
+		queue: make(chan *batch, 64), tagRegistry: newTagRegistry(),
+		performancePolicy: performancePolicy{Enabled: true, JobSampleCount: 2},
+		jobPerformance:    map[string]*jobPerformance{}, performanceLogs: make(chan performanceLogRecord, 64),
+		runtime: runtimeState{Jobs: map[string]jobRuntime{}}, runtimeDirty: make(chan struct{}, 1),
+		logConfigs: map[string]logConfig{}, logSummaries: map[string]logSummary{},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	var readers sync.WaitGroup
+	activeJobs := map[string]*activeJob{}
+	for job := 0; job < 4; job++ {
+		name := fmt.Sprintf("line-%d", job)
+		config := jobConfig{Schedule: schedule{IntervalMS: 20}, Execution: execution{Test: true}}
+		for call := 0; call < 4; call++ {
+			inputs, _ := json.Marshal(map[string]any{"DeviceString": fmt.Sprintf("%%MB%d", call*8), "DataCount": 8})
+			tags := make([]tag, 8)
+			for index := range tags {
+				tags[index] = tag{Name: fmt.Sprintf("%s-%d-%d", name, call, index), Multiplier: 1}
+			}
+			config.MethodCalls = append(config.MethodCalls, method{Inputs: inputs, OutputSelections: []selection{{Tags: tags}}})
+		}
+		if err := d.tagRegistry.bindJob(&config); err != nil {
+			t.Fatal(err)
+		}
+		plan, err := buildReadPlan(config)
+		if err != nil {
+			t.Fatal(err)
+		}
+		active := &activeJob{config: config, registry: d.tagRegistry, plan: plan, buffers: newRowBufferPool(plan)}
+		activeJobs[name] = active
+		d.runtime.Jobs[name] = newJobRuntime(name, "running", "")
+		d.logConfigs[name] = logConfig{Level: "error"}
+		d.logSummaries[name] = logSummary{StartedAt: time.Now()}
+		d.jobPerformance[name] = newJobPerformance(2, "test")
+	}
+	loggerDone, writerDone := make(chan struct{}), make(chan struct{})
+	ready := make(chan string, 4)
+	cycles := map[string]int{}
+	go func() { d.performanceLogger(); close(loggerDone) }()
+	// No DB is touched: this consumer checks real reader/buffer/queue ownership
+	// and completes the same per-Job drain references a native writer uses.
+	go func() {
+		defer close(writerDone)
+		for queued := range d.queue {
+			if queued.RowCount != 32 {
+				t.Errorf("unexpected row count: %d", queued.RowCount)
+			}
+			queued.queueReservation.release()
+			queued.releaseRows()
+			cycles[queued.Job]++
+			if cycles[queued.Job] == 6 {
+				ready <- queued.Job
+			}
+			if queued.Finished != nil {
+				queued.Finished <- nil
+			} else {
+				queued.Owner.work.Done()
+			}
+		}
+	}()
+	defer func() {
+		cancel()
+		readers.Wait()
+		close(d.queue)
+		<-writerDone
+		d.flushPerformanceLogs()
+		close(d.performanceLogs)
+		<-loggerDone
+		for name, active := range activeJobs {
+			if outstanding := active.buffers.dispose(); outstanding != 0 {
+				t.Errorf("%s leaked %d buffers", name, outstanding)
+			}
+			data, err := os.ReadFile(filepath.Join(filepath.Dir(d.root), "logs", name+".log"))
+			if err != nil {
+				t.Error(err)
+				continue
+			}
+			summaries := strings.Count(string(data), "job="+name+" job summary;")
+			// Cancellation can arrive just after the queue accepted the final
+			// cycle, before readOnce records its performance. That one cycle is
+			// intentionally excluded by the existing cancellation semantics.
+			measured := summaries*2 + d.jobPerformance[name].Attempts
+			if summaries < 2 || measured < cycles[name]-1 || measured > cycles[name] {
+				t.Errorf("%s summaries=%d measured=%d for %d completed reads", name, summaries, measured, cycles[name])
+			}
+			if !strings.Contains(string(data), "source=test samples=2") {
+				t.Errorf("%s missing TEST statistics", name)
+			}
+		}
+	}()
+	for name, active := range activeJobs {
+		readers.Add(1)
+		go func(name string, active *activeJob) { defer readers.Done(); d.reader(ctx, active.config, name, active) }(name, active)
+	}
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	for job := 0; job < 4; job++ {
+		select {
+		case <-ready:
+		case <-deadline.C:
+			t.Fatal("readers did not complete six cycles each")
+		}
+	}
+}
+
+// This benchmark isolates the work removed from a completed sample window's
+// reader path. It is NOT a reduction in total CPU: the logger still formats the
+// same record. It excludes accumulation/new-window allocation common to both.
+func BenchmarkJobSummaryProducer(b *testing.B) {
+	snapshot := newJobPerformance(1000, "dbus")
+	snapshot.Attempts = 1000
+	for index := 0; index < 1000; index++ {
+		value := int64((index * 613) % 1000)
+		snapshot.DBusUS = append(snapshot.DBusUS, value)
+		snapshot.ReaderTotalUS = append(snapshot.ReaderTotalUS, value+100)
+		snapshot.TimerWakeLagUS = append(snapshot.TimerWakeLagUS, value)
+		snapshot.DispatchLagUS = append(snapshot.DispatchLagUS, value/10)
+		snapshot.ReaderStartLagUS = append(snapshot.ReaderStartLagUS, value+10)
+	}
+	for _, before := range []bool{true, false} {
+		name := "snapshot-handoff"
+		if before {
+			name = "format-and-handoff"
+		}
+		b.Run(name, func(b *testing.B) {
+			queue := make(chan performanceLogRecord, 1)
+			b.ReportAllocs()
+			for index := 0; index < b.N; index++ {
+				record := performanceLogRecord{Name: "line-a", Summary: snapshot}
+				if before {
+					record.Message = formatJobPerformance(record.Name, snapshot)
+					record.Summary = nil
+				}
+				queue <- record
+				<-queue
+			}
+		})
+	}
+}
+
+func TestScheduleWakeSamplesStayBoundedDuringHungRead(t *testing.T) {
+	d := &daemon{
+		performancePolicy: performancePolicy{Enabled: true, JobSampleCount: 1000, WriterSummaryIntervalMS: 30000},
+		jobPerformance:    map[string]*jobPerformance{"line-a": newJobPerformance(1000, "dbus")},
+	}
+	scheduledAt := time.Unix(100, 0)
+	for index := 0; index < maxDurableSamples+100; index++ {
+		d.recordScheduleWake("line-a", scheduledAt, scheduledAt.Add(time.Duration(index)*time.Microsecond))
+	}
+	stats := d.jobPerformance["line-a"]
+	if got := len(stats.TimerWakeLagUS); got != maxDurableSamples {
+		t.Fatalf("timer wake samples=%d", got)
+	}
+	if got := stats.ScheduleWakeCount; got != maxDurableSamples+100 {
+		t.Fatalf("timer wake count=%d", got)
 	}
 }
 
