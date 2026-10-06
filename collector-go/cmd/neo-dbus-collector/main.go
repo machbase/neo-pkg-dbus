@@ -296,6 +296,16 @@ type jobPerformance struct {
 	GenerateMaxUS      int64
 	GenerateSamples    int
 	ReaderTotalUS      []int64
+	TimerWakeLagUS     []int64
+	TimerWakeNext      int
+	DispatchLagUS      []int64
+	ReaderStartLagUS   []int64
+	ScheduleWakeCount  uint64
+	ScheduleStartCount uint64
+	Late1MSCount       uint64
+	Late3MSCount       uint64
+	Late5MSCount       uint64
+	ClockAnomalyCount  uint64
 	OverIntervalCount  uint64
 	QueueFullSkipCount uint64
 	ErrorCount         uint64
@@ -316,6 +326,15 @@ type writerPerformance struct {
 	FlushErrors   uint64
 	DurableUS     []int64
 	DurableNext   int
+}
+
+type performanceLogRecord struct {
+	Name    string
+	Message string
+	// Summary owns the detached sample arrays. Only the logger may format them;
+	// readers accumulate the next window in a fresh jobPerformance instance.
+	Summary *jobPerformance
+	Barrier chan struct{}
 }
 
 type jobRuntime struct {
@@ -391,6 +410,7 @@ type daemon struct {
 	performanceMu          sync.Mutex
 	jobPerformance         map[string]*jobPerformance
 	writerPerformance      writerPerformance
+	performanceLogs        chan performanceLogRecord
 	controlMu              sync.Mutex
 	controls               map[string]*sync.Mutex
 	tagLockMu              sync.Mutex
@@ -635,7 +655,7 @@ func runDaemon(root string, parentPID int) (retErr error) {
 	if err != nil {
 		return err
 	}
-	d := &daemon{root: root, queue: make(chan *batch, writerPolicy.QueueCapacity), flushNow: make(chan struct{}, 1), appenderPrepare: make(chan appenderPrepareRequest), tagRegistry: newTagRegistry(), writerPolicy: writerPolicy, performancePolicy: performancePolicy, performanceCorrections: corrections, jobs: map[string]*activeJob{}, runtime: runtimeState{Jobs: map[string]jobRuntime{}}, logConfigs: map[string]logConfig{}, logPolicy: (logPolicy{}).normalized(), logSummaries: map[string]logSummary{}, jobPerformance: map[string]*jobPerformance{}, writerPerformance: newWriterPerformance(time.Now()), controls: map[string]*sync.Mutex{}, runtimeDirty: make(chan struct{}, 1), runtimeForce: make(chan chan error), runtimeStop: make(chan struct{})}
+	d := &daemon{root: root, queue: make(chan *batch, writerPolicy.QueueCapacity), flushNow: make(chan struct{}, 1), appenderPrepare: make(chan appenderPrepareRequest), tagRegistry: newTagRegistry(), writerPolicy: writerPolicy, performancePolicy: performancePolicy, performanceCorrections: corrections, jobs: map[string]*activeJob{}, runtime: runtimeState{Jobs: map[string]jobRuntime{}}, logConfigs: map[string]logConfig{}, logPolicy: (logPolicy{}).normalized(), logSummaries: map[string]logSummary{}, jobPerformance: map[string]*jobPerformance{}, writerPerformance: newWriterPerformance(time.Now()), performanceLogs: make(chan performanceLogRecord, 64), controls: map[string]*sync.Mutex{}, runtimeDirty: make(chan struct{}, 1), runtimeForce: make(chan chan error), runtimeStop: make(chan struct{})}
 	if err := d.writeRuntime(); err != nil {
 		return err
 	}
@@ -643,6 +663,8 @@ func runDaemon(root string, parentPID int) (retErr error) {
 	go func() { defer d.wg.Done(); d.runtimeCheckpointWriter() }()
 	d.wg.Add(1)
 	go func() { defer d.wg.Done(); d.writer() }()
+	d.wg.Add(1)
+	go func() { defer d.wg.Done(); d.performanceLogger() }()
 	listener, err := listen(root)
 	if err != nil {
 		d.shutdown()
@@ -1138,6 +1160,7 @@ func (d *daemon) stop(name string) error {
 	d.mu.Unlock()
 	d.requestFlush()
 	<-a.done
+	d.flushPerformanceLogs()
 	d.mu.Lock()
 	delete(d.jobs, name)
 	d.updateLocked(name, func(v *jobRuntime) {
@@ -1176,6 +1199,7 @@ func (d *daemon) shutdown() {
 	for _, active := range jobs {
 		<-active.done
 	}
+	d.flushPerformanceLogs()
 	for _, name := range names {
 		d.flushLogSummary(name, true)
 		d.log(name, "INFO", "collector", "collector stopped")
@@ -1186,6 +1210,9 @@ func (d *daemon) shutdown() {
 	close(d.queue)
 	_ = d.forceRuntimeCheckpoint()
 	close(d.runtimeStop)
+	if d.performanceLogs != nil {
+		close(d.performanceLogs)
+	}
 	d.wg.Wait()
 }
 
@@ -1202,7 +1229,10 @@ func (d *daemon) reader(ctx context.Context, config jobConfig, name string, acti
 		}
 	}()
 	interval := time.Duration(config.Schedule.IntervalMS) * time.Millisecond
-	timer := time.NewTimer(nextAligned(time.Now(), interval))
+	timerNow := time.Now()
+	timerDelay := nextAligned(timerNow, interval)
+	scheduledAt := timerNow.Add(timerDelay)
+	timer := time.NewTimer(timerDelay)
 	defer timer.Stop()
 	// Opening the native Appender is not the end of its startup cost. The first
 	// real batch can create thousands of TAG metadata records and perform the
@@ -1221,7 +1251,10 @@ func (d *daemon) reader(ctx context.Context, config jobConfig, name string, acti
 			active.work.Wait()
 			return
 		case <-timer.C:
+			wakeAt := time.Now()
+			d.recordScheduleWake(name, scheduledAt, wakeAt)
 			if !primed {
+				d.recordScheduleStart(name, scheduledAt, wakeAt, wakeAt)
 				if !config.Execution.Test && connection == nil {
 					var connectError error
 					connection, connectError = d.connectDBus(name)
@@ -1229,7 +1262,10 @@ func (d *daemon) reader(ctx context.Context, config jobConfig, name string, acti
 						if ctx.Err() == nil {
 							d.recordJobPerformance(name, readTiming{}, connectError)
 						}
-						timer.Reset(nextAligned(time.Now(), interval))
+						timerNow = time.Now()
+						timerDelay = nextAligned(timerNow, interval)
+						scheduledAt = timerNow.Add(timerDelay)
+						timer.Reset(timerDelay)
 						continue
 					}
 				}
@@ -1238,9 +1274,10 @@ func (d *daemon) reader(ctx context.Context, config jobConfig, name string, acti
 				d.recordOverrun(name, false)
 			} else {
 				active.work.Add(1)
-				go func() {
+				go func(expectedAt, timerWokeAt time.Time) {
 					defer active.work.Done()
 					defer busy.Store(false)
+					d.recordScheduleStart(name, expectedAt, timerWokeAt, time.Now())
 					if !config.Execution.Test && connection == nil {
 						var connectError error
 						connection, connectError = d.connectDBus(name)
@@ -1252,9 +1289,12 @@ func (d *daemon) reader(ctx context.Context, config jobConfig, name string, acti
 						}
 					}
 					d.readOnce(ctx, config, name, connection, active, false)
-				}()
+				}(scheduledAt, wakeAt)
 			}
-			timer.Reset(nextAligned(time.Now(), interval))
+			timerNow = time.Now()
+			timerDelay = nextAligned(timerNow, interval)
+			scheduledAt = timerNow.Add(timerDelay)
+			timer.Reset(timerDelay)
 		}
 	}
 }
@@ -1431,10 +1471,115 @@ func sourceForConfig(config jobConfig) string {
 
 func newJobPerformance(sampleCount int, source string) *jobPerformance {
 	return &jobPerformance{
-		Source:        source,
-		DBusUS:        make([]int64, 0, sampleCount),
-		ReaderTotalUS: make([]int64, 0, sampleCount),
+		Source:           source,
+		DBusUS:           make([]int64, 0, sampleCount),
+		ReaderTotalUS:    make([]int64, 0, sampleCount),
+		TimerWakeLagUS:   make([]int64, 0, sampleCount),
+		DispatchLagUS:    make([]int64, 0, sampleCount),
+		ReaderStartLagUS: make([]int64, 0, sampleCount),
 	}
+}
+
+func nonNegativeMicroseconds(value time.Duration) int64 {
+	if value <= 0 {
+		return 0
+	}
+	return value.Microseconds()
+}
+
+func (d *daemon) recordScheduleWake(name string, scheduledAt, wakeAt time.Time) {
+	if !d.performancePolicy.Enabled {
+		return
+	}
+	d.performanceMu.Lock()
+	stats := d.jobPerformance[name]
+	if stats == nil {
+		stats = newJobPerformance(d.performancePolicy.JobSampleCount, "dbus")
+		d.jobPerformance[name] = stats
+	}
+	lag := wakeAt.Sub(scheduledAt)
+	if lag < 0 {
+		stats.ClockAnomalyCount++
+	}
+	wakeUS := nonNegativeMicroseconds(lag)
+	if len(stats.TimerWakeLagUS) < maxDurableSamples {
+		stats.TimerWakeLagUS = append(stats.TimerWakeLagUS, wakeUS)
+	} else {
+		stats.TimerWakeLagUS[stats.TimerWakeNext] = wakeUS
+		stats.TimerWakeNext = (stats.TimerWakeNext + 1) % maxDurableSamples
+	}
+	stats.ScheduleWakeCount++
+	d.performanceMu.Unlock()
+}
+
+func (d *daemon) recordScheduleStart(name string, scheduledAt, wakeAt, startedAt time.Time) {
+	if !d.performancePolicy.Enabled {
+		return
+	}
+	d.performanceMu.Lock()
+	stats := d.jobPerformance[name]
+	if stats == nil {
+		stats = newJobPerformance(d.performancePolicy.JobSampleCount, "dbus")
+		d.jobPerformance[name] = stats
+	}
+	dispatchLag := startedAt.Sub(wakeAt)
+	startLag := startedAt.Sub(scheduledAt)
+	stats.DispatchLagUS = append(stats.DispatchLagUS, nonNegativeMicroseconds(dispatchLag))
+	stats.ReaderStartLagUS = append(stats.ReaderStartLagUS, nonNegativeMicroseconds(startLag))
+	stats.ScheduleStartCount++
+	if startLag >= time.Millisecond {
+		stats.Late1MSCount++
+	}
+	if startLag >= 3*time.Millisecond {
+		stats.Late3MSCount++
+	}
+	if startLag >= 5*time.Millisecond {
+		stats.Late5MSCount++
+	}
+	d.performanceMu.Unlock()
+}
+
+// Performance summaries are calculated, formatted and written by this worker.
+// Readers only accumulate samples and hand off a detached window: neither
+// percentile sorting nor filesystem I/O belongs to the reader's busy section.
+// The bounded, lossless queue can still apply backpressure if logging stalls;
+// do not interpret this change as eliminating every unmeasured busy-path delay.
+func (d *daemon) performanceLogger() {
+	for record := range d.performanceLogs {
+		if record.Barrier != nil {
+			close(record.Barrier)
+			continue
+		}
+		d.writePerformanceRecord(record)
+	}
+}
+
+func (d *daemon) writePerformanceRecord(record performanceLogRecord) {
+	message := record.Message
+	if record.Summary != nil {
+		message = formatJobPerformance(record.Name, record.Summary)
+	}
+	d.logAlways(record.Name, "INFO", "performance", message)
+}
+
+func (d *daemon) enqueuePerformanceLog(name string, snapshot *jobPerformance) {
+	record := performanceLogRecord{Name: name, Summary: snapshot}
+	if d.performanceLogs == nil {
+		// Unit tests and small embedded daemon fixtures do not start background
+		// workers. Keep their observable behavior synchronous.
+		d.writePerformanceRecord(record)
+		return
+	}
+	d.performanceLogs <- record
+}
+
+func (d *daemon) flushPerformanceLogs() {
+	if d.performanceLogs == nil {
+		return
+	}
+	done := make(chan struct{})
+	d.performanceLogs <- performanceLogRecord{Barrier: done}
+	<-done
 }
 
 func (d *daemon) recordJobPerformance(name string, timing readTiming, readErr error) {
@@ -1477,20 +1622,32 @@ func (d *daemon) recordJobPerformance(name string, timing readTiming, readErr er
 		d.performanceMu.Unlock()
 		return
 	}
-	snapshot := *stats
+	// Transfer ownership instead of copying/sorting the samples here. All sample
+	// mutations take performanceMu and use the map's replacement window, so the
+	// detached snapshot remains immutable until the logger consumes it.
+	snapshot := stats
 	d.jobPerformance[name] = newJobPerformance(d.performancePolicy.JobSampleCount, snapshot.Source)
 	d.performanceMu.Unlock()
+	d.enqueuePerformanceLog(name, snapshot)
+}
 
+func formatJobPerformance(name string, snapshot *jobPerformance) string {
 	_, _, average, p99, maximum := durationSummaryUS(snapshot.DBusUS)
 	parseAverage := int64(0)
 	if snapshot.ParseSamples > 0 {
 		parseAverage = snapshot.ParseTotalUS / int64(snapshot.ParseSamples)
 	}
 	_, _, _, readerTotalP99, readerTotalMax := durationSummaryUS(snapshot.ReaderTotalUS)
-	d.logAlways(name, "INFO", "performance", fmt.Sprintf(
-		"job=%s job summary; source=%s samples=%d dbusUs[avg=%d p99=%d max=%d] parseUs[avg=%d max=%d] readerTotalUs[p99=%d max=%d] skipCount=%d overIntervalCount=%d queueFullSkipCount=%d errorCount=%d",
-		name, snapshot.Source, snapshot.Attempts, average, p99, maximum, parseAverage, snapshot.ParseMaxUS, readerTotalP99, readerTotalMax, snapshot.OverIntervalCount+snapshot.QueueFullSkipCount, snapshot.OverIntervalCount, snapshot.QueueFullSkipCount, snapshot.ErrorCount,
-	))
+	_, timerWakeP50, _, timerWakeP99, timerWakeMax := durationSummaryUS(snapshot.TimerWakeLagUS)
+	_, _, _, dispatchP99, dispatchMax := durationSummaryUS(snapshot.DispatchLagUS)
+	_, _, _, readerStartP99, readerStartMax := durationSummaryUS(snapshot.ReaderStartLagUS)
+	return fmt.Sprintf(
+		"job=%s job summary; source=%s samples=%d dbusUs[avg=%d p99=%d max=%d] parseUs[avg=%d max=%d] readerTotalUs[p99=%d max=%d] scheduleSamples[wake=%d start=%d] scheduleLagUs[timerWakeP50=%d timerWakeP99=%d timerWakeMax=%d dispatchP99=%d dispatchMax=%d readerStartP99=%d readerStartMax=%d] lateCount[1ms=%d 3ms=%d 5ms=%d] clockAnomalyCount=%d skipCount=%d overIntervalCount=%d queueFullSkipCount=%d errorCount=%d",
+		name, snapshot.Source, snapshot.Attempts, average, p99, maximum, parseAverage, snapshot.ParseMaxUS, readerTotalP99, readerTotalMax,
+		snapshot.ScheduleWakeCount, snapshot.ScheduleStartCount, timerWakeP50, timerWakeP99, timerWakeMax, dispatchP99, dispatchMax, readerStartP99, readerStartMax,
+		snapshot.Late1MSCount, snapshot.Late3MSCount, snapshot.Late5MSCount, snapshot.ClockAnomalyCount,
+		snapshot.OverIntervalCount+snapshot.QueueFullSkipCount, snapshot.OverIntervalCount, snapshot.QueueFullSkipCount, snapshot.ErrorCount,
+	)
 }
 
 func (d *daemon) recordPerformanceSkip(name string, queueFull bool) {

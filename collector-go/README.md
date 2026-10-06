@@ -32,6 +32,16 @@ the executable with `--control start|stop|reload <job-name>` for logical Job
 control.  The daemon maintains a single native writer and an epoch-aligned,
 fixed-rate reader per running Job.
 
+Job performance summaries transfer ownership of the completed sample window to
+the existing logging worker. Percentile calculation, formatting and file I/O
+run there, not in the reader. The next window uses independent sample arrays.
+The 64-record queue remains bounded and lossless; a full queue can still apply
+backpressure during a prolonged logging stall. Stop/shutdown drain queued
+summaries before returning. Summary fields and skip semantics are unchanged.
+`readerTotalUs` still measures the existing read/parse-to-enqueue interval, not
+all buffer acquisition, bookkeeping, dispatch or OS scheduling time; do not
+attribute a skip to the timer solely from a small `readerTotalUs.max`.
+
 Each Job prepares one fixed row layout and starts with four reusable full-cycle
 buffers. The idle cache can grow to 32 during writer stalls; further buffers are
 temporary. A reader reserves bounded-queue capacity before DBus work, fills all

@@ -51,6 +51,13 @@ latency 표본은 최근 4,096개만 유지한다. 이 설정과 통계는 publi
 노출하지 않으며 기존 rotation 용량 안에서 Job log에 기록한다. 기본값은 1,000회와
 30,000ms를 유지하고, 내부 설정의 허용 최소값은 각각 500회와 10,000ms다.
 
+Job 통계 window가 완성되면 reader는 sample 배열의 소유권을 기존 logger로 넘기고
+새 window를 사용한다. p99 계산용 배열 복사·정렬, 문자열 생성과 파일 기록은 logger가
+수행한다. capacity 64의 lossless queue와 Stop/shutdown barrier는 유지한다. 장시간
+로그 정체로 queue가 가득 차면 전달 대기는 발생할 수 있으며 통계를 임의 폐기하지 않는다.
+`readerTotalUs`의 기존 계측 경계와 skip 의미는 바꾸지 않는다. buffer 확보·통계 누적·
+전달 등 계측 밖 구간은 남으므로 낮은 reader total만으로 timer 지연을 확정하지 않는다.
+
 DBus 호출 timeout은 지원하지 않는다. 호출, decode, validation, DB append 오류는 cycle 실패다. CGI는 응답 후 background 작업을 남기지 않고, collector service만 장기 실행한다.
 
 ## 2. 파일과 식별자
