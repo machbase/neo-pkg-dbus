@@ -362,8 +362,7 @@ summary { cursor: pointer; color: var(--neo-text-secondary); }
 .neo-fixed-calls__select span { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
 .neo-fixed-calls__select b { color: var(--neo-text); font-weight: 400; }
 .neo-fixed-calls__detail { min-width: 0; padding: 24px 32px 32px; }
-.neo-fixed-calls__detail-header { display: flex; min-width: 0; margin-bottom: 24px; align-items: center; justify-content: space-between; gap: 16px; }
-.neo-fixed-calls__method { min-width: 0; margin: 0; overflow-wrap: anywhere; }
+.neo-fixed-calls__detail-header { display: flex; min-width: 0; margin-bottom: 24px; align-items: center; justify-content: flex-end; gap: 16px; }
 .neo-fixed-calls__inputs { display: grid; width: 100%; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
 .neo-device-string { position: relative; width: 100%; min-width: 0; }
 .neo-device-string__control { display: grid; width: 100%; height: 32px; grid-template-columns: auto minmax(0, 1fr) 32px; align-items: center; border: 1px solid var(--neo-border); border-radius: var(--neo-radius); background: var(--neo-input-surface); }

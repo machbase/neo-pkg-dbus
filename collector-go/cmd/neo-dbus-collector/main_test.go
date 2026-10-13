@@ -409,7 +409,7 @@ func TestPerformanceLogsStayBoundedAndSummarized(t *testing.T) {
 	if strings.Count(text, "job summary;") != 1 || strings.Count(text, "writer summary;") != 1 {
 		t.Fatalf("performance must be summarized, got %q", text)
 	}
-	for _, field := range []string{"dbusUs[avg=500 p99=990 max=1000]", "parseUs[avg=10 max=10]", "readerTotalUs[p99=1010 max=1020]", "scheduleSamples[wake=1000 start=1000]", "scheduleLagUs[timerWakeP50=200 timerWakeP99=200 timerWakeMax=6000 dispatchP99=50 dispatchMax=2000 readerStartP99=250 readerStartMax=8000]", "lateCount[1ms=3 3ms=2 5ms=2]", "clockAnomalyCount=0", "skipCount=5", "overIntervalCount=2", "queueFullSkipCount=3", "errorCount=", "maxQueueDepth=7", "queueCapacity=512", "busyRatio=", "appendBatches=1", "appendRows=4096", "appendRowsPerSec=2048000", "appendUs[avg=2000 p99=2000 max=2000]", "flushIntervalMs=1000", "flushCount=1", "flushErrorCount=0", "flushMaxUs=3000000", "queueToDurableUs[p99="} {
+	for _, field := range []string{"dbusUs[avg=500 p99=990 max=1000]", "parseUs[avg=10 max=10]", "readerTotalUs[min=21(dbus=1) p99=1010 max=1020(dbus=1000)]", "scheduleSamples[wake=1000 start=1000]", "scheduleLagUs[timerWakeP50=200 timerWakeP99=200 timerWakeMax=6000 dispatchP99=50 dispatchMax=2000 readerStartP99=250 readerStartMax=8000]", "lateCount[1ms=3 3ms=2 5ms=2]", "clockAnomalyCount=0", "skipCount=5", "overIntervalCount=2", "queueFullSkipCount=3", "errorCount=", "maxQueueDepth=7", "queueCapacity=512", "busyRatio=", "appendBatches=1", "appendRows=4096", "appendRowsPerSec=2048000", "appendUs[avg=2000 p99=2000 max=2000]", "flushIntervalMs=1000", "flushCount=1", "flushErrorCount=0", "flushMaxUs=3000000", "queueToDurableUs[p99="} {
 		if !strings.Contains(text, field) {
 			t.Fatalf("missing %s in %q", field, text)
 		}
@@ -531,7 +531,7 @@ func TestPerformanceLoggerFormatsAndDrainsSnapshotsForMultipleJobs(t *testing.T)
 		}
 		previous := -1
 		for value := 1; value <= 3; value++ {
-			position := strings.Index(text, fmt.Sprintf("readerTotalUs[p99=%d max=%d]", value, value))
+			position := strings.Index(text, fmt.Sprintf("readerTotalUs[min=%d(dbus=n/a) p99=%d max=%d(dbus=n/a)]", value, value, value))
 			if position <= previous {
 				t.Fatalf("summary order lost: %s", text)
 			}

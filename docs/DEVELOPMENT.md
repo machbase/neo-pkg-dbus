@@ -27,10 +27,12 @@ npm ci
 npm run test:layout
 cd ..
 node --test cgi-bin/tests/*.test.cjs
-npm run build
+npm run build -- --target=ls
 ```
 
-The default build produces the generic package. Build the Linux PLC target with:
+Current development, delivery and committed artifacts target LS unless explicitly
+requested otherwise. Generic source is retained for possible future use. The
+no-argument build still selects generic, so explicitly build the Linux PLC target:
 
 ```bash
 npm run build -- --target=ls
@@ -42,7 +44,7 @@ The LS build cross-builds the native collector for `linux/amd64` and includes it
 
 The LS collector has one Go service, one native writer, and one reader goroutine per active Job. A reader uses the PLC timestamp returned by DBus, decodes and transforms typed rows, then puts them on the shared bounded writer queue without waiting for a database flush. Queue rows carry a daemon-stable numeric TAG registry index rather than a repeated TAG string; the channel allocates only its 512 pointer slots up front and batch payloads are allocated only by completed reads. The writer keeps one native Neo appender open for the shared Database profile; it is the only component which appends data. It also completes ordinary batches directly after Flush instead of creating one waiting goroutine per collection cycle; at short intervals this keeps goroutine and stack usage bounded by the daemon structure rather than by the number of batches awaiting the 1-second Flush. Its internal defaults are a 512-batch queue, an 8,192-row native batch threshold, and a 1-second forced flush. They live under `settings.json.ls.writer` for deployment tuning only and are not frontend controls. A controlled logical Job or package stop drains queued rows and requests a final flush; an unexpected process/power loss can lose rows still buffered since the last flush.
 
-PLC performance diagnostics are internal settings under `settings.json.ls.performance` and default to enabled. Each Job writes one microsecond summary with `job=<name>` per 1,000 read attempts, and the shared writer writes a `scope=shared` summary without a Job name per 30 seconds to each active Job log. Those defaults remain 1,000 and 30,000ms; their enforced minimums are 500 and 10,000ms. The Job summary includes DBus avg/p99/max, parse avg/max, reader-total p99/max, total skip count, scheduler-overrun count, queue-full skip count, and error count. The writer summary includes maximum queued batches and configured capacity, append/flush busy ratio, append batch/row counts, append service throughput, append avg/p99/max, flush max, and enqueue-to-successful-flush p99/max. Append and queue-to-durable samples are each capped at 4,096 entries; no per-cycle performance records are written. The common log prefix supplies the record timestamp.
+PLC performance diagnostics are internal settings under `settings.json.ls.performance` and default to enabled. Each Job writes one microsecond summary with `job=<name>` per 1,000 read attempts, and the shared writer writes a `scope=shared` summary without a Job name per 30 seconds to each active Job log. Those defaults remain 1,000 and 30,000ms; their enforced minimums are 500 and 10,000ms. The Job summary includes DBus avg/p99/max, parse avg/max, reader-total min/p99/max, total skip count, scheduler-overrun count, queue-full skip count, and error count. The reader extrema also show the accumulated DBus time from the same cycle: `readerTotalUs[min=1100(dbus=1000) p99=1365 max=1743(dbus=1200)]`. Unmeasured DBus, including TEST input, is `n/a`; a measured zero is `0`. Microsecond ties retain the first sample. The writer summary includes maximum queued batches and configured capacity, append/flush busy ratio, append batch/row counts, append service throughput, append avg/p99/max, flush max, and enqueue-to-successful-flush p99/max. Append and queue-to-durable samples are each capped at 4,096 entries; no per-cycle performance records are written. The common log prefix supplies the record timestamp.
 
 LS has one shared Database Server profile. The profile's server connection, Default Table and column mapping apply to every LS Job. The LS UI does not add, delete, or switch Database Server entries; edit the existing profile instead. Editing it while logical Jobs are active asks for confirmation, atomically refreshes the small collector policy/secret files, and reloads those Jobs. If the package service itself is stopped, the new settings are saved for the next start and the service is not started implicitly.
 

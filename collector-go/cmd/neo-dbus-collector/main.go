@@ -285,6 +285,15 @@ type readTiming struct {
 	ReaderTotalMeasured bool
 }
 
+// Keep the DBus value from the same measured reader cycle, not from the
+// independent DBus percentile distribution. Fixed-size extrema move with the
+// detached window and do not allocate/copy another per-cycle sample array.
+type readerTotalExtremum struct {
+	ReaderTotalUS int64
+	DBusUS        int64
+	DBusMeasured  bool
+}
+
 type jobPerformance struct {
 	Source             string
 	Attempts           int
@@ -296,6 +305,8 @@ type jobPerformance struct {
 	GenerateMaxUS      int64
 	GenerateSamples    int
 	ReaderTotalUS      []int64
+	ReaderTotalMin     readerTotalExtremum
+	ReaderTotalMax     readerTotalExtremum
 	TimerWakeLagUS     []int64
 	TimerWakeNext      int
 	DispatchLagUS      []int64
@@ -1613,7 +1624,20 @@ func (d *daemon) recordJobPerformance(name string, timing readTiming, readErr er
 		stats.GenerateSamples++
 	}
 	if timing.ReaderTotalMeasured {
-		stats.ReaderTotalUS = append(stats.ReaderTotalUS, timing.ReaderTotal.Microseconds())
+		sample := readerTotalExtremum{
+			ReaderTotalUS: timing.ReaderTotal.Microseconds(),
+			DBusUS:        timing.DBus.Microseconds(),
+			DBusMeasured:  timing.DBusMeasured,
+		}
+		// Compare in the same microsecond units as the log. Strict comparisons
+		// retain the first cycle on a tie, including a legitimately measured 0.
+		if len(stats.ReaderTotalUS) == 0 || sample.ReaderTotalUS < stats.ReaderTotalMin.ReaderTotalUS {
+			stats.ReaderTotalMin = sample
+		}
+		if len(stats.ReaderTotalUS) == 0 || sample.ReaderTotalUS > stats.ReaderTotalMax.ReaderTotalUS {
+			stats.ReaderTotalMax = sample
+		}
+		stats.ReaderTotalUS = append(stats.ReaderTotalUS, sample.ReaderTotalUS)
 	}
 	if readErr != nil {
 		stats.ErrorCount++
@@ -1631,19 +1655,26 @@ func (d *daemon) recordJobPerformance(name string, timing readTiming, readErr er
 	d.enqueuePerformanceLog(name, snapshot)
 }
 
+func formatReaderDBusUS(extremum readerTotalExtremum) string {
+	if !extremum.DBusMeasured {
+		return "n/a"
+	}
+	return strconv.FormatInt(extremum.DBusUS, 10)
+}
+
 func formatJobPerformance(name string, snapshot *jobPerformance) string {
 	_, _, average, p99, maximum := durationSummaryUS(snapshot.DBusUS)
 	parseAverage := int64(0)
 	if snapshot.ParseSamples > 0 {
 		parseAverage = snapshot.ParseTotalUS / int64(snapshot.ParseSamples)
 	}
-	_, _, _, readerTotalP99, readerTotalMax := durationSummaryUS(snapshot.ReaderTotalUS)
+	readerTotalMin, _, _, readerTotalP99, readerTotalMax := durationSummaryUS(snapshot.ReaderTotalUS)
 	_, timerWakeP50, _, timerWakeP99, timerWakeMax := durationSummaryUS(snapshot.TimerWakeLagUS)
 	_, _, _, dispatchP99, dispatchMax := durationSummaryUS(snapshot.DispatchLagUS)
 	_, _, _, readerStartP99, readerStartMax := durationSummaryUS(snapshot.ReaderStartLagUS)
 	return fmt.Sprintf(
-		"job=%s job summary; source=%s samples=%d dbusUs[avg=%d p99=%d max=%d] parseUs[avg=%d max=%d] readerTotalUs[p99=%d max=%d] scheduleSamples[wake=%d start=%d] scheduleLagUs[timerWakeP50=%d timerWakeP99=%d timerWakeMax=%d dispatchP99=%d dispatchMax=%d readerStartP99=%d readerStartMax=%d] lateCount[1ms=%d 3ms=%d 5ms=%d] clockAnomalyCount=%d skipCount=%d overIntervalCount=%d queueFullSkipCount=%d errorCount=%d",
-		name, snapshot.Source, snapshot.Attempts, average, p99, maximum, parseAverage, snapshot.ParseMaxUS, readerTotalP99, readerTotalMax,
+		"job=%s job summary; source=%s samples=%d dbusUs[avg=%d p99=%d max=%d] parseUs[avg=%d max=%d] readerTotalUs[min=%d(dbus=%s) p99=%d max=%d(dbus=%s)] scheduleSamples[wake=%d start=%d] scheduleLagUs[timerWakeP50=%d timerWakeP99=%d timerWakeMax=%d dispatchP99=%d dispatchMax=%d readerStartP99=%d readerStartMax=%d] lateCount[1ms=%d 3ms=%d 5ms=%d] clockAnomalyCount=%d skipCount=%d overIntervalCount=%d queueFullSkipCount=%d errorCount=%d",
+		name, snapshot.Source, snapshot.Attempts, average, p99, maximum, parseAverage, snapshot.ParseMaxUS, readerTotalMin, formatReaderDBusUS(snapshot.ReaderTotalMin), readerTotalP99, readerTotalMax, formatReaderDBusUS(snapshot.ReaderTotalMax),
 		snapshot.ScheduleWakeCount, snapshot.ScheduleStartCount, timerWakeP50, timerWakeP99, timerWakeMax, dispatchP99, dispatchMax, readerStartP99, readerStartMax,
 		snapshot.Late1MSCount, snapshot.Late3MSCount, snapshot.Late5MSCount, snapshot.ClockAnomalyCount,
 		snapshot.OverIntervalCount+snapshot.QueueFullSkipCount, snapshot.OverIntervalCount, snapshot.QueueFullSkipCount, snapshot.ErrorCount,
