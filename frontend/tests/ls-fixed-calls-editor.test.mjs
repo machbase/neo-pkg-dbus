@@ -165,7 +165,7 @@ test("LS fixed 편집기는 Call을 추가하고 마지막 Call 한 개는 삭�
   assert.doesNotMatch(buttonText(renderer.root, "Add Call").props.className, /neo-link-button/);
   assert.equal(renderer.root.findAllByProps({ "aria-label": "DeviceString" }).length, 1);
   assert.equal(renderer.root.findAllByProps({ "aria-label": "DataCount" }).length, 1);
-  assert.ok(renderer.root.findAll((node) => node.children?.join("") === "ls-plc-device · get-device-data").length);
+  assert.equal(renderer.root.findAll((node) => node.children?.join("") === "ls-plc-device · get-device-data").length, 0);
   assert.match(buttonText(renderer.root, "Test Call").props.className, /neo-button/);
   assert.doesNotMatch(buttonText(renderer.root, "Test Call").props.className, /neo-link-button/);
 
@@ -183,6 +183,29 @@ test("LS fixed 편집기는 Call을 추가하고 마지막 Call 한 개는 삭�
     }));
   });
   assert.equal(button(renderer.root, `${first.id} Remove`).props.disabled, true);
+  await act(async () => renderer.unmount());
+});
+
+test("LS 생성/수정 공용 Call 상세는 Method 문구 없이 입력과 우측 동작을 유지한다", async () => {
+  const original = [fixedCall("get-device-data-1", "%MB100", 3), fixedCall("get-device-data-2", "%MW200", 2)];
+  const tested = [];
+  const harness = await renderCalls(original, (call, definition) => tested.push({ call, definition }));
+  const { renderer } = harness;
+  for (const call of original) {
+    await act(async () => button(renderer.root, `${call.id} Select`).props.onClick());
+    assert.equal(renderer.root.findAll((node) => String(node.props.className || "").split(" ").includes("neo-fixed-calls__method")).length, 0);
+    assert.equal(renderer.root.findAll((node) => node.children?.join("") === "ls-plc-device · get-device-data").length, 0);
+    assert.ok(input(renderer.root, "DeviceString"));
+    assert.ok(input(renderer.root, "DataCount"));
+    await act(async () => buttonText(renderer.root, "Test Call").props.onClick());
+    assert.equal(tested.at(-1).call.id, call.id);
+    assert.equal(tested.at(-1).call.interfaceId, "ls-plc-device");
+    assert.equal(tested.at(-1).call.methodId, "get-device-data");
+    assert.equal(tested.at(-1).definition.id, "get-device-data");
+  }
+  assert.deepEqual(harness.calls(), original);
+  const styles = fs.readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
+  assert.match(styles, /\.neo-fixed-calls__detail-header\s*\{[^}]*justify-content:\s*flex-end;/);
   await act(async () => renderer.unmount());
 });
 

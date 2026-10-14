@@ -44,7 +44,7 @@ LS Job의 비동기 TAG 준비는 Job별 로그에 시작과 완료를 한 번�
 LS의 canonical Job 설정은 `conf.d/jobs/<name>.json`이고, 저장 완료 표시는 작은 `conf.d/job-index/<name>.json`이다. `conf.d/go-collector.json`은 logging/writer/performance 전역 정책만 가지며 Job이나 DB 연결을 복제하지 않는다. DB password와 shared table/column mapping은 `conf.d/go-collector-secrets.json`(0600)에 분리한다. Database Profile의 table/column mapping이 LS의 현재 공용 값이며, 경량 Job status와 Data Viewer도 index나 Job 안의 과거 복사본보다 이 공용 값을 우선한다. logical Job의 started/stopped 의도 상태는 `conf.d/go-collector-active-jobs.json`에 보존하고 Go daemon만 갱신한다. Go는 Start/Reload에서 index와 revision이 일치하는 canonical Job을 직접 읽고 runtime 설정을 검증한다. daemon runtime checkpoint는 `data/go-collector-runtime.json`, control socket은 `data/neo-dbus-collector.sock`이다. `refresh-log <jobName>` control도 canonical Job의 `log`만 다시 읽어 daemon의 mutex 보호 policy map에 교체한다. reader/writer·DBus connection·scheduler·overrun 값은 멈추거나 초기화하지 않는다. password와 원본 DBus body는 API, checkpoint, log에 넣지 않는다.
 
 내부 `ls.performance`는 기본 활성화하며 Job 1,000 cycle마다 Job 이름과 DBus latency
-`avg/p99/max`, parse `avg/max`, reader total `p99/max`, interval 초과와 error 수를 microsecond 단위로
+`avg/p99/max`, parse `avg/max`, reader total `min/p99/max`, interval 초과와 error 수를 microsecond 단위로
 한 줄 기록한다. shared writer는 Job 이름 없이 `scope=shared`로 표시하고 30초마다 channel 대기 batch 최대값,
 append+flush busy ratio, append `avg/p99/max`, flush max, enqueue부터 성공 Flush까지 `p99/max`를 한 줄 기록한다. durable
 latency 표본은 최근 4,096개만 유지한다. 이 설정과 통계는 public Settings/API에
@@ -57,6 +57,14 @@ Job 통계 window가 완성되면 reader는 sample 배열의 소유권을 기존
 로그 정체로 queue가 가득 차면 전달 대기는 발생할 수 있으며 통계를 임의 폐기하지 않는다.
 `readerTotalUs`의 기존 계측 경계와 skip 의미는 바꾸지 않는다. buffer 확보·통계 누적·
 전달 등 계측 밖 구간은 남으므로 낮은 reader total만으로 timer 지연을 확정하지 않는다.
+
+CCR-096의 reader 극값은 `readerTotalUs[min=1100(dbus=1000) p99=1365 max=1743(dbus=1200)]`
+형식으로 같은 window에 기록한다. min/max 뒤의 DBus는 각 reader 극값이 발생한 동일
+회차의 합산 Call 응답시간이며 DBus 분포 자체의 min/max가 아니다. μs 단위 동률은
+첫 표본을 유지하고, TEST나 DBus 호출 전 실패처럼 미계측이면 `dbus=n/a`다. 실측
+0μs는 숫자 `0`으로 기록한다. ReaderTotal 표본이 없으면 min/p99/max=0이고 대응
+DBus=n/a다. 추가 고정 크기 메타데이터는 기존 mutex 안에서만 갱신하고 detached
+window에 함께 넘긴다. 별도 표본 배열·goroutine·주기 파일 I/O는 추가하지 않는다.
 
 DBus 호출 timeout은 지원하지 않는다. 호출, decode, validation, DB append 오류는 cycle 실패다. CGI는 응답 후 background 작업을 남기지 않고, collector service만 장기 실행한다.
 
@@ -87,7 +95,9 @@ Backend는 빈 Interface 목록으로 정상 시작한다. 사용자 설정은
 build는 이 생성 영역을 target마다 먼저 비우므로 generic 결과에 LS asset이 남지
 않는다. `cgi-bin/src/`와 사용자 설정 `cgi-bin/conf.d/`는 수정하지 않는다. 모든
 target의 manifest 이름은 `neo-pkg-dbus`이고 루트의 같은 version과
-`minServerVersion`을 사용한다. Git에는 기본 generic 생성 결과만 커밋한다.
+`minServerVersion`을 사용한다. 현재 Git 완성 산출물은 CCR-061과 2026-10-13 사용자
+재확인에 따른 LS 빌드 결과다. generic source는 보관만 하며 별도 요청 전에는 전용
+수정·검증을 진행하지 않는다.
 
 | 대상 | 규칙 |
 |---|---|

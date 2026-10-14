@@ -37,7 +37,13 @@ the existing logging worker. Percentile calculation, formatting and file I/O
 run there, not in the reader. The next window uses independent sample arrays.
 The 64-record queue remains bounded and lossless; a full queue can still apply
 backpressure during a prolonged logging stall. Stop/shutdown drain queued
-summaries before returning. Summary fields and skip semantics are unchanged.
+summaries before returning. Existing sampling boundaries and skip semantics are unchanged.
+Reader summaries include `min/p99/max`, with the DBus duration from the same cycle
+attached to both extrema, e.g. `readerTotalUs[min=1100(dbus=1000) p99=1365 max=1743(dbus=1200)]`.
+All values are microseconds. A multi-Call cycle uses its accumulated DBus duration.
+Microsecond ties retain the first cycle; unmeasured DBus (including TEST input) is
+`n/a`, while a measured zero is `0`. Empty reader windows keep zero extrema with
+`dbus=n/a`. Extrema use fixed-size metadata rather than another per-cycle array.
 `readerTotalUs` still measures the existing read/parse-to-enqueue interval, not
 all buffer acquisition, bookkeeping, dispatch or OS scheduling time; do not
 attribute a skip to the timer solely from a small `readerTotalUs.max`.

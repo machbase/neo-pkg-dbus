@@ -58,6 +58,10 @@ DataCount `1`에 맞춰 자동 Tag `MB0` 한 개를 즉시 표시한다. 사용�
 팝오버의 `Apply`는 링크가 아니라 공통 Primary 버튼을 사용하며, 유효한 완성 주소가
 없을 때는 비활성화한다.
 
+LS Job 생성·수정 공용 Method Call 상세에는 고정 `ls-plc-device · get-device-data`
+식별자 문구를 표시하지 않는다(CCR-095). Test Call과 삭제는 기존 우측 정렬을
+유지하며, 실제 Interface/Method ID와 입력·Tag·저장·호출 동작은 바꾸지 않는다.
+
 LS DataCount의 화면 상한은 X/B 4,096, W 2,048, D 1,024, L 512다. 이 제한은
 DeviceString의 data type으로 결정하며, type 변경으로 현재 DataCount가 상한을 넘으면
 상한으로 줄이고 마지막 address와 Tag 목록을 다시 계산한다. Backend의 uint16 상한은
@@ -73,7 +77,9 @@ Stepper를 사용하되 Bias 음수와 기존 계산 범위는 유지한다.
 인자 없는 `npm run build`와 `--target=generic`은 같은 generic Frontend를 연결하고,
 `--target=ls`는 LS Frontend를 연결해 루트 `index.html`, `main.html`, `side.html`을
 완성한다. 이 HTML은 생성 산출물이며 `frontend/src` 원본은 수정하지 않는다. Git에는
-항상 기본 generic HTML만 커밋한다. 제품 모듈은 정해진 위치와 export를 사용하며
+현재 납품·커밋 산출물은 CCR-061 및 2026-10-13 사용자 재확인에 따라 LS HTML이다.
+커밋 전에는 `npm run build -- --target=ls`를 명시하고 generic으로 되돌리지 않는다.
+generic source는 향후 사용을 위해 보관만 한다. 제품 모듈은 정해진 위치와 export를 사용하며
 `product.json`, 제품별 build script, `build:all` 또는 자동 탐색 체계는 두지 않는다.
 상세 구조는 `DBUS_SDD.md` CCR-053과 승인 설계 문서를 따른다.
 

@@ -120,7 +120,8 @@ LS build의 새 Job과 유효한 고정 LS Job 편집 화면은 `DeviceString`, 
 
 Method Calls는 좌측 목록과 우측 선택 상세를 가진 master-detail 카드다. 목록 행은
 drag handle, `DeviceString`, `DataCount`를 표시하며 `Add Call`, 순서 변경과 삭제를
-제공한다. 선택 상세 상단에는 `ls-plc-device · get-device-data`를 표시하고 입력은
+제공한다. 선택 상세 상단의 고정 Method 식별자 문구는 표시하지 않으며(CCR-095),
+Test Call·삭제 버튼은 우측 정렬을 유지한다. 입력은
 `DeviceString`, `DataCount` 순서의 같은 너비 두 열이다. Tags는 기본 접힘이며 Tag
 개수와 첫 이름~마지막 이름을 요약한다. Tags 영역의 좌우 경계는 입력 행과 같다.
 DeviceString 팝오버는 해당 입력과 같은 너비이고 flow 밖에 배치해 카드와 Tags를
