@@ -21,7 +21,7 @@ async function run() {
     assert.equal(initial.defaults.database.server, 'localhost');
     assert.deepEqual(initial.logging, { maxFileBytes: 1024 * 1024, maxFiles: 3, summaryIntervalMs: 60 * 60 * 1000 });
     assert.deepEqual(initial.ls.writer, { queueCapacity: 512, flushMaxRows: 8192, flushIntervalMs: 1000 });
-    assert.deepEqual(initial.ls.performance, { enabled: true, jobSampleCount: 1000, writerSummaryIntervalMs: 30000 });
+    assert.deepEqual(initial.ls.performance, { enabled: true, jobSampleCount: 1000, writerSummaryIntervalMs: 30000, overrunDetailEnabled: true });
     assert.equal(fs.existsSync(file), false);
 
     const manager = new SettingsManager({ cgiRoot: root });

@@ -14,7 +14,8 @@
   },
   "ls": {
     "interval": { "useTaskCycle": true },
+    "timer": { "showAbsoluteTimerOption": true, "defaultUseAbsoluteTimer": false },
     "writer": { "queueCapacity": 512, "flushMaxRows": 8192, "flushIntervalMs": 1000 },
-    "performance": { "enabled": true, "jobSampleCount": 1000, "writerSummaryIntervalMs": 30000 }
+    "performance": { "enabled": true, "jobSampleCount": 1000, "writerSummaryIntervalMs": 30000, "overrunDetailEnabled": true }
   }
 }

@@ -152,7 +152,7 @@ export function jobNeedsStringValueColumn(methodCalls, interfaceDetails) {
   });
 }
 
-export function createDefaultJobConfig(provider, server = "local-db", initialMethodCalls = null, intervalMs = 1000) {
+export function createDefaultJobConfig(provider, server = "local-db", initialMethodCalls = null, intervalMs = 1000, timerPolicy = null) {
   const fixedCall = Array.isArray(initialMethodCalls) ? cloned(initialMethodCalls) : provider?.jobMode === "fixed" ? [{
     id: `${provider.methodId}-1`,
     name: provider.methodId,
@@ -163,7 +163,7 @@ export function createDefaultJobConfig(provider, server = "local-db", initialMet
   }] : [];
   return {
     schemaVersion: 1,
-    schedule: { intervalMs },
+    schedule: { intervalMs, ...(timerPolicy ? { useAbsoluteTimer: timerPolicy.defaultUseAbsoluteTimer === true } : {}) },
     retry: { initialDelayMs: 5000, maximumDelayMs: 30000, multiplier: 2 },
     execution: { savePolicy: "perMethod", onMethodError: "stop", test: false },
     methodCalls: fixedCall,
@@ -198,8 +198,11 @@ export function serializeJobConfig(config) {
   return cloned;
 }
 
-export function hydrateJobConfig(config) {
+export function hydrateJobConfig(config, timerPolicy = null) {
   const cloned = typeof structuredClone === "function" ? structuredClone(config) : JSON.parse(JSON.stringify(config));
+  if (timerPolicy || Object.hasOwn(cloned.schedule || {}, "useAbsoluteTimer")) {
+    cloned.schedule = { ...cloned.schedule, useAbsoluteTimer: cloned.schedule?.useAbsoluteTimer === true };
+  }
   cloned.execution = { ...(cloned.execution || {}), test: cloned.execution?.test === true };
   cloned.methodCalls = (cloned.methodCalls || []).map((call) => ({
     ...call,

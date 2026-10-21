@@ -155,6 +155,14 @@ Pause 중에는 요청 결과를 화면에 반영하지 않고 Resume 즉시 다
 
 ## 5. Job 생성과 수정
 
+LS timer 선택은 `DBUS_SDD.md` CCR-097을 따른다. Settings의 읽기 전용
+`timerPolicy.showAbsoluteTimerOption`이 true일 때 Job Configuration 편집 모달에
+`Use Absolute-time Timer` 체크박스를 제공한다. 신규 Job은
+`defaultUseAbsoluteTimer`를 사용하며 기존 Job의 누락값은 false다. 숨겨진 control은
+저장된 true를 변경하지 않는다. 요약/Monitoring은 옵션이 노출되거나 저장값이 true인
+경우 `ABSOLUTE-TIME TIMER: Enabled/Disabled`를 표시한다. 실제 선택은
+`schedule.useAbsoluteTimer`로 저장하며 Generic에는 해당 control을 제공하지 않는다.
+
 ### 기본 정보
 
 | 필드 | 필수 | 규칙 |

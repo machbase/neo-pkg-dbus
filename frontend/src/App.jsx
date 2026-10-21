@@ -655,6 +655,7 @@ function JobDetail() {
           {config.execution?.test === true ? <span className="neo-test-badge" title="Synthetic input is active">TEST</span> : null}
           <OverviewValue label="STATUS" value={<StatusText job={job} />} />
           <div className="neo-overview-card__row"><OverviewValue label="INTERVAL" value={`${config.schedule?.intervalMs ?? "—"} ms`} /><OverviewValue label="SAVE POLICY" value={config.execution?.savePolicy || "—"} /></div>
+          {app.settings?.timerPolicy?.showAbsoluteTimerOption || config.schedule?.useAbsoluteTimer === true ? <OverviewValue label="ABSOLUTE-TIME TIMER" value={config.schedule?.useAbsoluteTimer === true ? "Enabled" : "Disabled"} /> : null}
         </OverviewCard>
         <OverviewCard label="METHOD CALLS" centered>
           <strong className="neo-overview-card__count">{config.methodCalls?.length ?? job.methodCallCount ?? 0}</strong>
@@ -1082,6 +1083,11 @@ function TagMappingEditor({ numeric, selection, onChange }) {
   })}</tbody></table></div>;
 }
 
+export function AbsoluteTimerOption({ policy, schedule, onChange }) {
+  if (policy?.showAbsoluteTimerOption !== true) return null;
+  return <Field label="Timer"><label className="neo-timer-option" title="Use Linux monotonic absolute-time waiting. This may reduce low-load jitter; results depend on CPU load."><input type="checkbox" aria-label="Use Absolute-time Timer" checked={schedule.useAbsoluteTimer === true} onChange={(event) => onChange({ ...schedule, useAbsoluteTimer: event.target.checked })} /><span>Use Absolute-time Timer</span></label></Field>;
+}
+
 function JobSectionSummary({ className = "", label, items, onEdit }) {
   return <div className={`neo-panel__title neo-job-section-header ${className}`.trim()}>
     <h2>{label}</h2>
@@ -1165,12 +1171,12 @@ function JobForm({ mode }) {
     if (editing) {
       if (job?.name !== params.name) return;
       setName(job.name);
-      setConfig(hydrateJobConfig({ ...DEFAULT_CONFIG, ...job.config }));
+      setConfig(hydrateJobConfig({ ...DEFAULT_CONFIG, ...job.config }, settings?.timerPolicy));
       setEditRevision(job.revision);
     } else {
       const databaseServer = settings?.defaults?.database?.server || servers?.[0]?.name || "";
       const server = (servers || []).find((item) => item.name === databaseServer);
-      setConfig(createDefaultJobConfig(provider, server || { name: databaseServer }, createInitialMethodCalls(provider), intervalDefaultMs));
+      setConfig(createDefaultJobConfig(provider, server || { name: databaseServer }, createInitialMethodCalls(provider), intervalDefaultMs, settings?.timerPolicy));
     }
   }, [app.settings, editing, formMode, intervalDefaultMs, loaded.data, params.name, provider]);
   useEffect(() => {
@@ -1422,6 +1428,7 @@ function JobForm({ mode }) {
         <JobSectionSummary className="neo-job-configuration-summary" label="JOB CONFIGURATION" items={[
           { label: "JOB NAME", value: name || "—" },
           { label: "RUN INTERVAL", value: `${config.schedule.intervalMs} ms (= ${intervalTaskPeriodMs} ms × ${intervalMultiplier(intervalTaskPeriodMs, config.schedule.intervalMs)})` },
+          ...(app.settings?.timerPolicy?.showAbsoluteTimerOption || config.schedule.useAbsoluteTimer === true ? [{ label: "ABSOLUTE-TIME TIMER", value: config.schedule.useAbsoluteTimer === true ? "Enabled" : "Disabled" }] : []),
           { label: "SAVE POLICY", value: config.execution.savePolicy },
         ]} onEdit={openJobConfiguration} />
       </section>
@@ -1433,6 +1440,7 @@ function JobForm({ mode }) {
       </section>
       {jobConfigurationModalOpen && jobConfigurationDraft ? <Modal title="Edit Job Configuration" variant="job-section-editor" onClose={cancelJobConfiguration}>
         <div className="neo-form-grid"><Field label="Job Name"><div className="neo-job-name-input"><Input maxLength={100} value={jobConfigurationDraft.name} readOnly={editing} disabled={editing} onChange={(value) => { nameEdited.current = true; setJobConfigurationDraft((current) => ({ ...current, name: value.toLowerCase() })); }} />{testModeAvailable ? <label className="neo-test-toggle" title="Generate test data without DBUS. Available only for the internal benchmark table."><input type="checkbox" aria-label="TEST" checked={jobConfigurationDraft.execution.test === true} onChange={(event) => setJobConfigurationDraft((current) => ({ ...current, execution: { ...current.execution, test: event.target.checked } }))} /><span>TEST</span></label> : null}</div></Field><Field label="Run Interval"><div className="neo-interval-formula"><span>Task Period {intervalTaskPeriodMs} ms</span><span aria-hidden="true">×</span><NumberStepper label="Run Interval Multiplier" min={1} max={intervalMultiplierMax} step={1} value={intervalMultiplier(intervalTaskPeriodMs, jobConfigurationDraft.schedule.intervalMs)} onChange={(value) => setJobConfigurationDraft((current) => ({ ...current, schedule: { ...current.schedule, intervalMs: intervalMsFromMultiplier(intervalTaskPeriodMs, value) } }))} /><span aria-hidden="true">=</span><strong>{jobConfigurationDraft.schedule.intervalMs} ms</strong></div></Field>{productRetryConfigurable ? <><Field label="Retry Initial (ms)"><Input type="number" value={jobConfigurationDraft.retry.initialDelayMs} onChange={(value) => setJobConfigurationDraft((current) => ({ ...current, retry: { ...current.retry, initialDelayMs: Number(value) } }))} /></Field><Field label="Retry Maximum (ms)"><Input type="number" value={jobConfigurationDraft.retry.maximumDelayMs} onChange={(value) => setJobConfigurationDraft((current) => ({ ...current, retry: { ...current.retry, maximumDelayMs: Number(value) } }))} /></Field><Field label="Retry Multiplier"><Input type="number" value={jobConfigurationDraft.retry.multiplier} onChange={(value) => setJobConfigurationDraft((current) => ({ ...current, retry: { ...current.retry, multiplier: Number(value) } }))} /></Field></> : null}<Field label="Save Policy"><select value={jobConfigurationDraft.execution.savePolicy} onChange={(event) => setJobConfigurationDraft((current) => ({ ...current, execution: { ...current.execution, savePolicy: event.target.value } }))}><option value="perMethod">perMethod</option><option value="afterAllMethods">afterAllMethods</option></select></Field></div>
+        <AbsoluteTimerOption policy={app.settings?.timerPolicy} schedule={jobConfigurationDraft.schedule} onChange={(schedule) => setJobConfigurationDraft((current) => ({ ...current, schedule }))} />
         <footer className="neo-modal__footer"><button type="button" className="neo-button" onClick={cancelJobConfiguration}>Cancel</button><button type="button" className="neo-button neo-button--primary" onClick={applyJobConfiguration}>Apply</button></footer>
       </Modal> : null}
       {databaseModalOpen && databaseDraft ? <Modal title="Edit Database" variant="job-section-editor" onClose={cancelDatabase}>

@@ -23,23 +23,30 @@ function loggingPolicy(value) {
 function lsPolicy(value) {
   if (value === undefined) return null;
   const interval = value?.interval;
+  const timer = value?.timer === undefined
+    ? { showAbsoluteTimerOption: true, defaultUseAbsoluteTimer: false } : value.timer;
   const writer = value?.writer;
   const performance = value?.performance;
   if (!value || typeof value !== 'object' || Array.isArray(value)
     || !interval || typeof interval !== 'object' || Array.isArray(interval)
     || typeof interval.useTaskCycle !== 'boolean'
+    || !timer || typeof timer !== 'object' || Array.isArray(timer)
+    || typeof timer.showAbsoluteTimerOption !== 'boolean'
+    || typeof timer.defaultUseAbsoluteTimer !== 'boolean'
     || !writer || typeof writer !== 'object' || Array.isArray(writer)
     || !positiveInteger(writer.queueCapacity) || writer.queueCapacity > 1024
     || !positiveInteger(writer.flushMaxRows) || writer.flushMaxRows > 65535
     || !positiveInteger(writer.flushIntervalMs) || writer.flushIntervalMs > 60 * 60 * 1000
     || !performance || typeof performance !== 'object' || Array.isArray(performance)
     || typeof performance.enabled !== 'boolean'
+    || (performance.overrunDetailEnabled !== undefined && typeof performance.overrunDetailEnabled !== 'boolean')
     || !positiveInteger(performance.jobSampleCount)
     || !positiveInteger(performance.writerSummaryIntervalMs)) {
     throw error('SETTINGS_INVALID', 'LS interval 설정이 잘못되었습니다.');
   }
   return {
     interval: { useTaskCycle: interval.useTaskCycle },
+    timer: { showAbsoluteTimerOption: timer.showAbsoluteTimerOption, defaultUseAbsoluteTimer: timer.defaultUseAbsoluteTimer },
     // Shared writer settings; users do not edit them in the frontend.
     writer: {
       queueCapacity: writer.queueCapacity,
@@ -53,6 +60,7 @@ function lsPolicy(value) {
       enabled: performance.enabled,
       jobSampleCount: performance.jobSampleCount,
       writerSummaryIntervalMs: performance.writerSummaryIntervalMs,
+      overrunDetailEnabled: performance.overrunDetailEnabled !== false,
     },
   };
 }

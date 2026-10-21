@@ -11,6 +11,13 @@ assert.equal(intervalMsFromMultiplier(4, 0), 4);
 assert.equal(intervalMsFromMultiplier(4, 2.1), 12);
 assert.equal(maxIntervalMultiplier(4), 21600000);
 
+const timerPolicy = { showAbsoluteTimerOption: false, defaultUseAbsoluteTimer: true };
+const timerJob = createDefaultJobConfig(null, "localhost", [], 20, timerPolicy);
+assert.equal(timerJob.schedule.useAbsoluteTimer, true);
+assert.equal(serializeJobConfig(hydrateJobConfig(timerJob, timerPolicy)).schedule.useAbsoluteTimer, true);
+assert.equal(hydrateJobConfig({ ...timerJob, schedule: { intervalMs: 20 } }, timerPolicy).schedule.useAbsoluteTimer, false, "legacy Jobs never inherit a new timer default");
+assert.equal(createDefaultJobConfig(null).schedule.useAbsoluteTimer, undefined, "generic creation stays unchanged");
+
 const dbusInterface = { id: "plc", busType: "system", destination: "com.example.Plc", methods: [{ id: "read", member: "Read", inputs: [{ name: "count", type: "uint16", required: true }], outputs: [] }] };
 const config = createDefaultJobConfig(dbusInterface, "local-db");
 assert.equal(config.profileId, undefined);

@@ -23,6 +23,7 @@ function fromDocument(document) {
     profileId: document.profileId || '',
     revision: document.revision,
     intervalMs: document.schedule && document.schedule.intervalMs,
+    useAbsoluteTimer: document.schedule && document.schedule.useAbsoluteTimer === true,
     methodCallCount: calls.length,
     tagCount: calls.reduce((total, call) => total + tagsForCall(call).length, 0),
     interfaceIds: [...new Set(calls.map((call) => call.interfaceId).filter(Boolean))].sort(),
@@ -54,6 +55,7 @@ function validateIndex(name, value) {
     || !Number.isInteger(value.tagCount) || value.tagCount < 0
     || typeof value.profileId !== 'string'
     || !Number.isSafeInteger(value.intervalMs) || value.intervalMs < 1
+    || (value.useAbsoluteTimer !== undefined && typeof value.useAbsoluteTimer !== 'boolean')
     || !Array.isArray(value.interfaceIds) || !Array.isArray(value.methodReferences)
     || value.interfaceIds.some((item) => typeof item !== 'string' || !item)
     || value.methodReferences.length !== value.methodCallCount

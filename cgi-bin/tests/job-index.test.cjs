@@ -33,6 +33,7 @@ test('Job index contains only the bounded management summary', () => {
     profileId: 'ls-electric-plc',
     revision: 7,
     intervalMs: 10,
+    useAbsoluteTimer: false,
     methodCallCount: 1,
     tagCount: 2,
     interfaceIds: ['ls-plc-device'],
