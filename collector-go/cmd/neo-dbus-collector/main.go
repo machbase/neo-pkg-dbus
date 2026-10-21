@@ -114,6 +114,7 @@ type performancePolicy struct {
 	Enabled                 bool  `json:"enabled"`
 	JobSampleCount          int   `json:"jobSampleCount"`
 	WriterSummaryIntervalMS int64 `json:"writerSummaryIntervalMs"`
+	OverrunDetailEnabled    *bool `json:"overrunDetailEnabled,omitempty"`
 }
 
 func (p performancePolicy) normalized() (performancePolicy, []string) {
@@ -157,7 +158,8 @@ func (p logPolicy) normalized() logPolicy {
 }
 
 type schedule struct {
-	IntervalMS int64 `json:"intervalMs"`
+	IntervalMS       int64 `json:"intervalMs"`
+	UseAbsoluteTimer bool  `json:"useAbsoluteTimer"`
 }
 type retry struct {
 	InitialDelayMS int64   `json:"initialDelayMs"`
@@ -320,6 +322,7 @@ type jobPerformance struct {
 	OverIntervalCount  uint64
 	QueueFullSkipCount uint64
 	ErrorCount         uint64
+	LastOverrun        *overrunDetail
 }
 
 type writerPerformance struct {
@@ -906,6 +909,12 @@ func (d *daemon) startJob(ctx context.Context, name string, active *activeJob) {
 	if ctx.Err() != nil {
 		return
 	}
+	timer, err := newCycleTimer(ctx, time.Duration(active.config.Schedule.IntervalMS)*time.Millisecond, active.config.Schedule.UseAbsoluteTimer)
+	if err != nil {
+		d.failStart(name, active, err)
+		return
+	}
+	defer timer.Close()
 	d.mu.Lock()
 	if d.jobs[name] != active || ctx.Err() != nil {
 		d.mu.Unlock()
@@ -920,7 +929,7 @@ func (d *daemon) startJob(ctx context.Context, name string, active *activeJob) {
 		d.failStart(name, active, fmt.Errorf("publish running state: %w", err))
 		return
 	}
-	d.log(name, "INFO", "collector", "collector started; source="+sourceForConfig(active.config))
+	d.log(name, "INFO", "collector", fmt.Sprintf("collector started; source=%s intervalMs=%d timerMode=%s", sourceForConfig(active.config), active.config.Schedule.IntervalMS, timerMode(active.config.Schedule.UseAbsoluteTimer)))
 	if d.performancePolicy.Enabled {
 		message := fmt.Sprintf("performance logging enabled; jobSampleCount=%d writerSummaryIntervalMs=%d writerFlushIntervalMs=%d", d.performancePolicy.JobSampleCount, d.performancePolicy.WriterSummaryIntervalMS, d.writerPolicy.normalized().FlushIntervalMS)
 		if len(d.performanceCorrections) > 0 {
@@ -928,7 +937,7 @@ func (d *daemon) startJob(ctx context.Context, name string, active *activeJob) {
 		}
 		d.logAlways(name, "INFO", "performance", message)
 	}
-	d.reader(ctx, active.config, name, active)
+	d.readerWithTimer(ctx, active.config, name, active, timer)
 }
 
 func (d *daemon) failStart(name string, active *activeJob, startErr error) {
@@ -1228,6 +1237,16 @@ func (d *daemon) shutdown() {
 }
 
 func (d *daemon) reader(ctx context.Context, config jobConfig, name string, active *activeJob) {
+	timer, err := newCycleTimer(ctx, time.Duration(config.Schedule.IntervalMS)*time.Millisecond, config.Schedule.UseAbsoluteTimer)
+	if err != nil {
+		d.recordError(name, err)
+		return
+	}
+	defer timer.Close()
+	d.readerWithTimer(ctx, config, name, active, timer)
+}
+
+func (d *daemon) readerWithTimer(ctx context.Context, config jobConfig, name string, active *activeJob, timer cycleTimer) {
 	// SystemBus() returns a process-wide shared connection. Closing it per
 	// cycle lets one Job tear down another Job's DBus call. Each reader instead
 	// owns one dedicated connection for its whole logical Job lifetime. A
@@ -1240,11 +1259,6 @@ func (d *daemon) reader(ctx context.Context, config jobConfig, name string, acti
 		}
 	}()
 	interval := time.Duration(config.Schedule.IntervalMS) * time.Millisecond
-	timerNow := time.Now()
-	timerDelay := nextAligned(timerNow, interval)
-	scheduledAt := timerNow.Add(timerDelay)
-	timer := time.NewTimer(timerDelay)
-	defer timer.Stop()
 	// Opening the native Appender is not the end of its startup cost. The first
 	// real batch can create thousands of TAG metadata records and perform the
 	// first durable flush. Keep that first aligned cycle serialized through its
@@ -1252,60 +1266,41 @@ func (d *daemon) reader(ctx context.Context, config jobConfig, name string, acti
 	// bounded queue during one-time database initialization without inserting a
 	// dummy row or shifting the Job away from epoch-aligned boundaries.
 	primed := false
-	var busy atomic.Bool
+	var current readerCycle
 	for {
-		select {
-		case <-ctx.Done():
+		scheduledAt, wakeAt, err := timer.Wait(ctx)
+		if err != nil {
 			// Job stop is complete only after its in-flight DBus call and its
 			// already queued batch have finished. This is the per-Job drain
 			// guarantee; other Jobs continue using the shared writer.
 			active.work.Wait()
-			return
-		case <-timer.C:
-			wakeAt := time.Now()
-			d.recordScheduleWake(name, scheduledAt, wakeAt)
-			if !primed {
-				d.recordScheduleStart(name, scheduledAt, wakeAt, wakeAt)
-				if !config.Execution.Test && connection == nil {
-					var connectError error
-					connection, connectError = d.connectDBus(name)
-					if connectError != nil {
-						if ctx.Err() == nil {
-							d.recordJobPerformance(name, readTiming{}, connectError)
-						}
-						timerNow = time.Now()
-						timerDelay = nextAligned(timerNow, interval)
-						scheduledAt = timerNow.Add(timerDelay)
-						timer.Reset(timerDelay)
-						continue
-					}
-				}
-				primed = d.readOnce(ctx, config, name, connection, active, true)
-			} else if !busy.CompareAndSwap(false, true) {
-				d.recordOverrun(name, false)
-			} else {
-				active.work.Add(1)
-				go func(expectedAt, timerWokeAt time.Time) {
-					defer active.work.Done()
-					defer busy.Store(false)
-					d.recordScheduleStart(name, expectedAt, timerWokeAt, time.Now())
-					if !config.Execution.Test && connection == nil {
-						var connectError error
-						connection, connectError = d.connectDBus(name)
-						if connectError != nil {
-							if ctx.Err() == nil {
-								d.recordJobPerformance(name, readTiming{}, connectError)
-							}
-							return
-						}
-					}
-					d.readOnce(ctx, config, name, connection, active, false)
-				}(scheduledAt, wakeAt)
+			if ctx.Err() == nil {
+				d.failStart(name, active, fmt.Errorf("scheduler: %w", err))
 			}
-			timerNow = time.Now()
-			timerDelay = nextAligned(timerNow, interval)
-			scheduledAt = timerNow.Add(timerDelay)
-			timer.Reset(timerDelay)
+			return
+		}
+		d.recordScheduleWake(name, scheduledAt, wakeAt)
+		if !primed {
+			startedAt := time.Now()
+			d.recordScheduleStart(name, scheduledAt, wakeAt, startedAt)
+			result := d.readCycle(ctx, config, name, &connection, active, true, startedAt)
+			primed = result.ok
+			d.recordReadResult(name, result)
+		} else if !current.begin(scheduledAt, wakeAt, interval) {
+			d.recordOverrun(name, false)
+		} else {
+			active.work.Add(1)
+			go func(expectedAt, timerWokeAt time.Time) {
+				defer active.work.Done()
+				startedAt := time.Now()
+				current.started(startedAt)
+				d.recordScheduleStart(name, expectedAt, timerWokeAt, startedAt)
+				result := d.readCycle(ctx, config, name, &connection, active, false, startedAt)
+				// Release the busy reader before handing a summary to the logger.
+				// The completed detail belongs to this exact blocked reader.
+				detail := current.finish(result.timing)
+				d.recordReadResult(name, result, detail)
+			}(scheduledAt, wakeAt)
 		}
 	}
 }
@@ -1333,22 +1328,41 @@ func nextAligned(now time.Time, interval time.Duration) time.Duration {
 }
 
 func (d *daemon) readOnce(ctx context.Context, config jobConfig, name string, connection *dbus.Conn, active *activeJob, awaitDurable bool) bool {
+	result := d.readCycle(ctx, config, name, &connection, active, awaitDurable, time.Now())
+	d.recordReadResult(name, result)
+	return result.ok
+}
+
+func (d *daemon) readCycle(ctx context.Context, config jobConfig, name string, connection **dbus.Conn, active *activeJob, awaitDurable bool, readerStarted time.Time) (result readResult) {
 	if ctx.Err() != nil {
-		return false
+		return
 	}
 	reservation := d.reserveQueue()
 	if reservation == nil {
 		if ctx.Err() == nil {
 			d.recordOverrun(name, true)
 		}
-		return false
+		return
 	}
+	// Start at goroutine entry, before slot/plan/buffer acquisition and optional
+	// DBus connection. Queue-full rejections remain skip-only, not read samples.
+	result.attempt = true
+	defer func() {
+		if ctx.Err() != nil {
+			result.attempt = false
+		}
+		if !result.timing.ReaderTotalMeasured {
+			result.timing.ReaderTotal = time.Since(readerStarted)
+			result.timing.ReaderTotalMeasured = true
+		}
+	}()
 	if active.plan == nil {
 		plan, err := buildReadPlan(config)
 		if err != nil {
 			reservation.release()
 			d.recordError(name, err)
-			return false
+			result.err = err
+			return
 		}
 		active.plan = plan
 	}
@@ -1357,30 +1371,37 @@ func (d *daemon) readOnce(ctx context.Context, config jobConfig, name string, co
 	}
 	lease := active.buffers.acquire()
 	rows := lease.rows
-	readerStarted := time.Now()
 	var timing readTiming
 	var err error
+	if !config.Execution.Test && *connection == nil {
+		*connection, err = d.connectDBus(name)
+		if err != nil {
+			lease.release()
+			reservation.release()
+			result.err = err
+			return
+		}
+	}
 	if config.Execution.Test {
 		timing, err = generateTestRowsInto(active.plan, rows)
 	} else {
-		timing, err = readDBusInto(ctx, active.plan, connection, rows)
+		timing, err = readDBusInto(ctx, active.plan, *connection, rows)
 	}
+	result.timing = timing
 	if err != nil {
 		lease.release()
 		reservation.release()
 		if ctx.Err() != nil {
-			return false
+			return
 		}
-		timing.ReaderTotal = time.Since(readerStarted)
-		timing.ReaderTotalMeasured = true
-		d.recordJobPerformance(name, timing, err)
+		result.err = err
 		d.recordError(name, err)
-		return false
+		return
 	}
 	if ctx.Err() != nil {
 		lease.release()
 		reservation.release()
-		return false
+		return
 	}
 	d.mu.Lock()
 	// A queued read is not yet a durable database write. Do not clear a
@@ -1397,21 +1418,19 @@ func (d *daemon) readOnce(ctx context.Context, config jobConfig, name string, co
 	active.work.Add(1)
 	select {
 	case d.queue <- b:
-		if ctx.Err() == nil {
-			timing.ReaderTotal = time.Since(readerStarted)
-			timing.ReaderTotalMeasured = true
-			d.recordJobPerformance(name, timing, nil)
-		}
+		result.timing.ReaderTotal = time.Since(readerStarted)
+		result.timing.ReaderTotalMeasured = true
 		d.recordQueueDepth(len(d.queue))
 		if awaitDurable {
 			writeErr := <-b.Finished
 			active.work.Done()
 			if writeErr != nil {
 				d.recordError(name, writeErr)
-				return false
+				return
 			}
 			d.recordSuccess(name, b.RowCount)
-			return true
+			result.ok = true
+			return
 		}
 		if active.flushOnQueue.Load() {
 			d.requestFlush()
@@ -1423,20 +1442,18 @@ func (d *daemon) readOnce(ctx context.Context, config jobConfig, name string, co
 		b.releaseRows()
 		reservation.release()
 		active.work.Done()
-		return false
+		return
 	default:
 		b.releaseRows()
 		reservation.release()
 		if ctx.Err() == nil {
-			timing.ReaderTotal = time.Since(readerStarted)
-			timing.ReaderTotalMeasured = true
 			d.recordOverrun(name, true)
-			d.recordJobPerformance(name, timing, nil)
 		}
 		active.work.Done()
-		return false
+		return
 	}
-	return true
+	result.ok = true
+	return
 }
 
 func percentileUS(values []int64, percentile float64) int64 {
@@ -1593,7 +1610,7 @@ func (d *daemon) flushPerformanceLogs() {
 	<-done
 }
 
-func (d *daemon) recordJobPerformance(name string, timing readTiming, readErr error) {
+func (d *daemon) recordJobPerformance(name string, timing readTiming, readErr error, details ...*overrunDetail) {
 	if !d.performancePolicy.Enabled {
 		return
 	}
@@ -1602,6 +1619,11 @@ func (d *daemon) recordJobPerformance(name string, timing readTiming, readErr er
 	if stats == nil {
 		stats = newJobPerformance(d.performancePolicy.JobSampleCount, "dbus")
 		d.jobPerformance[name] = stats
+	}
+	for _, detail := range details {
+		if (d.performancePolicy.OverrunDetailEnabled == nil || *d.performancePolicy.OverrunDetailEnabled) && detail != nil && (stats.LastOverrun == nil || detail.SkippedAt.After(stats.LastOverrun.SkippedAt)) {
+			stats.LastOverrun = detail
+		}
 	}
 	stats.Attempts++
 	if timing.DBusMeasured {
@@ -1678,7 +1700,7 @@ func formatJobPerformance(name string, snapshot *jobPerformance) string {
 		snapshot.ScheduleWakeCount, snapshot.ScheduleStartCount, timerWakeP50, timerWakeP99, timerWakeMax, dispatchP99, dispatchMax, readerStartP99, readerStartMax,
 		snapshot.Late1MSCount, snapshot.Late3MSCount, snapshot.Late5MSCount, snapshot.ClockAnomalyCount,
 		snapshot.OverIntervalCount+snapshot.QueueFullSkipCount, snapshot.OverIntervalCount, snapshot.QueueFullSkipCount, snapshot.ErrorCount,
-	)
+	) + formatOverrunDetail(snapshot.LastOverrun)
 }
 
 func (d *daemon) recordPerformanceSkip(name string, queueFull bool) {

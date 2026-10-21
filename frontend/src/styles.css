@@ -326,6 +326,8 @@ summary { cursor: pointer; color: var(--neo-text-secondary); }
 .neo-job-name-input > input { min-width: 0; flex: 1 1 auto; }
 .neo-test-toggle { display: inline-flex; flex: 0 0 auto; min-height: 34px; padding: 0 10px; border: 1px solid var(--neo-border); border-radius: var(--neo-radius); align-items: center; gap: 6px; color: #ffd166; background: rgba(255, 152, 0, .10); cursor: pointer; font-size: 11px; font-weight: 800; letter-spacing: .06em; }
 .neo-test-toggle input { margin: 0; accent-color: #ff9800; }
+.neo-timer-option { display: inline-flex; min-height: 32px; align-items: center; gap: 8px; color: var(--neo-text-secondary); cursor: pointer; font-size: 12px; font-weight: 400; }
+.neo-timer-option input { margin: 0; accent-color: var(--neo-primary); }
 .neo-input-prefix { display: flex; align-items: center; width: 100%; min-width: 0; height: 32px; border: 1px solid var(--neo-border); border-radius: var(--neo-radius); background: var(--neo-input-surface); }
 .neo-input-prefix:focus-within { outline: 2px solid var(--neo-interactive-hover); outline-offset: 0; }
 .neo-input-prefix > span { flex: 0 0 auto; padding-left: 12px; color: var(--neo-text); }

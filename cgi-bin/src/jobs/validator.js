@@ -264,7 +264,8 @@ function validateJobConfig(value, options) {
   }
 
   assertObject(value.schedule, 'schedule');
-  assertFields(value.schedule, ['intervalMs'], 'schedule');
+  assertFields(value.schedule, settings.allowAbsoluteTimer ? ['intervalMs', 'useAbsoluteTimer'] : ['intervalMs'], 'schedule');
+  if (value.schedule.useAbsoluteTimer !== undefined && typeof value.schedule.useAbsoluteTimer !== 'boolean') invalid('schedule.useAbsoluteTimer는 boolean이어야 합니다.');
   const minimumIntervalMs = Number.isInteger(settings.minimumIntervalMs) ? settings.minimumIntervalMs : 1000;
   if (!Number.isInteger(value.schedule.intervalMs) || value.schedule.intervalMs < minimumIntervalMs || value.schedule.intervalMs > 86400000) invalid(`schedule.intervalMs는 ${minimumIntervalMs}~86400000 정수여야 합니다.`);
   const intervalCycleMs = Number.isInteger(settings.intervalCycleMs) && settings.intervalCycleMs > 0 ? settings.intervalCycleMs : 1;
@@ -305,6 +306,7 @@ function validateJobConfig(value, options) {
     || value.log.maxFiles < 1 || value.log.maxFiles > 1000) invalid('log 설정이 잘못되었습니다.');
 
   const normalized = clone(value);
+  if (settings.allowAbsoluteTimer) normalized.schedule.useAbsoluteTimer = normalized.schedule.useAbsoluteTimer === true;
   // Neo stores unquoted SQL identifiers in uppercase. Persist the same
   // canonical form for every Job creation and update path.
   normalized.database.table = normalized.database.table.toUpperCase();

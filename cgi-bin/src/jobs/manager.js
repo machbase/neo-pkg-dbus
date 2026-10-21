@@ -148,6 +148,10 @@ class JobManager {
   requestJsonMaxBytes() { return this.productPolicy.maxRequestJsonBytes; }
 
   validateConfig(config, options) {
+    if (this.isLs && options?.creating && config?.schedule
+      && !Object.prototype.hasOwnProperty.call(config.schedule, 'useAbsoluteTimer')) {
+      config = { ...config, schedule: { ...config.schedule, useAbsoluteTimer: this.settings().ls.timer.defaultUseAbsoluteTimer } };
+    }
     const productLimits = this.productPolicy.validationLimits || {};
     // Reading an existing configuration must not contact the PLC.  Older Jobs
     // can legitimately contain an interval which predates the task-cycle
@@ -162,6 +166,7 @@ class JobManager {
       minimumIntervalMs: this.productPolicy.minimumIntervalMs || 1000,
       intervalCycleMs: intervalPolicy.cycleMs,
       maxJobJsonBytes: this.productPolicy.maxJobJsonBytes,
+      allowAbsoluteTimer: this.isLs,
     });
     const productValidated = this.productPolicy.validateProductConfig(validated);
     if (this.isLs && options?.enforceDatabaseProfile !== false
@@ -508,7 +513,7 @@ class JobManager {
       cache[index.database.server] = database;
     }
     return {
-      schedule: { intervalMs: index.intervalMs },
+      schedule: { intervalMs: index.intervalMs, useAbsoluteTimer: index.useAbsoluteTimer === true },
       methodCalls: index.methodReferences.map((reference) => ({
         id: reference.callId,
         interfaceId: reference.interfaceId,
@@ -1301,7 +1306,7 @@ class JobManager {
       const name = this.validateName(payload.name);
       this.withMutation(name, callback, (handle, done, holdInterfaces) => {
         let config;
-        try { holdInterfaces(payload.config); config = this.validateConfig(payload.config); }
+        try { holdInterfaces(payload.config); config = this.validateConfig(payload.config, { creating: true }); }
         catch (validationError) { done(validationError); return; }
         try {
           handle.assertOwned();

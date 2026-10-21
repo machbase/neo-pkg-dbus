@@ -37,6 +37,7 @@ class SettingsManager {
       callback(null, {
         ...publicSettings,
         provider,
+        ...(productPolicy.target === 'ls' ? { timerPolicy: settings.ls.timer } : {}),
         ...(productPolicy.target === 'ls' && provider ? { intervalPolicy: resolveIntervalPolicy({ settings, productPolicy }) } : {}),
       });
     } catch (loadError) {
@@ -46,8 +47,8 @@ class SettingsManager {
 
   update(patch, callback) {
     try {
-      if (patch && Object.prototype.hasOwnProperty.call(patch, 'provider')) {
-        throw error('SETTINGS_INVALID', 'provider는 읽기 전용 build profile입니다.');
+      if (patch && ['provider', 'timerPolicy'].some((key) => Object.prototype.hasOwnProperty.call(patch, key))) {
+        throw error('SETTINGS_INVALID', 'provider와 timerPolicy는 읽기 전용입니다.');
       }
       const current = loadSettings(this.file);
       const productPolicy = loadProductPolicy(this.cgiRoot);
@@ -71,6 +72,7 @@ class SettingsManager {
       const provider = loadProviderProfile(this.cgiRoot);
       callback(null, {
         ...publicSettings,
+        ...(productPolicy.target === 'ls' ? { timerPolicy: next.ls.timer } : {}),
         ...(productPolicy.target === 'ls' && provider ? { intervalPolicy: resolveIntervalPolicy({ settings: next, productPolicy }) } : {}),
       });
     } catch (updateError) {

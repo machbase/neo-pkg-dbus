@@ -23,8 +23,9 @@ function defaultSettings() {
     // is copied into the Go collector policy file but is not exposed in the UI.
     ls: {
       interval: { useTaskCycle: true },
+      timer: { showAbsoluteTimerOption: true, defaultUseAbsoluteTimer: false },
       writer: { queueCapacity: 512, flushMaxRows: 8192, flushIntervalMs: 1000 },
-      performance: { enabled: true, jobSampleCount: 1000, writerSummaryIntervalMs: 30000 },
+      performance: { enabled: true, jobSampleCount: 1000, writerSummaryIntervalMs: 30000, overrunDetailEnabled: true },
     },
   };
 }
@@ -57,6 +58,7 @@ function loadSettings(file) {
       ...base.ls,
       ...((value.ls && typeof value.ls === 'object' && !Array.isArray(value.ls)) ? value.ls : {}),
       interval: { ...base.ls.interval, ...((value.ls?.interval && typeof value.ls.interval === 'object' && !Array.isArray(value.ls.interval)) ? value.ls.interval : {}) },
+      timer: { ...base.ls.timer, ...((value.ls?.timer && typeof value.ls.timer === 'object' && !Array.isArray(value.ls.timer)) ? value.ls.timer : {}) },
       writer: { ...base.ls.writer, ...((value.ls?.writer && typeof value.ls.writer === 'object' && !Array.isArray(value.ls.writer)) ? value.ls.writer : {}) },
       performance: { ...base.ls.performance, ...((value.ls?.performance && typeof value.ls.performance === 'object' && !Array.isArray(value.ls.performance)) ? value.ls.performance : {}) },
     },

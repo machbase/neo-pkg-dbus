@@ -683,7 +683,8 @@ var require_validator = __commonJS({
         invalid("Job validation limits\uAC00 \uC798\uBABB\uB418\uC5C8\uC2B5\uB2C8\uB2E4.");
       }
       assertObject(value.schedule, "schedule");
-      assertFields(value.schedule, ["intervalMs"], "schedule");
+      assertFields(value.schedule, settings.allowAbsoluteTimer ? ["intervalMs", "useAbsoluteTimer"] : ["intervalMs"], "schedule");
+      if (value.schedule.useAbsoluteTimer !== void 0 && typeof value.schedule.useAbsoluteTimer !== "boolean") invalid("schedule.useAbsoluteTimer\uB294 boolean\uC774\uC5B4\uC57C \uD569\uB2C8\uB2E4.");
       const minimumIntervalMs = Number.isInteger(settings.minimumIntervalMs) ? settings.minimumIntervalMs : 1e3;
       if (!Number.isInteger(value.schedule.intervalMs) || value.schedule.intervalMs < minimumIntervalMs || value.schedule.intervalMs > 864e5) invalid(`schedule.intervalMs\uB294 ${minimumIntervalMs}~86400000 \uC815\uC218\uC5EC\uC57C \uD569\uB2C8\uB2E4.`);
       const intervalCycleMs = Number.isInteger(settings.intervalCycleMs) && settings.intervalCycleMs > 0 ? settings.intervalCycleMs : 1;
@@ -720,6 +721,7 @@ var require_validator = __commonJS({
       assertFields(value.log, ["level", "maxFiles"], "log");
       if (!LOG_LEVELS.has(value.log.level) || !Number.isInteger(value.log.maxFiles) || value.log.maxFiles < 1 || value.log.maxFiles > 1e3) invalid("log \uC124\uC815\uC774 \uC798\uBABB\uB418\uC5C8\uC2B5\uB2C8\uB2E4.");
       const normalized = clone(value);
+      if (settings.allowAbsoluteTimer) normalized.schedule.useAbsoluteTimer = normalized.schedule.useAbsoluteTimer === true;
       normalized.database.table = normalized.database.table.toUpperCase();
       normalized.execution.test = normalized.execution.test === true;
       normalized.methodCalls = methodCalls;
@@ -3080,13 +3082,15 @@ var require_settings_validator = __commonJS({
     function lsPolicy(value) {
       if (value === void 0) return null;
       const interval = value?.interval;
+      const timer = value?.timer === void 0 ? { showAbsoluteTimerOption: true, defaultUseAbsoluteTimer: false } : value.timer;
       const writer = value?.writer;
       const performance = value?.performance;
-      if (!value || typeof value !== "object" || Array.isArray(value) || !interval || typeof interval !== "object" || Array.isArray(interval) || typeof interval.useTaskCycle !== "boolean" || !writer || typeof writer !== "object" || Array.isArray(writer) || !positiveInteger(writer.queueCapacity) || writer.queueCapacity > 1024 || !positiveInteger(writer.flushMaxRows) || writer.flushMaxRows > 65535 || !positiveInteger(writer.flushIntervalMs) || writer.flushIntervalMs > 60 * 60 * 1e3 || !performance || typeof performance !== "object" || Array.isArray(performance) || typeof performance.enabled !== "boolean" || !positiveInteger(performance.jobSampleCount) || !positiveInteger(performance.writerSummaryIntervalMs)) {
+      if (!value || typeof value !== "object" || Array.isArray(value) || !interval || typeof interval !== "object" || Array.isArray(interval) || typeof interval.useTaskCycle !== "boolean" || !timer || typeof timer !== "object" || Array.isArray(timer) || typeof timer.showAbsoluteTimerOption !== "boolean" || typeof timer.defaultUseAbsoluteTimer !== "boolean" || !writer || typeof writer !== "object" || Array.isArray(writer) || !positiveInteger(writer.queueCapacity) || writer.queueCapacity > 1024 || !positiveInteger(writer.flushMaxRows) || writer.flushMaxRows > 65535 || !positiveInteger(writer.flushIntervalMs) || writer.flushIntervalMs > 60 * 60 * 1e3 || !performance || typeof performance !== "object" || Array.isArray(performance) || typeof performance.enabled !== "boolean" || performance.overrunDetailEnabled !== void 0 && typeof performance.overrunDetailEnabled !== "boolean" || !positiveInteger(performance.jobSampleCount) || !positiveInteger(performance.writerSummaryIntervalMs)) {
         throw error("SETTINGS_INVALID", "LS interval \uC124\uC815\uC774 \uC798\uBABB\uB418\uC5C8\uC2B5\uB2C8\uB2E4.");
       }
       return {
         interval: { useTaskCycle: interval.useTaskCycle },
+        timer: { showAbsoluteTimerOption: timer.showAbsoluteTimerOption, defaultUseAbsoluteTimer: timer.defaultUseAbsoluteTimer },
         // Shared writer settings; users do not edit them in the frontend.
         writer: {
           queueCapacity: writer.queueCapacity,
@@ -3099,7 +3103,8 @@ var require_settings_validator = __commonJS({
         performance: {
           enabled: performance.enabled,
           jobSampleCount: performance.jobSampleCount,
-          writerSummaryIntervalMs: performance.writerSummaryIntervalMs
+          writerSummaryIntervalMs: performance.writerSummaryIntervalMs,
+          overrunDetailEnabled: performance.overrunDetailEnabled !== false
         }
       };
     }
@@ -3160,8 +3165,9 @@ var require_settings_loader = __commonJS({
         // is copied into the Go collector policy file but is not exposed in the UI.
         ls: {
           interval: { useTaskCycle: true },
+          timer: { showAbsoluteTimerOption: true, defaultUseAbsoluteTimer: false },
           writer: { queueCapacity: 512, flushMaxRows: 8192, flushIntervalMs: 1e3 },
-          performance: { enabled: true, jobSampleCount: 1e3, writerSummaryIntervalMs: 3e4 }
+          performance: { enabled: true, jobSampleCount: 1e3, writerSummaryIntervalMs: 3e4, overrunDetailEnabled: true }
         }
       };
     }
@@ -3191,6 +3197,7 @@ var require_settings_loader = __commonJS({
           ...base.ls,
           ...value.ls && typeof value.ls === "object" && !Array.isArray(value.ls) ? value.ls : {},
           interval: { ...base.ls.interval, ...value.ls?.interval && typeof value.ls.interval === "object" && !Array.isArray(value.ls.interval) ? value.ls.interval : {} },
+          timer: { ...base.ls.timer, ...value.ls?.timer && typeof value.ls.timer === "object" && !Array.isArray(value.ls.timer) ? value.ls.timer : {} },
           writer: { ...base.ls.writer, ...value.ls?.writer && typeof value.ls.writer === "object" && !Array.isArray(value.ls.writer) ? value.ls.writer : {} },
           performance: { ...base.ls.performance, ...value.ls?.performance && typeof value.ls.performance === "object" && !Array.isArray(value.ls.performance) ? value.ls.performance : {} }
         }
@@ -3780,6 +3787,7 @@ var require_index_repository = __commonJS({
         profileId: document.profileId || "",
         revision: document.revision,
         intervalMs: document.schedule && document.schedule.intervalMs,
+        useAbsoluteTimer: document.schedule && document.schedule.useAbsoluteTimer === true,
         methodCallCount: calls.length,
         tagCount: calls.reduce((total, call) => total + tagsForCall(call).length, 0),
         interfaceIds: [...new Set(calls.map((call) => call.interfaceId).filter(Boolean))].sort(),
@@ -3803,7 +3811,7 @@ var require_index_repository = __commonJS({
       };
     }
     function validateIndex(name, value) {
-      if (!value || typeof value !== "object" || Array.isArray(value) || value.schemaVersion !== INDEX_SCHEMA_VERSION || value.name !== name || !Number.isSafeInteger(value.revision) || value.revision < 1 || !Number.isInteger(value.methodCallCount) || value.methodCallCount < 0 || !Number.isInteger(value.tagCount) || value.tagCount < 0 || typeof value.profileId !== "string" || !Number.isSafeInteger(value.intervalMs) || value.intervalMs < 1 || !Array.isArray(value.interfaceIds) || !Array.isArray(value.methodReferences) || value.interfaceIds.some((item) => typeof item !== "string" || !item) || value.methodReferences.length !== value.methodCallCount || value.methodReferences.some((item) => !item || typeof item !== "object" || Array.isArray(item) || typeof item.interfaceId !== "string" || !item.interfaceId || typeof item.methodId !== "string" || !item.methodId || typeof item.callId !== "string" || !item.callId) || !value.database || typeof value.database !== "object" || Array.isArray(value.database) || ["server", "table", "valueColumn", "stringValueColumn"].some((field) => typeof value.database[field] !== "string") || !value.execution || typeof value.execution !== "object" || Array.isArray(value.execution) || typeof value.execution.savePolicy !== "string" || typeof value.execution.onMethodError !== "string" || value.execution.test !== void 0 && typeof value.execution.test !== "boolean" || typeof value.logLevel !== "string" || !value.logLevel) {
+      if (!value || typeof value !== "object" || Array.isArray(value) || value.schemaVersion !== INDEX_SCHEMA_VERSION || value.name !== name || !Number.isSafeInteger(value.revision) || value.revision < 1 || !Number.isInteger(value.methodCallCount) || value.methodCallCount < 0 || !Number.isInteger(value.tagCount) || value.tagCount < 0 || typeof value.profileId !== "string" || !Number.isSafeInteger(value.intervalMs) || value.intervalMs < 1 || value.useAbsoluteTimer !== void 0 && typeof value.useAbsoluteTimer !== "boolean" || !Array.isArray(value.interfaceIds) || !Array.isArray(value.methodReferences) || value.interfaceIds.some((item) => typeof item !== "string" || !item) || value.methodReferences.length !== value.methodCallCount || value.methodReferences.some((item) => !item || typeof item !== "object" || Array.isArray(item) || typeof item.interfaceId !== "string" || !item.interfaceId || typeof item.methodId !== "string" || !item.methodId || typeof item.callId !== "string" || !item.callId) || !value.database || typeof value.database !== "object" || Array.isArray(value.database) || ["server", "table", "valueColumn", "stringValueColumn"].some((field) => typeof value.database[field] !== "string") || !value.execution || typeof value.execution !== "object" || Array.isArray(value.execution) || typeof value.execution.savePolicy !== "string" || typeof value.execution.onMethodError !== "string" || value.execution.test !== void 0 && typeof value.execution.test !== "boolean" || typeof value.logLevel !== "string" || !value.logLevel) {
         throw error("JOB_INVALID_CONFIG", "Job summary\uB97C \uC77D\uC744 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4. Job\uC744 \uB2E4\uC2DC \uC800\uC7A5\uD558\uC2ED\uC2DC\uC624.", {
           name,
           summaryUnavailable: true
@@ -5257,6 +5265,9 @@ var require_manager = __commonJS({
         return this.productPolicy.maxRequestJsonBytes;
       }
       validateConfig(config, options) {
+        if (this.isLs && options?.creating && config?.schedule && !Object.prototype.hasOwnProperty.call(config.schedule, "useAbsoluteTimer")) {
+          config = { ...config, schedule: { ...config.schedule, useAbsoluteTimer: this.settings().ls.timer.defaultUseAbsoluteTimer } };
+        }
         const productLimits = this.productPolicy.validationLimits || {};
         const enforceInterval = options?.enforceInterval !== false;
         const intervalPolicy = enforceInterval ? resolveIntervalPolicy({ settings: this.settings(), productPolicy: this.productPolicy, dbusFactory: this.dbusFactory }) : { cycleMs: 1 };
@@ -5265,7 +5276,8 @@ var require_manager = __commonJS({
           limits: { ...this.settings().limits, ...productLimits },
           minimumIntervalMs: this.productPolicy.minimumIntervalMs || 1e3,
           intervalCycleMs: intervalPolicy.cycleMs,
-          maxJobJsonBytes: this.productPolicy.maxJobJsonBytes
+          maxJobJsonBytes: this.productPolicy.maxJobJsonBytes,
+          allowAbsoluteTimer: this.isLs
         });
         const productValidated = this.productPolicy.validateProductConfig(validated);
         if (this.isLs && options?.enforceDatabaseProfile !== false && productValidated.database.server !== this.settings().defaults.database.server) {
@@ -5653,7 +5665,7 @@ var require_manager = __commonJS({
           cache[index.database.server] = database;
         }
         return {
-          schedule: { intervalMs: index.intervalMs },
+          schedule: { intervalMs: index.intervalMs, useAbsoluteTimer: index.useAbsoluteTimer === true },
           methodCalls: index.methodReferences.map((reference) => ({
             id: reference.callId,
             interfaceId: reference.interfaceId,
@@ -6680,7 +6692,7 @@ var require_manager = __commonJS({
             let config;
             try {
               holdInterfaces(payload.config);
-              config = this.validateConfig(payload.config);
+              config = this.validateConfig(payload.config, { creating: true });
             } catch (validationError) {
               done(validationError);
               return;
@@ -7262,6 +7274,7 @@ var require_settings_manager = __commonJS({
           callback(null, {
             ...publicSettings,
             provider,
+            ...productPolicy.target === "ls" ? { timerPolicy: settings.ls.timer } : {},
             ...productPolicy.target === "ls" && provider ? { intervalPolicy: resolveIntervalPolicy({ settings, productPolicy }) } : {}
           });
         } catch (loadError) {
@@ -7270,8 +7283,8 @@ var require_settings_manager = __commonJS({
       }
       update(patch, callback) {
         try {
-          if (patch && Object.prototype.hasOwnProperty.call(patch, "provider")) {
-            throw error("SETTINGS_INVALID", "provider\uB294 \uC77D\uAE30 \uC804\uC6A9 build profile\uC785\uB2C8\uB2E4.");
+          if (patch && ["provider", "timerPolicy"].some((key) => Object.prototype.hasOwnProperty.call(patch, key))) {
+            throw error("SETTINGS_INVALID", "provider\uC640 timerPolicy\uB294 \uC77D\uAE30 \uC804\uC6A9\uC785\uB2C8\uB2E4.");
           }
           const current = loadSettings(this.file);
           const productPolicy = loadProductPolicy(this.cgiRoot);
@@ -7293,6 +7306,7 @@ var require_settings_manager = __commonJS({
           const provider = loadProviderProfile(this.cgiRoot);
           callback(null, {
             ...publicSettings,
+            ...productPolicy.target === "ls" ? { timerPolicy: next.ls.timer } : {},
             ...productPolicy.target === "ls" && provider ? { intervalPolicy: resolveIntervalPolicy({ settings: next, productPolicy }) } : {}
           });
         } catch (updateError) {

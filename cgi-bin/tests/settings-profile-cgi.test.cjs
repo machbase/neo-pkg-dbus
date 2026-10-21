@@ -72,6 +72,9 @@ function run() {
   try {
     fs.cpSync(source, root, { recursive: true });
     fs.rmSync(path.join(root, 'provider.json'), { force: true });
+    // This legacy profile fixture explicitly uses the generic policy, even
+    // when the repository's delivery artifacts were most recently built LS.
+    fs.rmSync(path.join(root, 'product'), { recursive: true, force: true });
     fs.rmSync(path.join(root, 'interfaces.d'), { recursive: true, force: true });
     fs.mkdirSync(path.join(root, 'conf.d'), { recursive: true });
     fs.writeFileSync(path.join(root, 'conf.d', 'settings.json'), JSON.stringify({

@@ -96,7 +96,7 @@ test('LS runtime은 password 없는 snapshot과 0600 secret을 분리하고 logi
   assert.equal(JSON.stringify(snapshot).includes('not-for-snapshot'), false);
   assert.equal(snapshot.schemaVersion, 2);
   assert.equal(Object.hasOwn(snapshot, 'jobs'), false);
-  assert.deepEqual(snapshot.performance, { enabled: true, jobSampleCount: 1000, writerSummaryIntervalMs: 30000 });
+  assert.deepEqual(snapshot.performance, { enabled: true, jobSampleCount: 1000, writerSummaryIntervalMs: 30000, overrunDetailEnabled: true });
   assert.equal(secret.servers.local.password, 'not-for-snapshot');
   assert.equal(fs.statSync(files.secret).mode & 0o777, 0o600);
   assert.deepEqual(JSON.parse(fs.readFileSync(files.active, 'utf8')).names, []);

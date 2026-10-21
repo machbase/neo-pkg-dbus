@@ -70,6 +70,33 @@ DBus 호출 timeout은 지원하지 않는다. 호출, decode, validation, DB ap
 
 ## 2. 파일과 식별자
 
+### LS Timer와 Overrun 계측 (CCR-097/098, 2026-10-19 승인)
+
+`schedule.useAbsoluteTimer`는 optional Boolean이며 기존 Job/index의 누락값은 false다.
+LS validator, canonical Job, 경량 index와 status projection에서 이 값을 보존한다.
+Settings는 `ls.timer`의 UI 노출/신규 Job 기본값만 `timerPolicy`로 반환한다.
+false는 기존 Go timer이며 true는 Linux/amd64 monotonic 절대시각 timerfd를 사용한다.
+취소 pipe와 timer를 epoll로 함께 대기하고 Stop은 즉시 pipe를 깨운다. 종료는 취소
+writer goroutine을 join한 뒤 모든 FD를 닫아 FD 재사용과 worker 누수를 방지한다.
+초기 wall-clock epoch 경계를 monotonic deadline에 대응시킨 뒤 interval을 유지한다.
+실행 중 wall clock이 변경되어도 absolute 모드는 기존 monotonic 위상을 유지하며,
+새 wall-clock 경계에 맞추려면 Job을 재시작한다.
+
+CCR-094의 기존 reader 경계 유지 약속은 CCR-098로 대체한다. `readerTotalUs`는
+goroutine 진입부터 Queue 전달까지이고 Queue 예약, plan/pool 준비, 필요시 DBus 연결,
+decode/transform과 enqueue를 포함한다. 첫 priming batch의 durable 대기는 제외한다.
+Queue 예약 실패는 표본 없이 queue-full skip만 기록한다. 통계 누적/전달은 busy 해제
+뒤 수행한다. 따라서 logger backpressure가 다음 Reader의 busy 판정을 막지 않는다.
+
+실행 중 Reader 한 건에 skip 수와 마지막 skip wake 정보를 누적하고 완료 시 동일
+Reader의 total/DBus/parse를 붙인다. Summary당 가장 최근 완료된 한 건만
+`lastOverrun`으로 출력하며 `ls.performance.overrunDetailEnabled:false`는 이 상세만
+억제한다. `timerWakeLagUs`/`readerStartLagUs`는 blocked Reader 자신의 예정시각 기준,
+`skippedTimerWakeLagUs`는 마지막 skipped tick의 예정시각 기준이다. 시간은 μs,
+`skippedAt`은 UTC다. 미계측 DBus/parse는 n/a로 구분한다. 전체 overInterval count는
+상세 한 건의 skippedCycles보다 클 수 있으며 queue-full count는 별개로 유지한다.
+Stop 취소로 완료하지 못한 Reader는 정상 표본에 추가하지 않는다.
+
 ```text
 cgi-bin/
 ├─ neo-collector.js

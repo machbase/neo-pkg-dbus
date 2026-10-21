@@ -16,7 +16,7 @@ const vite = await createServer({
   appType: "custom",
   logLevel: "error",
 });
-const { AppProvider, ConnectedSide, databaseEditBlockingJobs, DbusInterfaceFormModal, DbusInterfacesModal, JobSide, MainRoutes, MemoryRouter } = await vite.ssrLoadModule("/src/App.jsx");
+const { AbsoluteTimerOption, AppProvider, ConnectedSide, databaseEditBlockingJobs, DbusInterfaceFormModal, DbusInterfacesModal, JobSide, MainRoutes, MemoryRouter } = await vite.ssrLoadModule("/src/App.jsx");
 const { default: DataViewerPage } = await vite.ssrLoadModule("/src/data-viewer/DataViewerPage.jsx");
 const { api } = await vite.ssrLoadModule("/src/api.js");
 
@@ -36,6 +36,22 @@ const interfaceValue = (id, overrides = {}) => ({
   methodCount: 0,
   methods: [],
   ...overrides,
+});
+
+test("Absolute timer checkbox changes only the Job choice and hiding preserves saved true", async () => {
+  let renderer;
+  let schedule = { intervalMs: 20, useAbsoluteTimer: true };
+  const onChange = (next) => { schedule = next; };
+  await act(async () => { renderer = create(React.createElement(AbsoluteTimerOption, { policy: { showAbsoluteTimerOption: true }, schedule, onChange })); });
+  const checkbox = renderer.root.findByProps({ 'aria-label': 'Use Absolute-time Timer' });
+  assert.equal(checkbox.props.checked, true);
+  await act(async () => checkbox.props.onChange({ target: { checked: false } }));
+  assert.deepEqual(schedule, { intervalMs: 20, useAbsoluteTimer: false });
+  schedule.useAbsoluteTimer = true;
+  await act(async () => renderer.update(React.createElement(AbsoluteTimerOption, { policy: { showAbsoluteTimerOption: false }, schedule, onChange })));
+  assert.equal(renderer.toJSON(), null);
+  assert.equal(schedule.useAbsoluteTimer, true);
+  await act(async () => renderer.unmount());
 });
 
 function renderModal() {
@@ -231,7 +247,7 @@ test("LS Job Configuration은 retry 입력을 숨기고 정해진 주기마다 �
   assert.match(source, /retryConfigurable as productRetryConfigurable/);
   assert.match(source, /\{productRetryConfigurable \? <>\s*<Field label="Retry Initial/);
   assert.match(lsProduct, /export const retryConfigurable = false;/);
-  assert.match(collector, /if !config\.Execution\.Test && connection == nil \{[\s\S]*connection, connectError = d\.connectDBus\(name\)/);
+  assert.match(collector, /if !config\.Execution\.Test && \*connection == nil \{[\s\S]*\*connection, err = d\.connectDBus\(name\)/);
   assert.doesNotMatch(collector, /func \(d \*daemon\) connectDBus\(ctx context\.Context, config jobConfig/);
 });
 
@@ -458,7 +474,7 @@ test("새 Job의 Database Mapping은 빈 직접 입력 콤보박스로 시작한
 test("새 Job은 Interface 목록이 비어도 Database 기본값을 복사한다", () => {
   const source = fs.readFileSync(new URL("../src/App.jsx", import.meta.url), "utf8");
   assert.match(source, /const server = \(servers \|\| \[\]\)\.find/);
-  assert.match(source, /setConfig\(createDefaultJobConfig\(provider, server \|\| \{ name: databaseServer \}, createInitialMethodCalls\(provider\), intervalDefaultMs\)\)/);
+  assert.match(source, /setConfig\(createDefaultJobConfig\(provider, server \|\| \{ name: databaseServer \}, createInitialMethodCalls\(provider\), intervalDefaultMs, settings\?\.timerPolicy\)\)/);
   assert.match(source, /createDefaultJobConfig\(provider, server/);
 });
 
