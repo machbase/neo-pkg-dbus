@@ -15,6 +15,7 @@
   "ls": {
     "interval": { "useTaskCycle": true },
     "timer": { "showAbsoluteTimerOption": true, "defaultUseAbsoluteTimer": false },
+    "scheduler": { "mode": "conditional", "fifoPriority": 50, "nice": -10, "gomaxprocs": 0 },
     "writer": { "queueCapacity": 512, "flushMaxRows": 8192, "flushIntervalMs": 1000 },
     "performance": { "enabled": true, "jobSampleCount": 1000, "writerSummaryIntervalMs": 30000, "overrunDetailEnabled": true }
   }

@@ -24,6 +24,9 @@ function defaultSettings() {
     ls: {
       interval: { useTaskCycle: true },
       timer: { showAbsoluteTimerOption: true, defaultUseAbsoluteTimer: false },
+      // Restart-only LS scheduling. Go clamps numeric ranges and audits the
+      // requested/applied values; this loader preserves out-of-range integers.
+      scheduler: { mode: 'conditional', fifoPriority: 50, nice: -10, gomaxprocs: 0 },
       writer: { queueCapacity: 512, flushMaxRows: 8192, flushIntervalMs: 1000 },
       performance: { enabled: true, jobSampleCount: 1000, writerSummaryIntervalMs: 30000, overrunDetailEnabled: true },
     },
@@ -59,6 +62,9 @@ function loadSettings(file) {
       ...((value.ls && typeof value.ls === 'object' && !Array.isArray(value.ls)) ? value.ls : {}),
       interval: { ...base.ls.interval, ...((value.ls?.interval && typeof value.ls.interval === 'object' && !Array.isArray(value.ls.interval)) ? value.ls.interval : {}) },
       timer: { ...base.ls.timer, ...((value.ls?.timer && typeof value.ls.timer === 'object' && !Array.isArray(value.ls.timer)) ? value.ls.timer : {}) },
+      scheduler: value.ls?.scheduler === undefined ? base.ls.scheduler
+        : (value.ls.scheduler && typeof value.ls.scheduler === 'object' && !Array.isArray(value.ls.scheduler)
+          ? { ...base.ls.scheduler, ...value.ls.scheduler } : value.ls.scheduler),
       writer: { ...base.ls.writer, ...((value.ls?.writer && typeof value.ls.writer === 'object' && !Array.isArray(value.ls.writer)) ? value.ls.writer : {}) },
       performance: { ...base.ls.performance, ...((value.ls?.performance && typeof value.ls.performance === 'object' && !Array.isArray(value.ls.performance)) ? value.ls.performance : {}) },
     },

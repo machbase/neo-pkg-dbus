@@ -26,6 +26,8 @@ function lsPolicy(value) {
   const timer = value?.timer === undefined
     ? { showAbsoluteTimerOption: true, defaultUseAbsoluteTimer: false } : value.timer;
   const writer = value?.writer;
+  const scheduler = value?.scheduler === undefined
+    ? { mode: 'conditional', fifoPriority: 50, nice: -10, gomaxprocs: 0 } : value.scheduler;
   const performance = value?.performance;
   if (!value || typeof value !== 'object' || Array.isArray(value)
     || !interval || typeof interval !== 'object' || Array.isArray(interval)
@@ -33,6 +35,9 @@ function lsPolicy(value) {
     || !timer || typeof timer !== 'object' || Array.isArray(timer)
     || typeof timer.showAbsoluteTimerOption !== 'boolean'
     || typeof timer.defaultUseAbsoluteTimer !== 'boolean'
+    || !scheduler || typeof scheduler !== 'object' || Array.isArray(scheduler)
+    || !['off', 'conditional', 'force'].includes(scheduler.mode)
+    || !['fifoPriority', 'nice', 'gomaxprocs'].every((key) => Number.isSafeInteger(scheduler[key]))
     || !writer || typeof writer !== 'object' || Array.isArray(writer)
     || !positiveInteger(writer.queueCapacity) || writer.queueCapacity > 1024
     || !positiveInteger(writer.flushMaxRows) || writer.flushMaxRows > 65535
@@ -47,6 +52,10 @@ function lsPolicy(value) {
   return {
     interval: { useTaskCycle: interval.useTaskCycle },
     timer: { showAbsoluteTimerOption: timer.showAbsoluteTimerOption, defaultUseAbsoluteTimer: timer.defaultUseAbsoluteTimer },
+    // FIFO 0..99 (0=OTHER), nice -20..19, GOMAXPROCS 0..64 (0=Go default).
+    // Bounds are applied by Go at daemon restart so configured->applied
+    // corrections remain visible. Modes/types are configuration errors.
+    scheduler: { mode: scheduler.mode, fifoPriority: scheduler.fifoPriority, nice: scheduler.nice, gomaxprocs: scheduler.gomaxprocs },
     // Shared writer settings; users do not edit them in the frontend.
     writer: {
       queueCapacity: writer.queueCapacity,

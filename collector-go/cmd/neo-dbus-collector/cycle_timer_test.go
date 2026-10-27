@@ -65,17 +65,81 @@ func TestCycleTimerDiagnostic(t *testing.T) {
 }
 
 type controlledCycleTick struct{ scheduled, wake time.Time }
-type controlledCycleTimer struct{ ticks chan controlledCycleTick }
+type controlledCycleTimer struct {
+	ticks    chan controlledCycleTick
+	cursor   standardCycleTimer
+	interval time.Duration
+}
 
 func (t *controlledCycleTimer) Wait(ctx context.Context) (time.Time, time.Time, error) {
 	select {
 	case <-ctx.Done():
 		return time.Time{}, time.Time{}, ctx.Err()
 	case tick := <-t.ticks:
+		t.cursor.interval = 20 * time.Millisecond
+		if t.interval > 0 {
+			t.cursor.interval = t.interval
+		}
+		t.cursor.next = tick.scheduled.Add(t.cursor.interval)
 		return tick.scheduled, tick.wake, nil
 	}
 }
-func (*controlledCycleTimer) Close() {}
+func (*controlledCycleTimer) Close()                                {}
+func (t *controlledCycleTimer) SkipPast(now time.Time) timerSkipped { return t.cursor.SkipPast(now) }
+func (t *controlledCycleTimer) TakeSkipped() timerSkipped           { return timerSkipped{} }
+
+func TestSerialReaderStopDoesNotCountDrainTimeAsScheduledSkips(t *testing.T) {
+	config := jobConfig{Execution: execution{Test: true}, Schedule: schedule{IntervalMS: 200}, MethodCalls: []method{{Inputs: json.RawMessage(`{"DataCount":1,"DeviceString":"%MB0"}`), OutputSelections: []selection{{Tags: []tag{{Name: "B0", Multiplier: 1}}}}}}}
+	plan, err := buildReadPlan(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	active := &activeJob{plan: plan, buffers: newRowBufferPool(plan), cancel: cancel}
+	d := readerPerformanceFixture(1000, "test")
+	d.root = t.TempDir()
+	d.queue = make(chan *batch, 2)
+	d.runtime.Jobs = map[string]jobRuntime{}
+	d.logConfigs = map[string]logConfig{"line-a": {Level: "error"}}
+	d.logSummaries = map[string]logSummary{}
+	timer := &controlledCycleTimer{ticks: make(chan controlledCycleTick, 2), interval: 200 * time.Millisecond}
+	done := make(chan struct{})
+	go func() { defer close(done); d.readerWithTimer(ctx, config, "line-a", active, timer) }()
+	now := time.Now()
+	timer.ticks <- controlledCycleTick{now, now}
+	first := <-d.queue
+	first.queueReservation.release()
+	first.releaseRows()
+	first.Finished <- nil
+	active.buffers.mu.Lock()
+	now = time.Now()
+	timer.ticks <- controlledCycleTick{now, now}
+	limit := time.Now().Add(time.Second)
+	for len(d.queueSlots) == 0 && time.Now().Before(limit) {
+		time.Sleep(time.Millisecond)
+	}
+	if len(d.queueSlots) == 0 {
+		active.buffers.mu.Unlock()
+		t.Fatal("reader did not reserve queue")
+	}
+	active.requestStop()
+	// Drain spans a future deadline after Stop. It must release the lease,
+	// without turning that shutdown delay into a user-visible missed read.
+	time.Sleep(250 * time.Millisecond)
+	active.buffers.mu.Unlock()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("stop did not drain")
+	}
+	if d.runtime.Jobs["line-a"].OverrunCount != 0 {
+		t.Fatal("shutdown time counted as skips", d.runtime.Jobs["line-a"])
+	}
+	if len(d.queueSlots) != 0 || active.buffers.dispose() != 0 {
+		t.Fatal("stop leaked buffer/reservation")
+	}
+}
 
 func TestReaderSchedulerAssociatesSkippedTicksWithBlockedBufferPreparation(t *testing.T) {
 	config := jobConfig{Execution: execution{Test: true}, Schedule: schedule{IntervalMS: 20}, MethodCalls: []method{{Inputs: json.RawMessage(`{"DataCount":1,"DeviceString":"%MB0"}`), OutputSelections: []selection{{Tags: []tag{{Name: "B0", Multiplier: 1}}}}}}}
@@ -104,7 +168,7 @@ func TestReaderSchedulerAssociatesSkippedTicksWithBlockedBufferPreparation(t *te
 	first.releaseRows()
 	first.Finished <- nil
 	active.buffers.mu.Lock()
-	second := start.Add(20 * time.Millisecond)
+	second := time.Now().Add(-2 * time.Millisecond)
 	timer.ticks <- controlledCycleTick{second, second.Add(2 * time.Millisecond)}
 	limit := time.Now().Add(time.Second)
 	for len(d.queueSlots) == 0 && time.Now().Before(limit) {
@@ -114,19 +178,9 @@ func TestReaderSchedulerAssociatesSkippedTicksWithBlockedBufferPreparation(t *te
 		active.buffers.mu.Unlock()
 		t.Fatal("reader did not reserve queue")
 	}
-	for n := 2; n <= 3; n++ {
-		s := start.Add(time.Duration(n) * 20 * time.Millisecond)
-		timer.ticks <- controlledCycleTick{s, s.Add(3 * time.Millisecond)}
-	}
-	for time.Now().Before(limit) {
-		d.mu.Lock()
-		count := d.runtime.Jobs["line-a"].OverrunCount
-		d.mu.Unlock()
-		if count == 2 {
-			break
-		}
-		time.Sleep(time.Millisecond)
-	}
+	// The serial reader cannot consume another tick while blocked. It must
+	// count actual elapsed boundaries when it advances the timer afterward.
+	time.Sleep(65 * time.Millisecond)
 	active.buffers.mu.Unlock()
 	secondBatch := <-d.queue
 	secondBatch.queueReservation.release()
@@ -138,11 +192,11 @@ func TestReaderSchedulerAssociatesSkippedTicksWithBlockedBufferPreparation(t *te
 	case <-time.After(time.Second):
 		t.Fatal("missing reader summary")
 	}
-	if record.Summary.OverIntervalCount != 2 || record.Summary.LastOverrun == nil {
+	if record.Summary.OverIntervalCount < 2 || record.Summary.LastOverrun == nil {
 		t.Fatalf("summary=%+v", record.Summary)
 	}
 	detail := record.Summary.LastOverrun
-	if detail.SkippedCycles != 2 || detail.TimerWakeLagUS != 2000 || detail.SkippedTimerWakeLagUS != 3000 || detail.DBusMeasured {
+	if detail.SkippedCycles < 2 || detail.TimerWakeLagUS != 2000 || !detail.MissingSkippedWake || detail.ReaderTotalUS < 60000 || detail.DBusMeasured {
 		t.Fatalf("detail=%+v", detail)
 	}
 	cancel()
@@ -156,7 +210,7 @@ func TestReaderSchedulerAssociatesSkippedTicksWithBlockedBufferPreparation(t *te
 	}
 }
 
-func TestPerformanceLogBackpressureDoesNotKeepCompletedReaderBusy(t *testing.T) {
+func TestPerformanceLogBackpressureKeepsSerialReaderBoundedAndDrains(t *testing.T) {
 	config := jobConfig{Execution: execution{Test: true}, Schedule: schedule{IntervalMS: 20}, MethodCalls: []method{{Inputs: json.RawMessage(`{"DataCount":1,"DeviceString":"%MB0"}`), OutputSelections: []selection{{Tags: []tag{{Name: "B0", Multiplier: 1}}}}}}}
 	plan, err := buildReadPlan(config)
 	if err != nil {
@@ -176,7 +230,7 @@ func TestPerformanceLogBackpressureDoesNotKeepCompletedReaderBusy(t *testing.T) 
 	defer cancel()
 	done := make(chan struct{})
 	go func() { defer close(done); d.readerWithTimer(ctx, config, "line-a", active, timer) }()
-	for n := 0; n < 3; n++ {
+	for n := 0; n < 2; n++ {
 		d.performanceMu.Lock()
 		previous := d.jobPerformance["line-a"]
 		d.performanceMu.Unlock()
@@ -210,9 +264,27 @@ func TestPerformanceLogBackpressureDoesNotKeepCompletedReaderBusy(t *testing.T) 
 			t.Fatal("reader did not detach its summary")
 		}
 	}
-	// One summary filled the channel; the other two workers are waiting to
-	// submit. Their readers have already released busy, allowing all 3 reads.
-	for n := 0; n < 3; n++ {
+	// One queued summary and one blocked producer are bounded. The completed
+	// batch was already handed to the writer, but this Job cannot create an
+	// unbounded set of goroutines while its logging worker is stalled.
+	now := time.Now()
+	timer.ticks <- controlledCycleTick{now, now}
+	select {
+	case <-d.queue:
+		t.Fatal("serial reader bypassed logger backpressure")
+	case <-time.After(10 * time.Millisecond):
+	}
+	<-d.performanceLogs
+	var third *batch
+	select {
+	case third = <-d.queue:
+	case <-time.After(time.Second):
+		t.Fatal("reader did not resume after logging drained")
+	}
+	third.queueReservation.release()
+	third.releaseRows()
+	active.work.Done()
+	for n := 0; n < 2; n++ {
 		select {
 		case <-d.performanceLogs:
 		case <-time.After(time.Second):
@@ -224,9 +296,6 @@ func TestPerformanceLogBackpressureDoesNotKeepCompletedReaderBusy(t *testing.T) 
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("reader did not drain")
-	}
-	if d.runtime.Jobs["line-a"].OverrunCount != 0 {
-		t.Fatal("logging caused an overrun")
 	}
 	if active.buffers.dispose() != 0 {
 		t.Fatal("buffer leaked")
@@ -306,40 +375,24 @@ func TestCycleTimersCancelLongWaitWithoutFDOrWorkerLeak(t *testing.T) {
 }
 
 func TestOverrunDetailRetainsOnlyTheBlockedReaderAndLatestSkip(t *testing.T) {
-	var cycle readerCycle
 	scheduled := time.Unix(0, 0)
-	if !cycle.begin(scheduled, scheduled.Add(time.Millisecond), 20*time.Millisecond) {
-		t.Fatal("first reader refused")
-	}
-	cycle.started(scheduled.Add(1500 * time.Microsecond))
-	for n := 1; n <= 3; n++ {
-		s := scheduled.Add(time.Duration(n) * 20 * time.Millisecond)
-		if cycle.begin(s, s.Add(time.Duration(n)*time.Millisecond), 20*time.Millisecond) {
-			t.Fatal("overlap admitted")
-		}
-	}
 	timing := readTiming{ReaderTotal: 65 * time.Millisecond, DBus: 60 * time.Millisecond, Parse: time.Millisecond, DBusMeasured: true, ParseMeasured: true, ReaderTotalMeasured: true}
-	detail := cycle.finish(timing)
-	if detail.SkippedCycles != 3 || detail.SkippedTimerWakeLagUS != 3000 || detail.ReaderStartLagUS != 1500 || detail.DBusUS != 60000 {
-		t.Fatalf("detail=%+v", detail)
-	}
 	d := readerPerformanceFixture(1, "dbus")
+	d.root = t.TempDir()
+	d.runtime.Jobs = map[string]jobRuntime{}
+	d.logConfigs = map[string]logConfig{"line-a": {Level: "error"}}
+	d.logSummaries = map[string]logSummary{}
+	cycle := serialCycleDetail{scheduled: scheduled, wake: scheduled.Add(time.Millisecond), started: scheduled.Add(1500 * time.Microsecond), interval: 20 * time.Millisecond, result: readResult{attempt: true, timing: timing}, normal: true}
 	for n := 0; n < 3; n++ {
-		d.recordPerformanceSkip("line-a", false)
+		last := scheduled.Add(time.Duration(n+1) * 20 * time.Millisecond)
+		d.recordInlineSkipped("line-a", timerSkipped{Count: 1, Last: last}, last.Add(time.Millisecond), &cycle)
 	}
-	d.recordReadResult("line-a", readResult{attempt: true, timing: timing}, detail)
+	d.recordReadResult("line-a", cycle.result)
 	record := readerPerformanceRecord(t, d)
-	for _, part := range []string{"overIntervalCount=3", "lastOverrun[", "skippedCycles=3", "readerTotalUs=65000", "timerWakeLagUs=1000", "skippedTimerWakeLagUs=3000", "dbusUs=60000"} {
+	for _, part := range []string{"overIntervalCount=3", "lastOverrun[", "skippedCycles=3", "readerTotalUs=65000", "timerWakeLagUs=1000", "skippedTimerWakeLagUs=n/a", "detectedLagUs=1000", "dbusUs=60000"} {
 		if !strings.Contains(formatJobPerformance(record.Name, record.Summary), part) {
 			t.Fatal(part)
 		}
-	}
-	if !cycle.begin(scheduled.Add(time.Second), scheduled.Add(time.Second), 20*time.Millisecond) {
-		t.Fatal("busy not released")
-	}
-	cycle.started(scheduled.Add(time.Second))
-	if cycle.finish(timing) != nil {
-		t.Fatal("old skip leaked into clean reader")
 	}
 	d.recordReadResult("line-a", readResult{attempt: true, timing: timing})
 	if readerPerformanceRecord(t, d).Summary.LastOverrun != nil {

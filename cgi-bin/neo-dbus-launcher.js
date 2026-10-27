@@ -39,6 +39,13 @@ function daemonCommand(externalRoot, parentPid) {
 
 function run(cgiRoot) {
   const virtualRoot = cgiRoot || defaultCgiRoot();
+  // A service restart is the application boundary for internal tuning. Always
+  // refresh the policy snapshot here, even if an old go-collector.json exists.
+  // Logical Job operations do not hot-apply scheduler/priority changes.
+  // The bundled runtime resolves nested CommonJS imports for JSH. Loading the
+  // source module directly would leave its ../ dependencies unresolved.
+  const { refreshLsPolicy } = require(path.join(virtualRoot, 'runtime.js'));
+  refreshLsPolicy(virtualRoot);
   const externalRoot = externalPath(virtualRoot);
   // The Neo service controller owns this JSH process. Pass its PID to the Go
   // collector so an abrupt JSH/service exit cannot leave an orphan collector.

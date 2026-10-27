@@ -22,6 +22,7 @@ type absoluteCycleTimer struct {
 	stop             chan struct{}
 	stopped          chan struct{}
 	once             sync.Once
+	skipped          timerSkipped
 }
 
 func monotonicNS() (int64, error) {
@@ -82,13 +83,7 @@ func (t *absoluteCycleTimer) Wait(ctx context.Context) (time.Time, time.Time, er
 	if err := ctx.Err(); err != nil {
 		return time.Time{}, time.Time{}, err
 	}
-	now, err := monotonicNS()
-	if err != nil {
-		return time.Time{}, time.Time{}, err
-	}
-	if t.nextNS <= now {
-		t.nextNS += ((now-t.nextNS)/int64(t.interval) + 1) * int64(t.interval)
-	}
+	t.skipped = mergeTimerSkipped(t.skipped, t.SkipPast(time.Now()))
 	deadline := t.nextNS
 	// Linux/amd64 struct itimerspec: interval, value. One-shot absolute expiry.
 	spec := [2]syscall.Timespec{{}, syscall.NsecToTimespec(deadline)}
@@ -124,6 +119,22 @@ func (t *absoluteCycleTimer) Wait(ctx context.Context) (time.Time, time.Time, er
 			return t.anchor.Add(time.Duration(deadline - t.anchorNS)), wake, nil
 		}
 	}
+}
+
+func (t *absoluteCycleTimer) SkipPast(now time.Time) timerSkipped {
+	mono := t.anchorNS + now.Sub(t.anchor).Nanoseconds()
+	if t.nextNS > mono {
+		return timerSkipped{}
+	}
+	count := (mono-t.nextNS)/int64(t.interval) + 1
+	last := t.nextNS + (count-1)*int64(t.interval)
+	t.nextNS += count * int64(t.interval)
+	return timerSkipped{Count: uint64(count), Last: t.anchor.Add(time.Duration(last - t.anchorNS))}
+}
+func (t *absoluteCycleTimer) TakeSkipped() timerSkipped {
+	s := t.skipped
+	t.skipped = timerSkipped{}
+	return s
 }
 
 // Close runs after Wait has returned. Join the cancellation writer before

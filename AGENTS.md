@@ -22,3 +22,9 @@
 - LS 빌드 뒤 인자 없는 `npm run build`를 실행해 generic으로 되돌리지 않는다. 현재 인자 없는 빌드는 generic을 선택하므로 LS target을 명시한다.
 - generic source는 향후 사용을 위해 보관만 한다. 별도 요청 전에는 generic 전용 수정·검증·완성 산출물 준비를 작업 범위에 넣지 않는다.
 - Git commit/push/merge, 버전 변경, ZIP 생성과 release는 각각 사용자 지시를 기다린다.
+
+# PLC 시험 CPU 기준
+
+- 2026-10-27 사용자 지시에 따라 이후 테스트 PLC의 Docker CPU 기본값은 `--cpuset-cpus 6,7`로 한다. 다른 CPU를 명시한 시험은 해당 지시를 따른다.
+- 이전 CPU 4·5 측정 기록은 그대로 보존하고, CPU 6·7 결과와 구분한다. CPU 번호 고정은 전용 CPU 격리를 뜻하지 않는다.
+- PLC 제어 프로세스·스레드의 affinity나 우선순위는 시험을 위해 임의로 변경하지 않는다.
