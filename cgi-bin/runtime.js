@@ -4,217 +4,6 @@ var __commonJS = (cb, mod) => function __require() {
   return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;
 };
 
-// cgi-bin/src/log/sanitize.js
-var require_sanitize = __commonJS({
-  "cgi-bin/src/log/sanitize.js"(exports2, module2) {
-    "use strict";
-    var SENSITIVE_KEYS = /* @__PURE__ */ new Set([
-      "password",
-      "passwd",
-      "token",
-      "authorization",
-      "cookie",
-      "secret",
-      "body",
-      "rawbody",
-      "raw_body",
-      "config",
-      "request",
-      "response"
-    ]);
-    function sensitiveKey(key) {
-      return SENSITIVE_KEYS.has(String(key || "").toLowerCase());
-    }
-    function sanitizeFields(fields) {
-      const result = {};
-      Object.keys(fields || {}).forEach((key) => {
-        const value = fields[key];
-        if (sensitiveKey(key)) result[key] = "[REDACTED]";
-        else if (typeof value === "string") result[key] = sanitizeText(value);
-        else if (value && typeof value === "object") result[key] = "[OBJECT]";
-        else result[key] = value;
-      });
-      return result;
-    }
-    function sanitizeText(value) {
-      let text = String(value === void 0 || value === null ? "" : value);
-      text = text.replace(/("(?:password|passwd|token|authorization|cookie|secret|body|rawBody|raw_body)"\s*:\s*)"(?:\\.|[^"\\])*"/gi, '$1"[REDACTED]"');
-      text = text.replace(/("(?:config|request|response)"\s*:\s*)\{.*\}/gi, '$1"[REDACTED]"');
-      text = text.replace(/\b(password|passwd|token|authorization|cookie|secret|body|rawBody|raw_body|config)\s*([:=])\s*((?:"(?:\\.|[^"\\])*")|(?:'(?:\\.|[^'\\])*')|[^\s,;)]+)/gi, "$1$2[REDACTED]");
-      text = text.replace(/\bBearer\s+[A-Za-z0-9._~+\/-]+=*/gi, "Bearer [REDACTED]");
-      text = text.replace(/\b([a-z][a-z0-9+.-]*:\/\/)([^\s:/@]+):([^\s/@]+)@/gi, "$1$2:[REDACTED]@");
-      return text;
-    }
-    module2.exports = { sanitizeFields, sanitizeText, sensitiveKey };
-  }
-});
-
-// cgi-bin/src/cgi/http.js
-var require_http = __commonJS({
-  "cgi-bin/src/cgi/http.js"(exports2, module2) {
-    "use strict";
-    var process = require("process");
-    var { sanitizeText, sensitiveKey } = require_sanitize();
-    var MAX_REQUEST_JSON_BYTES = 512 * 1024;
-    var MAX_QUERY_BYTES = 128 * 1024;
-    function utf8Bytes(value) {
-      if (typeof Buffer !== "undefined" && Buffer.byteLength) return Buffer.byteLength(value, "utf8");
-      return unescape(encodeURIComponent(value)).length;
-    }
-    function parseQuery(queryString, options) {
-      const settings = options || {};
-      const arrayKeys = new Set(settings.arrayKeys || []);
-      const source = queryString === void 0 ? String(process.env.get && process.env.get("QUERY_STRING") || "") : String(queryString || "");
-      if (utf8Bytes(source) > (settings.maxBytes || MAX_QUERY_BYTES)) {
-        const failure = requestError("query string\uC774 \uB108\uBB34 \uD07D\uB2C8\uB2E4.");
-        failure.code = "REQUEST_TOO_LARGE";
-        throw failure;
-      }
-      const result = {};
-      source.split("&").forEach((part) => {
-        if (!part) return;
-        const pair = part.split("=");
-        const key = decodeURIComponent(String(pair.shift() || "").replace(/\+/g, " "));
-        const value = decodeURIComponent(pair.join("=").replace(/\+/g, " "));
-        if (!key) return;
-        if (arrayKeys.has(key)) {
-          if (!Array.isArray(result[key])) result[key] = [];
-          result[key].push(value);
-        } else result[key] = value;
-      });
-      return result;
-    }
-    function readQuery(queryString, options) {
-      try {
-        return { ok: true, value: parseQuery(queryString, options) };
-      } catch (failure) {
-        return {
-          ok: false,
-          error: failure && failure.code === "REQUEST_TOO_LARGE" ? failure : requestError("query string \uD615\uC2DD\uC774 \uC798\uBABB\uB418\uC5C8\uC2B5\uB2C8\uB2E4.")
-        };
-      }
-    }
-    function readBody(rawBody, options) {
-      try {
-        const raw = rawBody === void 0 ? process.stdin.read() : rawBody;
-        const maximum = options && options.maxBytes ? options.maxBytes : MAX_REQUEST_JSON_BYTES;
-        if (utf8Bytes(String(raw || "")) > maximum) {
-          const failure = requestError("JSON body\uAC00 \uB108\uBB34 \uD07D\uB2C8\uB2E4.", { maximum });
-          failure.code = "REQUEST_TOO_LARGE";
-          throw failure;
-        }
-        return { ok: true, value: raw ? JSON.parse(raw) : {} };
-      } catch (failure) {
-        return {
-          ok: false,
-          error: failure && failure.code === "REQUEST_TOO_LARGE" ? failure : requestError("JSON body \uD615\uC2DD\uC774 \uC798\uBABB\uB418\uC5C8\uC2B5\uB2C8\uB2E4.")
-        };
-      }
-    }
-    function requestError(reason, details) {
-      const error = new Error(reason);
-      error.code = "REQUEST_INVALID";
-      error.details = details || {};
-      return error;
-    }
-    function requireObject(value, label) {
-      if (!value || typeof value !== "object" || Array.isArray(value)) {
-        throw requestError(`${label || "request"}\uB294 JSON \uAC1D\uCCB4\uC5EC\uC57C \uD569\uB2C8\uB2E4.`);
-      }
-      return value;
-    }
-    function requireStringFields(value, fields) {
-      const object = requireObject(value, "request");
-      const missing = fields.filter((field) => typeof object[field] !== "string" || !object[field]);
-      if (missing.length) throw requestError("\uD544\uC218 \uBB38\uC790\uC5F4 \uAC12\uC774 \uC5C6\uC2B5\uB2C8\uB2E4.", { fields: missing });
-      return object;
-    }
-    function createFactory(factory) {
-      try {
-        return { ok: true, value: factory() };
-      } catch (factoryError) {
-        return { ok: false, error: factoryError };
-      }
-    }
-    function reply(status, payload) {
-      process.stdout.write("Content-Type: application/json\r\n");
-      process.stdout.write(`Status: ${status}\r
-`);
-      process.stdout.write("\r\n");
-      process.stdout.write(JSON.stringify(payload));
-    }
-    function fail(error, status) {
-      const payload = {
-        ok: false,
-        code: error && error.code || "INTERNAL_ERROR",
-        reason: sanitizeText(error && error.message ? error.message : String(error || "unknown error")),
-        details: sanitizeDetails(error && error.details || {})
-      };
-      reply(status || statusForError(error), payload);
-    }
-    function statusForError(error) {
-      const code = String(error && error.code || "");
-      if (code === "REQUEST_TOO_LARGE" || code === "LOG_TOO_LARGE") return 413;
-      if (code === "DB_SERVER_CREATE_LOCKED") return 409;
-      if (code === "JOB_REVISION_REQUIRED" || code === "TIMEZONE_UNSUPPORTED" || code === "JOB_DATA_SOURCE_MISMATCH") return 400;
-      if (code === "RUNTIME_VERSION_INVALID") return 503;
-      if (/_INVALID$/.test(code) || code === "SETTINGS_INVALID") return 400;
-      if (/_NOT_FOUND$/.test(code)) return 404;
-      if (/_ALREADY_EXISTS$/.test(code) || /_IN_USE/.test(code) || /_READ_ONLY$/.test(code) || /_DEFAULT$/.test(code) || /_NOT_AVAILABLE$/.test(code) || code === "JOB_INVALID_CONFIG" || code === "DBUS_ARGUMENT_UNSUPPORTED" || code === "JOB_NAME_IMMUTABLE" || code === "JOB_CONFLICT" || code === "JOB_RUNNING" || code === "LOG_HOT_APPLY_NOT_AVAILABLE" || code === "SERVICE_NOT_INSTALLED" || code === "SERVICE_ALREADY_INSTALLED" || code === "SERVICE_NOT_RUNNING") return 409;
-      if (/CONTROLLER|UNAVAILABLE|UNKNOWN/.test(code)) return 503;
-      if (error && error.kind === "not_found") return 404;
-      if (error && error.kind === "conflict") return 409;
-      if (error && error.kind === "controller") return 503;
-      return 500;
-    }
-    function sanitizeDetails(value, key) {
-      if (sensitiveKey(key)) return "[REDACTED]";
-      if (Array.isArray(value)) return value.slice(0, 100).map((item) => sanitizeDetails(item));
-      if (value && typeof value === "object") {
-        const result = {};
-        Object.keys(value).slice(0, 100).forEach((name) => {
-          result[name] = sanitizeDetails(value[name], name);
-        });
-        return result;
-      }
-      return typeof value === "string" ? sanitizeText(value) : value;
-    }
-    module2.exports = {
-      parseQuery,
-      readQuery,
-      readBody,
-      reply,
-      fail,
-      statusForError,
-      requestError,
-      requireObject,
-      requireStringFields,
-      createFactory,
-      MAX_QUERY_BYTES,
-      MAX_REQUEST_JSON_BYTES
-    };
-  }
-});
-
-// cgi-bin/src/config/errors.js
-var require_errors = __commonJS({
-  "cgi-bin/src/config/errors.js"(exports2, module2) {
-    "use strict";
-    var ConfigError = class extends Error {
-      constructor(code, reason, details) {
-        super(reason);
-        this.name = "ConfigError";
-        this.code = code;
-        this.details = details || {};
-      }
-    };
-    function error(code, reason, details) {
-      return new ConfigError(code, reason, details);
-    }
-    module2.exports = { ConfigError, error };
-  }
-});
-
 // cgi-bin/src/config/atomic-json.js
 var require_atomic_json = __commonJS({
   "cgi-bin/src/config/atomic-json.js"(exports2, module2) {
@@ -269,619 +58,22 @@ var require_atomic_json = __commonJS({
   }
 });
 
-// cgi-bin/src/dbus/types.js
-var require_types = __commonJS({
-  "cgi-bin/src/dbus/types.js"(exports2, module2) {
+// cgi-bin/src/config/errors.js
+var require_errors = __commonJS({
+  "cgi-bin/src/config/errors.js"(exports2, module2) {
     "use strict";
-    var OBJECT_PATH = /^\/(?:[A-Za-z0-9_]+(?:\/[A-Za-z0-9_]+)*)?$/;
-    var INTEGER_LIMITS = {
-      byte: [0n, 255n],
-      uint16: [0n, 65535n],
-      uint32: [0n, 4294967295n],
-      uint64: [0n, 18446744073709551615n],
-      int16: [-32768n, 32767n],
-      int32: [-2147483648n, 2147483647n],
-      int64: [-9223372036854775808n, 9223372036854775807n]
-    };
-    var BASIC_TYPES = /* @__PURE__ */ new Set(["byte", "boolean", "int16", "uint16", "int32", "uint32", "int64", "uint64", "double", "unix-fd", "string", "object-path", "signature", "variant"]);
-    var DICT_KEY_TYPES = /* @__PURE__ */ new Set(["byte", "boolean", "int16", "uint16", "int32", "uint32", "int64", "uint64", "double", "unix-fd", "string", "object-path", "signature"]);
-    var BASIC_SIGNATURE_TYPES = new Set("ybnqiuxthdsoghv".split(""));
-    var SIGNATURE_TYPE_MAP = { y: "byte", b: "boolean", n: "int16", q: "uint16", i: "int32", u: "uint32", x: "int64", t: "uint64", d: "double", h: "unix-fd", s: "string", o: "object-path", g: "signature", v: "variant" };
-    var TYPE_SIGNATURE_MAP = Object.fromEntries(Object.entries(SIGNATURE_TYPE_MAP).map(([signature, type]) => [type, signature]));
-    function own(value, key) {
-      return Object.prototype.hasOwnProperty.call(value, key);
-    }
-    function object(value) {
-      return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-    }
-    function sameFields(value, fields) {
-      return Object.keys(value).length === fields.length && fields.every((field) => own(value, field));
-    }
-    function parseSignatureType(value, offset, depth) {
-      if (depth > 32 || offset >= value.length) return -1;
-      const type = value[offset];
-      if (BASIC_SIGNATURE_TYPES.has(type)) return offset + 1;
-      if (type === "a") {
-        if (value[offset + 1] === "{") {
-          const key = value[offset + 2];
-          if (!BASIC_SIGNATURE_TYPES.has(key) || key === "v") return -1;
-          const afterValue = parseSignatureType(value, offset + 3, depth + 1);
-          return afterValue >= 0 && value[afterValue] === "}" ? afterValue + 1 : -1;
-        }
-        return parseSignatureType(value, offset + 1, depth + 1);
-      }
-      if (type === "(") {
-        let cursor = offset + 1;
-        const first = cursor;
-        while (cursor < value.length && value[cursor] !== ")") {
-          cursor = parseSignatureType(value, cursor, depth + 1);
-          if (cursor < 0) return -1;
-        }
-        return cursor > first && value[cursor] === ")" ? cursor + 1 : -1;
-      }
-      return -1;
-    }
-    function validSignature(value) {
-      if (typeof value !== "string" || value.length > 255) return false;
-      let offset = 0;
-      while (offset < value.length) {
-        offset = parseSignatureType(value, offset, 0);
-        if (offset < 0) return false;
-      }
-      return true;
-    }
-    function parseType(value, offset, depth, allowDictEntry) {
-      if (depth > 32 || offset >= value.length) return null;
-      const token = value[offset];
-      if (own(SIGNATURE_TYPE_MAP, token)) return { value: SIGNATURE_TYPE_MAP[token], offset: offset + 1 };
-      if (token === "a") {
-        if (value[offset + 1] === "{") {
-          const keyToken = value[offset + 2];
-          if (!own(SIGNATURE_TYPE_MAP, keyToken) || keyToken === "v") return null;
-          const nested = parseType(value, offset + 3, depth + 1, false);
-          if (!nested || value[nested.offset] !== "}") return null;
-          return { value: { type: "array", element: { type: "dict-entry", key: SIGNATURE_TYPE_MAP[keyToken], value: nested.value } }, offset: nested.offset + 1 };
-        }
-        const element = parseType(value, offset + 1, depth + 1, true);
-        return element ? { value: { type: "array", element: element.value }, offset: element.offset } : null;
-      }
-      if (token === "(") {
-        const fields = [];
-        let cursor = offset + 1;
-        while (cursor < value.length && value[cursor] !== ")") {
-          const field = parseType(value, cursor, depth + 1, false);
-          if (!field) return null;
-          fields.push(field.value);
-          cursor = field.offset;
-        }
-        return fields.length && value[cursor] === ")" ? { value: { type: "struct", fields }, offset: cursor + 1 } : null;
-      }
-      if (allowDictEntry && token === "{") return null;
-      return null;
-    }
-    function typeFromSignature(value) {
-      if (typeof value !== "string" || !value || value.length > 255) return null;
-      const parsed = parseType(value, 0, 0, false);
-      return parsed && parsed.offset === value.length ? parsed.value : null;
-    }
-    function signatureFromType(type) {
-      const normalized = normalizeType(type, 0, true);
-      if (normalized === null) return null;
-      if (typeof normalized === "string") return TYPE_SIGNATURE_MAP[normalized] || null;
-      if (normalized.type === "array") {
-        const element = signatureFromType(normalized.element);
-        return element ? `a${element}` : null;
-      }
-      if (normalized.type === "dict-entry") {
-        const key = TYPE_SIGNATURE_MAP[normalized.key];
-        const value = signatureFromType(normalized.value);
-        return key && value ? `{${key}${value}}` : null;
-      }
-      const fields = normalized.fields.map(signatureFromType);
-      return fields.every(Boolean) ? `(${fields.join("")})` : null;
-    }
-    function normalizeType(value, depth, allowDictEntry) {
-      if ((depth || 0) > 32) return null;
-      if (typeof value === "string") return BASIC_TYPES.has(value) ? value : null;
-      if (!object(value) || typeof value.type !== "string") return null;
-      if (value.type === "array" && sameFields(value, ["type", "element"])) {
-        const element = normalizeType(value.element, (depth || 0) + 1, true);
-        return element === null ? null : { type: "array", element };
-      }
-      if (allowDictEntry && value.type === "dict-entry" && sameFields(value, ["type", "key", "value"])) {
-        const nested = normalizeType(value.value, (depth || 0) + 1, false);
-        return typeof value.key === "string" && DICT_KEY_TYPES.has(value.key) && nested !== null ? { type: "dict-entry", key: value.key, value: nested } : null;
-      }
-      if (value.type === "struct" && sameFields(value, ["type", "fields"]) && Array.isArray(value.fields) && value.fields.length) {
-        const fields = value.fields.map((field) => normalizeType(field, (depth || 0) + 1, false));
-        return fields.some((field) => field === null) ? null : { type: "struct", fields };
-      }
-      return null;
-    }
-    function typeName(type) {
-      return typeof type === "string" ? type : type && type.type ? type.type : "unknown";
-    }
-    function integerValue(type, value) {
-      try {
-        const integer = typeof value === "bigint" ? value : typeof value === "number" && Number.isSafeInteger(value) ? BigInt(value) : typeof value === "string" && /^-?(?:0|[1-9]\d*)$/.test(value) ? BigInt(value) : null;
-        const range = INTEGER_LIMITS[type];
-        return integer !== null && integer >= range[0] && integer <= range[1];
-      } catch (_) {
-        return false;
-      }
-    }
-    function isValueValid(type, value) {
-      const normalized = normalizeType(type, 0, true);
-      if (normalized === null || value === void 0 || value === null) return false;
-      if (typeof normalized === "object") {
-        if (normalized.type === "array") return Array.isArray(value) && value.every((item) => isValueValid(normalized.element, item));
-        if (normalized.type === "dict-entry") return object(value) && sameFields(value, ["key", "value"]) && isValueValid(normalized.key, value.key) && isValueValid(normalized.value, value.value);
-        return Array.isArray(value) && value.length === normalized.fields.length && normalized.fields.every((field, index) => isValueValid(field, value[index]));
-      }
-      if (own(INTEGER_LIMITS, normalized)) return integerValue(normalized, value);
-      if (normalized === "double") return typeof value === "number" && Number.isFinite(value);
-      if (normalized === "boolean") return typeof value === "boolean";
-      if (normalized === "string") return typeof value === "string";
-      if (normalized === "object-path") return typeof value === "string" && OBJECT_PATH.test(value);
-      if (normalized === "signature") return validSignature(value);
-      if (normalized === "unix-fd") return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
-      return object(value) && sameFields(value, ["type", "value"]) && normalizeType(value.type) !== null && isValueValid(value.type, value.value);
-    }
-    function neoArgument(type, value) {
-      const normalized = normalizeType(type);
-      if (normalized === null || !isValueValid(normalized, value)) return null;
-      if (typeof normalized === "object" || normalized === "variant" || normalized === "unix-fd") return { unsupported: typeName(normalized) };
-      const neoType = normalized === "boolean" ? "bool" : normalized === "object-path" ? "objectpath" : normalized;
-      const text = own(INTEGER_LIMITS, normalized) ? BigInt(value).toString() : String(value);
-      return { value: `${neoType}:${text}` };
-    }
-    module2.exports = { normalizeType, typeName, isValueValid, neoArgument, validSignature, typeFromSignature, signatureFromType };
-  }
-});
-
-// cgi-bin/src/jobs/validator.js
-var require_validator = __commonJS({
-  "cgi-bin/src/jobs/validator.js"(exports2, module2) {
-    "use strict";
-    var { error } = require_errors();
-    var { isValueValid, normalizeType } = require_types();
-    var MAX_JOB_JSON_BYTES = 512 * 1024;
-    var MAX_METHOD_CALLS = 128;
-    var MAX_JOB_NAME_LENGTH = 100;
-    var MAX_TAG_NAME_LENGTH = 100;
-    var JOB_NAME = /^[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?$/;
-    var CALL_ID = /^[A-Za-z0-9](?:[A-Za-z0-9_-]*[A-Za-z0-9])?$/;
-    var SAFE_NAME = /^[A-Za-z0-9_][A-Za-z0-9_-]*$/;
-    var SQL_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_$]*$/;
-    var INTEGER_TYPES = /* @__PURE__ */ new Set(["byte", "uint16", "uint32", "uint64", "int16", "int32", "int64"]);
-    var WIDE_INTEGER_TYPES = /* @__PURE__ */ new Set(["uint64", "int64"]);
-    var NUMBER_TYPES = /* @__PURE__ */ new Set([...INTEGER_TYPES, "double"]);
-    var NATIVE_SCALAR_OUTPUT_TYPES = /* @__PURE__ */ new Set([
-      "byte",
-      "uint16",
-      "uint32",
-      "uint64",
-      "int16",
-      "int32",
-      "int64",
-      "double",
-      "boolean",
-      "string",
-      "object-path",
-      "signature"
-    ]);
-    var INTEGER_RANGES = {
-      byte: [0, 255],
-      uint8: [0, 255],
-      uint16: [0, 65535],
-      uint32: [0, 4294967295],
-      int16: [-32768, 32767],
-      int32: [-2147483648, 2147483647]
-    };
-    var WIDE_INTEGER_RANGES = {
-      uint64: [0n, 18446744073709551615n],
-      int64: [-9223372036854775808n, 9223372036854775807n]
-    };
-    var SAVE_POLICIES = /* @__PURE__ */ new Set(["perMethod", "afterAllMethods"]);
-    var METHOD_ERROR_POLICIES = /* @__PURE__ */ new Set(["stop"]);
-    var LOG_LEVELS = /* @__PURE__ */ new Set(["trace", "debug", "info", "warn", "error"]);
-    function invalid(reason, details) {
-      throw error("JOB_INVALID", reason, details);
-    }
-    function isObject(value) {
-      return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-    }
-    function assertObject(value, label) {
-      if (!isObject(value)) invalid(`${label}\uC740(\uB294) JSON \uAC1D\uCCB4\uC5EC\uC57C \uD569\uB2C8\uB2E4.`);
-    }
-    function assertFields(value, fields, label) {
-      const unknown = Object.keys(value).filter((key) => !fields.includes(key));
-      if (unknown.length) invalid(`${label}\uC5D0 \uC54C \uC218 \uC5C6\uB294 \uD544\uB4DC\uAC00 \uC788\uC2B5\uB2C8\uB2E4.`, { fields: unknown });
-    }
-    function utf8Bytes(value) {
-      return unescape(encodeURIComponent(value)).length;
-    }
-    function clone(value) {
-      return JSON.parse(JSON.stringify(value));
-    }
-    function isValidJobName(name) {
-      return typeof name === "string" && name.length <= MAX_JOB_NAME_LENGTH && JOB_NAME.test(name) && !/[\\/]/.test(name);
-    }
-    function validateJobName(name) {
-      if (!isValidJobName(name)) {
-        invalid(`Job name\uC740 \uCD5C\uB300 ${MAX_JOB_NAME_LENGTH}\uC790\uC758 \uC601\uBB38 \uC18C\uBB38\uC790, \uC22B\uC790, _, -\uB9CC \uC0AC\uC6A9\uD558\uACE0 \uCC98\uC74C\uACFC \uB05D\uC740 \uC601\uBB38 \uC18C\uBB38\uC790 \uB610\uB294 \uC22B\uC790\uC5EC\uC57C \uD569\uB2C8\uB2E4.`);
-      }
-      return name;
-    }
-    function deepMerge(base, patch) {
-      if (!isObject(base) || !isObject(patch)) return clone(patch);
-      const result = clone(base);
-      Object.keys(patch).forEach((key) => {
-        const next = patch[key];
-        result[key] = isObject(next) && isObject(result[key]) ? deepMerge(result[key], next) : clone(next);
-      });
-      return result;
-    }
-    function inputName(input) {
-      return input.id || input.name;
-    }
-    function validateInputValue(input, value) {
-      const name = inputName(input);
-      if (value === void 0 || value === null) {
-        if (input.required !== false) invalid(`\uD544\uC218 input ${name} \uAC12\uC774 \uC5C6\uC2B5\uB2C8\uB2E4.`, { inputId: name });
-        return;
-      }
-      const type = normalizeType(input.type);
-      if (type === null || !isValueValid(type, value)) {
-        invalid(`input ${name} \uAC12\uC758 type\uC774 ${typeof type === "string" ? type : "DBusType"}\uC774 \uC544\uB2D9\uB2C8\uB2E4.`, { inputId: name });
-      }
-      if (typeof type !== "string") return;
-      function wideBound(source, label) {
-        let result;
-        try {
-          if (typeof source === "number" && Number.isSafeInteger(source)) result = BigInt(source);
-          else if (typeof source === "string" && /^-?(?:0|[1-9]\d*)$/.test(source)) result = BigInt(source);
-          else invalid(`input ${input.id} ${label}\uC758 ${input.type} \uC815\uC218 \uD615\uC2DD\uC774 \uC798\uBABB\uB418\uC5C8\uC2B5\uB2C8\uB2E4.`, { inputId: input.id });
-        } catch (_) {
-          invalid(`input ${input.id} ${label}\uC758 ${input.type} \uC815\uC218 \uD615\uC2DD\uC774 \uC798\uBABB\uB418\uC5C8\uC2B5\uB2C8\uB2E4.`, { inputId: input.id });
-        }
-        const range = WIDE_INTEGER_RANGES[type];
-        if (result < range[0] || result > range[1]) {
-          invalid(`input ${input.id} ${label}\uC774 ${input.type} \uBC94\uC704\uB97C \uBC97\uC5B4\uB0AC\uC2B5\uB2C8\uB2E4.`, { inputId: input.id });
-        }
-        return result;
-      }
-      let wideInteger = null;
-      if (WIDE_INTEGER_TYPES.has(type)) {
-        wideInteger = wideBound(value, "\uAC12");
-      } else if (NUMBER_TYPES.has(type)) {
-        if (typeof value !== "number" || !Number.isFinite(value) || INTEGER_TYPES.has(type) && !Number.isInteger(value)) {
-          invalid(`input ${input.id} \uAC12\uC758 type\uC774 ${input.type}\uC774 \uC544\uB2D9\uB2C8\uB2E4.`, { inputId: input.id });
-        }
-        const range = INTEGER_RANGES[type];
-        if (range && (value < range[0] || value > range[1])) {
-          invalid(`input ${input.id} \uAC12\uC774 ${input.type} \uBC94\uC704\uB97C \uBC97\uC5B4\uB0AC\uC2B5\uB2C8\uB2E4.`, { inputId: input.id });
-        }
-      }
-      const rules = input.validation || {};
-      if (wideInteger !== null) {
-        const minimum = rules.minimum === void 0 ? null : wideBound(rules.minimum, "minimum");
-        const maximum = rules.maximum === void 0 ? null : wideBound(rules.maximum, "maximum");
-        if (minimum !== null && maximum !== null && minimum > maximum) invalid(`input ${input.id} minimum\uC740 maximum\uBCF4\uB2E4 \uD074 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.`, { inputId: input.id });
-        if (minimum !== null && wideInteger < minimum) invalid(`input ${input.id} \uAC12\uC774 minimum\uBCF4\uB2E4 \uC791\uC2B5\uB2C8\uB2E4.`, { inputId: input.id });
-        if (maximum !== null && wideInteger > maximum) invalid(`input ${input.id} \uAC12\uC774 maximum\uBCF4\uB2E4 \uD07D\uB2C8\uB2E4.`, { inputId: input.id });
-      } else {
-        if (rules.minimum !== void 0 && value < rules.minimum) invalid(`input ${input.id} \uAC12\uC774 minimum\uBCF4\uB2E4 \uC791\uC2B5\uB2C8\uB2E4.`, { inputId: input.id });
-        if (rules.maximum !== void 0 && value > rules.maximum) invalid(`input ${input.id} \uAC12\uC774 maximum\uBCF4\uB2E4 \uD07D\uB2C8\uB2E4.`, { inputId: input.id });
-      }
-      if (rules.pattern !== void 0 && !new RegExp(rules.pattern).test(value)) {
-        invalid(`input ${input.id} \uAC12\uC774 pattern\uACFC \uB9DE\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.`, { inputId: input.id });
-      }
-    }
-    function validateTag(tag, names) {
-      assertObject(tag, "Tag");
-      assertFields(tag, ["outputIndex", "sourceAddress", "name", "bias", "multiplier", "calcOrder", "transformOrder", "conversion", "signed"], "Tag");
-      if (typeof tag.name !== "string" || !tag.name.trim()) {
-        invalid("Tag name\uC774 \uD544\uC694\uD569\uB2C8\uB2E4.");
-      }
-      if (tag.name.length > MAX_TAG_NAME_LENGTH) invalid(`Tag name\uC740 ${MAX_TAG_NAME_LENGTH}\uC790 \uC774\uD558\uC5EC\uC57C \uD569\uB2C8\uB2E4.`, { name: tag.name });
-      if (names.has(tag.name)) invalid("Job \uC548\uC5D0\uC11C Tag name\uC740 \uC911\uBCF5\uB420 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.", { name: tag.name });
-      names.add(tag.name);
-      if (typeof tag.bias !== "number" || !Number.isFinite(tag.bias) || typeof tag.multiplier !== "number" || !Number.isFinite(tag.multiplier)) {
-        invalid("Tag bias\uC640 multiplier\uB294 \uC720\uD55C\uD55C \uC22B\uC790\uC5EC\uC57C \uD569\uB2C8\uB2E4.");
-      }
-      if (tag.transformOrder !== void 0 && (!Array.isArray(tag.transformOrder) || tag.transformOrder.length !== 2 || new Set(tag.transformOrder).size !== 2 || !tag.transformOrder.includes("bias") || !tag.transformOrder.includes("multiplier"))) {
-        invalid("Tag transformOrder\uB294 bias\uC640 multiplier\uB97C \uAC01\uAC01 \uD55C \uBC88\uC529 \uAC00\uC838\uC57C \uD569\uB2C8\uB2E4.");
-      }
-      if (tag.conversion !== void 0 && !["BYTE2INT", "WORD2INT", "DWORD2INT", "DWORD2REAL", "LWORD2INT", "LWORD2LREAL"].includes(tag.conversion)) {
-        invalid("Tag conversion\uC744 \uC9C0\uC6D0\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.");
-      }
-      if (tag.signed !== void 0 && typeof tag.signed !== "boolean") invalid("Tag signed\uB294 boolean\uC774\uC5B4\uC57C \uD569\uB2C8\uB2E4.");
-      return { name: tag.name, bias: tag.bias, multiplier: tag.multiplier, ...tag.conversion ? { conversion: tag.conversion } : {}, signed: tag.signed === true, ...tag.transformOrder ? { transformOrder: tag.transformOrder.slice() } : {} };
-    }
-    function validateMethodCall(call, interfaceStore, options, callIds, callNames, tagNames) {
-      assertObject(call, "Method Call");
-      assertFields(call, ["id", "name", "interfaceId", "methodId", "inputs", "tags", "outputSelections"], "Method Call");
-      if (!CALL_ID.test(call.id || "") || callIds.has(call.id)) invalid("Method Call ID\uB294 \uC720\uD6A8\uD558\uACE0 \uC720\uC77C\uD574\uC57C \uD569\uB2C8\uB2E4.", { id: call.id });
-      callIds.add(call.id);
-      if (typeof call.name !== "string" || !call.name.trim() || callNames.has(call.name)) {
-        invalid("Method Call name\uC740 \uBE44\uC5B4 \uC788\uC9C0 \uC54A\uACE0 \uC720\uC77C\uD574\uC57C \uD569\uB2C8\uB2E4.", { name: call.name });
-      }
-      callNames.add(call.name);
-      const dbusInterface = interfaceStore && interfaceStore.find(call.interfaceId);
-      if (!dbusInterface) invalid("DBus Interface\uB97C \uCC3E\uC744 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.", { interfaceId: call.interfaceId });
-      const method = dbusInterface.methods.find((item) => item.id === call.methodId);
-      if (!method) invalid("DBus Interface\uC5D0\uC11C Method\uB97C \uCC3E\uC744 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.", { interfaceId: call.interfaceId, methodId: call.methodId });
-      assertObject(call.inputs, "Method Call inputs");
-      const allowedInputs = new Set(method.inputs.map(inputName));
-      const unknownInputs = Object.keys(call.inputs).filter((id) => !allowedInputs.has(id));
-      if (unknownInputs.length) invalid("\uC815\uC758\uB418\uC9C0 \uC54A\uC740 Method input\uC774 \uC788\uC2B5\uB2C8\uB2E4.", { inputs: unknownInputs });
-      method.inputs.forEach((input) => validateInputValue(input, call.inputs[inputName(input)]));
-      const legacyTags = Array.isArray(call.tags) ? call.tags : null;
-      const selections = Array.isArray(call.outputSelections) ? call.outputSelections : null;
-      if (!legacyTags && !selections) invalid("Method Call\uC740 tags \uB610\uB294 outputSelections\uAC00 \uD544\uC694\uD569\uB2C8\uB2E4.");
-      if (legacyTags && selections) invalid("Method Call\uC740 tags\uC640 outputSelections\uB97C \uD568\uAED8 \uAC00\uC9C8 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.");
-      const tagGroups = selections ? selections.map((selection) => ({ ...selection, tags: Array.isArray(selection.tags) ? selection.tags.slice() : selection.tags })) : [{ id: "legacy", sourceIndex: 0, path: "", mode: "each", tags: legacyTags.slice() }];
-      const selectionIds = /* @__PURE__ */ new Set();
-      tagGroups.forEach((selection) => {
-        assertObject(selection, "Output selection");
-        const legacySelection = Object.prototype.hasOwnProperty.call(selection, "path") || Object.prototype.hasOwnProperty.call(selection, "mode");
-        assertFields(selection, legacySelection ? ["id", "sourceIndex", "interpretation", "path", "mode", "tags"] : ["id", "sourceIndex", "interpretation", "selector", "valueType", "elementType", "tags"], "Output selection");
-        const basicInvalid = !CALL_ID.test(selection.id || "") || selectionIds.has(selection.id) || !Number.isInteger(selection.sourceIndex) || selection.sourceIndex < 0 || !["native", "json"].includes(selection.interpretation || "native") || !Array.isArray(selection.tags);
-        const nativeScalar = !legacySelection && selection.interpretation !== "json" && NATIVE_SCALAR_OUTPUT_TYPES.has(method.outputs[selection.sourceIndex]?.type);
-        const selectionInvalid = legacySelection ? typeof selection.path !== "string" || !["single", "each"].includes(selection.mode) : nativeScalar ? selection.selector !== void 0 && typeof selection.selector !== "string" || selection.valueType !== void 0 && !["numeric", "string", "json", "array"].includes(selection.valueType) || selection.valueType === "array" && !["numeric", "string", "json"].includes(selection.elementType) || selection.valueType !== "array" && selection.elementType !== void 0 : typeof selection.selector !== "string" || !["numeric", "string", "json", "array"].includes(selection.valueType) || selection.valueType === "array" && !["numeric", "string", "json"].includes(selection.elementType) || selection.valueType !== "array" && selection.elementType !== void 0;
-        if (basicInvalid || selectionInvalid) invalid("Output selection \uD615\uC2DD\uC774 \uC798\uBABB\uB418\uC5C8\uC2B5\uB2C8\uB2E4.");
-        if (nativeScalar) {
-          delete selection.selector;
-          delete selection.valueType;
-          delete selection.elementType;
-        }
-        selectionIds.add(selection.id);
-        if (selections && selection.sourceIndex >= method.outputs.length) invalid("Output selection sourceIndex\uAC00 Method output \uBC94\uC704\uB97C \uBC97\uC5B4\uB0AC\uC2B5\uB2C8\uB2E4.", { sourceIndex: selection.sourceIndex, methodId: method.id });
-        if (selection.interpretation === "json" && method.outputs[selection.sourceIndex]?.type !== "string") invalid("JSON \uD574\uC11D\uC740 string output\uC5D0\uB9CC \uC0AC\uC6A9\uD560 \uC218 \uC788\uC2B5\uB2C8\uB2E4.", { sourceIndex: selection.sourceIndex, methodId: method.id });
-        if (legacySelection && selection.mode === "single" || !legacySelection && (nativeScalar || selection.valueType !== "array")) {
-          if (selection.tags.length !== 1) invalid("\uB2E8\uC77C output selection\uC740 Tag \uD558\uB098\uAC00 \uD544\uC694\uD569\uB2C8\uB2E4.");
-        }
-      });
-      const tags = tagGroups.flatMap((selection) => selection.tags);
-      if (tags.length > options.limits.maxGeneratedTagsPerCall) {
-        invalid("Method Call Tag \uAC1C\uC218\uAC00 maxGeneratedTagsPerCall\uC744 \uB118\uC5C8\uC2B5\uB2C8\uB2E4.");
-      }
-      tagGroups.forEach((selection) => {
-        selection.tags = selection.tags.map((tag) => validateTag(tag, tagNames));
-      });
-      return {
-        id: call.id,
-        name: call.name,
-        interfaceId: call.interfaceId,
-        methodId: call.methodId,
-        inputs: clone(call.inputs),
-        ...selections ? { outputSelections: clone(tagGroups) } : { tags: clone(tagGroups[0].tags) }
-      };
-    }
-    function validateJobConfig(value, options) {
-      const settings = options || {};
-      assertObject(value, "Job config");
-      if (Object.prototype.hasOwnProperty.call(value, "name")) invalid("config\uC5D0\uB294 name\uC744 \uB123\uC744 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.");
-      const maxJobJsonBytes = Number.isInteger(settings.maxJobJsonBytes) && settings.maxJobJsonBytes >= MAX_JOB_JSON_BYTES ? settings.maxJobJsonBytes : MAX_JOB_JSON_BYTES;
-      if (utf8Bytes(JSON.stringify(value)) > maxJobJsonBytes) invalid(`Job JSON\uC740 ${maxJobJsonBytes} bytes \uC774\uD558\uC5EC\uC57C \uD569\uB2C8\uB2E4.`);
-      assertFields(value, [
-        "schemaVersion",
-        "schedule",
-        "retry",
-        "execution",
-        "methodCalls",
-        "database",
-        "log"
-      ], "Job config");
-      if (value.schemaVersion !== 1) invalid("Job schemaVersion\uC740 1\uC774\uC5B4\uC57C \uD569\uB2C8\uB2E4.");
-      if (!settings.interfaceStore || typeof settings.interfaceStore.find !== "function") {
-        invalid("DBus Interface \uC800\uC7A5\uC18C\uAC00 \uD544\uC694\uD569\uB2C8\uB2E4.");
-      }
-      const limits = settings.limits || {};
-      if (!Number.isInteger(limits.maxGeneratedTagsPerCall) || limits.maxGeneratedTagsPerCall < 1 || !Number.isInteger(limits.maxBufferedRowsPerCycle) || limits.maxBufferedRowsPerCycle < 1) {
-        invalid("Job validation limits\uAC00 \uC798\uBABB\uB418\uC5C8\uC2B5\uB2C8\uB2E4.");
-      }
-      assertObject(value.schedule, "schedule");
-      assertFields(value.schedule, settings.allowAbsoluteTimer ? ["intervalMs", "useAbsoluteTimer"] : ["intervalMs"], "schedule");
-      if (value.schedule.useAbsoluteTimer !== void 0 && typeof value.schedule.useAbsoluteTimer !== "boolean") invalid("schedule.useAbsoluteTimer\uB294 boolean\uC774\uC5B4\uC57C \uD569\uB2C8\uB2E4.");
-      const minimumIntervalMs = Number.isInteger(settings.minimumIntervalMs) ? settings.minimumIntervalMs : 1e3;
-      if (!Number.isInteger(value.schedule.intervalMs) || value.schedule.intervalMs < minimumIntervalMs || value.schedule.intervalMs > 864e5) invalid(`schedule.intervalMs\uB294 ${minimumIntervalMs}~86400000 \uC815\uC218\uC5EC\uC57C \uD569\uB2C8\uB2E4.`);
-      const intervalCycleMs = Number.isInteger(settings.intervalCycleMs) && settings.intervalCycleMs > 0 ? settings.intervalCycleMs : 1;
-      if (value.schedule.intervalMs < intervalCycleMs || value.schedule.intervalMs % intervalCycleMs !== 0) invalid(`schedule.intervalMs\uB294 ${intervalCycleMs}ms\uC758 \uBC30\uC218\uC5EC\uC57C \uD569\uB2C8\uB2E4.`);
-      assertObject(value.retry, "retry");
-      assertFields(value.retry, ["initialDelayMs", "maximumDelayMs", "multiplier"], "retry");
-      if (!Number.isInteger(value.retry.initialDelayMs) || value.retry.initialDelayMs < 1 || !Number.isInteger(value.retry.maximumDelayMs) || value.retry.maximumDelayMs < value.retry.initialDelayMs || value.retry.maximumDelayMs > 864e5 || typeof value.retry.multiplier !== "number" || !Number.isFinite(value.retry.multiplier) || value.retry.multiplier < 1 || value.retry.multiplier > 100) {
-        invalid("retry \uC124\uC815 \uBC94\uC704\uAC00 \uC798\uBABB\uB418\uC5C8\uC2B5\uB2C8\uB2E4.");
-      }
-      assertObject(value.execution, "execution");
-      assertFields(value.execution, ["savePolicy", "onMethodError", "test"], "execution");
-      if (!SAVE_POLICIES.has(value.execution.savePolicy) || !METHOD_ERROR_POLICIES.has(value.execution.onMethodError)) invalid("execution policy\uAC00 \uC798\uBABB\uB418\uC5C8\uC2B5\uB2C8\uB2E4.");
-      if (value.execution.test !== void 0 && typeof value.execution.test !== "boolean") invalid("execution.test\uB294 boolean\uC774\uC5B4\uC57C \uD569\uB2C8\uB2E4.");
-      if (!Array.isArray(value.methodCalls) || value.methodCalls.length < 1 || value.methodCalls.length > MAX_METHOD_CALLS) {
-        invalid(`methodCalls\uB294 1~${MAX_METHOD_CALLS}\uAC1C\uC5EC\uC57C \uD569\uB2C8\uB2E4.`);
-      }
-      const callIds = /* @__PURE__ */ new Set();
-      const callNames = /* @__PURE__ */ new Set();
-      const tagNames = /* @__PURE__ */ new Set();
-      const methodCalls = value.methodCalls.map((call) => validateMethodCall(
-        call,
-        settings.interfaceStore,
-        { limits },
-        callIds,
-        callNames,
-        tagNames
-      ));
-      const rowCount = methodCalls.reduce((sum, call) => sum + (call.outputSelections ? call.outputSelections.reduce((count, selection) => count + selection.tags.length, 0) : call.tags.length), 0);
-      if (rowCount > limits.maxBufferedRowsPerCycle) invalid("Job Tag \uC804\uCCB4 \uAC1C\uC218\uAC00 maxBufferedRowsPerCycle\uC744 \uB118\uC5C8\uC2B5\uB2C8\uB2E4.");
-      assertObject(value.database, "database");
-      assertFields(value.database, ["server", "table", "valueColumn", "stringValueColumn"], "database");
-      if (!SAFE_NAME.test(value.database.server || "") || !SQL_IDENTIFIER.test(value.database.table || "") || !SQL_IDENTIFIER.test(value.database.valueColumn || "") || value.database.stringValueColumn !== "" && !SQL_IDENTIFIER.test(value.database.stringValueColumn || "")) invalid("database \uC774\uB984 \uB610\uB294 column \uD615\uC2DD\uC774 \uC798\uBABB\uB418\uC5C8\uC2B5\uB2C8\uB2E4.");
-      assertObject(value.log, "log");
-      assertFields(value.log, ["level", "maxFiles"], "log");
-      if (!LOG_LEVELS.has(value.log.level) || !Number.isInteger(value.log.maxFiles) || value.log.maxFiles < 1 || value.log.maxFiles > 1e3) invalid("log \uC124\uC815\uC774 \uC798\uBABB\uB418\uC5C8\uC2B5\uB2C8\uB2E4.");
-      const normalized = clone(value);
-      if (settings.allowAbsoluteTimer) normalized.schedule.useAbsoluteTimer = normalized.schedule.useAbsoluteTimer === true;
-      normalized.database.table = normalized.database.table.toUpperCase();
-      normalized.execution.test = normalized.execution.test === true;
-      normalized.methodCalls = methodCalls;
-      return normalized;
-    }
-    module2.exports = {
-      CALL_ID,
-      JOB_NAME,
-      MAX_JOB_JSON_BYTES,
-      MAX_JOB_NAME_LENGTH,
-      MAX_METHOD_CALLS,
-      MAX_TAG_NAME_LENGTH,
-      deepMerge,
-      isValidJobName,
-      validateJobConfig,
-      validateJobName
-    };
-  }
-});
-
-// cgi-bin/src/jobs/repository.js
-var require_repository = __commonJS({
-  "cgi-bin/src/jobs/repository.js"(exports2, module2) {
-    "use strict";
-    var fs = require("fs");
-    var path = require("path");
-    var { writeJsonAtomic } = require_atomic_json();
-    var { error } = require_errors();
-    var { validateJobName } = require_validator();
-    function invalidConfig(name, documentName, reason) {
-      return error("JOB_INVALID_CONFIG", reason || "Job \uD30C\uC77C\uBA85\uACFC document name\uC774 \uB2E4\uB985\uB2C8\uB2E4.", {
-        name,
-        documentName
-      });
-    }
-    function revisionOf(document) {
-      return Number.isSafeInteger(document && document.revision) && document.revision >= 1 ? document.revision : 1;
-    }
-    var JobRepository = class {
-      constructor(options) {
-        this.directory = options && options.jobDir || path.join(options.cgiRoot, "conf.d", "jobs");
-        fs.mkdirSync(this.directory, { recursive: true });
-      }
-      file(name) {
-        return path.join(this.directory, `${validateJobName(name)}.json`);
-      }
-      exists(name) {
-        return fs.existsSync(this.file(name));
-      }
-      parse(name) {
-        let document;
-        try {
-          document = JSON.parse(fs.readFileSync(this.file(name), "utf8"));
-        } catch (readError) {
-          if (readError && readError.code === "ENOENT") {
-            throw error("JOB_NOT_FOUND", "Job\uC744 \uCC3E\uC744 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.", { name });
-          }
-          throw invalidConfig(name, null, `Job JSON\uC744 \uC77D\uC744 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4: ${readError.message}`);
-        }
-        if (!document || typeof document !== "object" || Array.isArray(document)) {
-          throw invalidConfig(name, null, "Job document\uB294 \uAC1D\uCCB4\uC5EC\uC57C \uD569\uB2C8\uB2E4.");
-        }
-        if (document.name !== name) throw invalidConfig(name, document.name);
-        return document;
-      }
-      read(name) {
-        validateJobName(name);
-        return this.parse(name);
-      }
-      create(name, config) {
-        validateJobName(name);
-        const file = this.file(name);
-        const document = { ...config, name, revision: 1 };
-        let descriptor = null;
-        try {
-          descriptor = fs.openSync(file, "wx");
-          fs.writeSync(descriptor, `${JSON.stringify(document, null, 2)}
-`);
-          if (typeof fs.fsyncSync === "function") fs.fsyncSync(descriptor);
-          fs.closeSync(descriptor);
-          descriptor = null;
-        } catch (writeError) {
-          if (descriptor !== null) {
-            try {
-              fs.closeSync(descriptor);
-            } catch (_) {
-            }
-            try {
-              fs.unlinkSync(file);
-            } catch (_) {
-            }
-          }
-          if (writeError && writeError.code === "EEXIST") {
-            throw error("JOB_ALREADY_EXISTS", "\uAC19\uC740 \uC774\uB984\uC758 Job\uC774 \uC774\uBBF8 \uC788\uC2B5\uB2C8\uB2E4.", { name });
-          }
-          throw writeError;
-        }
-        return document;
-      }
-      // LS holds the per-Job mutation lock before calling this method, so the
-      // canonical document can be committed with the same atomic file replacement
-      // used by Update. This avoids leaving a partially written 1MB Job after an
-      // interrupted CGI process.
-      createAtomic(name, config) {
-        validateJobName(name);
-        if (this.exists(name)) throw error("JOB_ALREADY_EXISTS", "\uAC19\uC740 \uC774\uB984\uC758 Job\uC774 \uC774\uBBF8 \uC788\uC2B5\uB2C8\uB2E4.", { name });
-        const document = { ...config, name, revision: 1 };
-        writeJsonAtomic(this.file(name), document);
-        return document;
-      }
-      save(name, document, expectedRevision) {
-        validateJobName(name);
-        const file = this.file(name);
-        const current = this.read(name);
-        if (!document || document.name !== name) throw invalidConfig(name, document && document.name);
-        const currentRevision = revisionOf(current);
-        if (expectedRevision !== currentRevision) {
-          throw error("JOB_CONFLICT", "\uB2E4\uB978 \uAD00\uB9AC\uC790\uAC00 Job\uC744 \uC218\uC815\uD588\uC2B5\uB2C8\uB2E4. \uCD5C\uC2E0 \uC124\uC815\uC744 \uB2E4\uC2DC \uC77D\uC740 \uB4A4 \uC218\uC815\uD558\uC138\uC694.", {
-            name,
-            expectedRevision,
-            currentRevision
-          });
-        }
-        writeJsonAtomic(file, document);
-        return document;
-      }
-      remove(name) {
-        this.read(name);
-        fs.unlinkSync(this.file(name));
-        return { name };
-      }
-      discard(name) {
-        const file = this.file(name);
-        try {
-          fs.unlinkSync(file);
-        } catch (failure) {
-          if (!failure || failure.code !== "ENOENT") throw failure;
-        }
-        return { name };
-      }
-      list() {
-        if (!fs.existsSync(this.directory)) return [];
-        return fs.readdirSync(this.directory).filter((entry) => entry.endsWith(".json")).sort().map((entry) => {
-          const name = entry.slice(0, -5);
-          try {
-            validateJobName(name);
-            const document = this.read(name);
-            return { name, document, documentName: document.name, error: null };
-          } catch (readError) {
-            let documentName = null;
-            try {
-              documentName = JSON.parse(fs.readFileSync(path.join(this.directory, entry), "utf8")).name;
-            } catch (_) {
-            }
-            return { name, document: null, documentName, error: readError };
-          }
-        });
+    var ConfigError = class extends Error {
+      constructor(code, reason, details) {
+        super(reason);
+        this.name = "ConfigError";
+        this.code = code;
+        this.details = details || {};
       }
     };
-    module2.exports = { JobRepository, revisionOf };
+    function error(code, reason, details) {
+      return new ConfigError(code, reason, details);
+    }
+    module2.exports = { ConfigError, error };
   }
 });
 
@@ -1637,6 +829,1507 @@ var require_server_store = __commonJS({
       };
     }
     module2.exports = { MAX_SERVER_JSON_BYTES, createServerStore };
+  }
+});
+
+// cgi-bin/src/config/settings-validator.js
+var require_settings_validator = __commonJS({
+  "cgi-bin/src/config/settings-validator.js"(exports2, module2) {
+    "use strict";
+    var { error } = require_errors();
+    function positiveInteger(value) {
+      return Number.isInteger(value) && value > 0;
+    }
+    function loggingPolicy(value) {
+      if (!value || typeof value !== "object" || Array.isArray(value) || !positiveInteger(value.maxFileBytes) || value.maxFileBytes < 64 * 1024 || value.maxFileBytes > 10 * 1024 * 1024 || !positiveInteger(value.maxFiles) || value.maxFiles > 10 || !positiveInteger(value.summaryIntervalMs) || value.summaryIntervalMs < 60 * 1e3 || value.summaryIntervalMs > 24 * 60 * 60 * 1e3) {
+        throw error("SETTINGS_INVALID", "logging \uC124\uC815\uC774 \uC798\uBABB\uB418\uC5C8\uC2B5\uB2C8\uB2E4.");
+      }
+      return {
+        maxFileBytes: value.maxFileBytes,
+        maxFiles: value.maxFiles,
+        summaryIntervalMs: value.summaryIntervalMs
+      };
+    }
+    function lsPolicy(value) {
+      if (value === void 0) return null;
+      const interval = value?.interval;
+      const timer = value?.timer === void 0 ? { showAbsoluteTimerOption: true, defaultUseAbsoluteTimer: false } : value.timer;
+      const writer = value?.writer;
+      const scheduler = value?.scheduler === void 0 ? { mode: "conditional", fifoPriority: 50, nice: -10, gomaxprocs: 0 } : value.scheduler;
+      const performance = value?.performance;
+      if (!value || typeof value !== "object" || Array.isArray(value) || !interval || typeof interval !== "object" || Array.isArray(interval) || typeof interval.useTaskCycle !== "boolean" || !timer || typeof timer !== "object" || Array.isArray(timer) || typeof timer.showAbsoluteTimerOption !== "boolean" || typeof timer.defaultUseAbsoluteTimer !== "boolean" || !scheduler || typeof scheduler !== "object" || Array.isArray(scheduler) || !["off", "conditional", "force"].includes(scheduler.mode) || !["fifoPriority", "nice", "gomaxprocs"].every((key) => Number.isSafeInteger(scheduler[key])) || !writer || typeof writer !== "object" || Array.isArray(writer) || !positiveInteger(writer.queueCapacity) || writer.queueCapacity > 1024 || !positiveInteger(writer.flushMaxRows) || writer.flushMaxRows > 65535 || !positiveInteger(writer.flushIntervalMs) || writer.flushIntervalMs > 60 * 60 * 1e3 || !performance || typeof performance !== "object" || Array.isArray(performance) || typeof performance.enabled !== "boolean" || performance.overrunDetailEnabled !== void 0 && typeof performance.overrunDetailEnabled !== "boolean" || !positiveInteger(performance.jobSampleCount) || !positiveInteger(performance.writerSummaryIntervalMs)) {
+        throw error("SETTINGS_INVALID", "LS interval \uC124\uC815\uC774 \uC798\uBABB\uB418\uC5C8\uC2B5\uB2C8\uB2E4.");
+      }
+      return {
+        interval: { useTaskCycle: interval.useTaskCycle },
+        timer: { showAbsoluteTimerOption: timer.showAbsoluteTimerOption, defaultUseAbsoluteTimer: timer.defaultUseAbsoluteTimer },
+        // FIFO 0..99 (0=OTHER), nice -20..19, GOMAXPROCS 0..64 (0=Go default).
+        // Bounds are applied by Go at daemon restart so configured->applied
+        // corrections remain visible. Modes/types are configuration errors.
+        scheduler: { mode: scheduler.mode, fifoPriority: scheduler.fifoPriority, nice: scheduler.nice, gomaxprocs: scheduler.gomaxprocs },
+        // Shared writer settings; users do not edit them in the frontend.
+        writer: {
+          queueCapacity: writer.queueCapacity,
+          flushMaxRows: writer.flushMaxRows,
+          flushIntervalMs: writer.flushIntervalMs
+        },
+        // Go applies the operational floors and records a correction in the Job
+        // log. Preserve the requested values here so that audit message can show
+        // both the configured and applied values.
+        performance: {
+          enabled: performance.enabled,
+          jobSampleCount: performance.jobSampleCount,
+          writerSummaryIntervalMs: performance.writerSummaryIntervalMs,
+          overrunDetailEnabled: performance.overrunDetailEnabled !== false
+        }
+      };
+    }
+    function validateSettings(value) {
+      if (!value || typeof value !== "object" || Array.isArray(value)) {
+        throw error("SETTINGS_INVALID", "settings\uB294 JSON \uAC1D\uCCB4\uC5EC\uC57C \uD569\uB2C8\uB2E4.");
+      }
+      if (value.schemaVersion !== 1) {
+        throw error("SETTINGS_INVALID", "settings schemaVersion\uC740 1\uC774\uC5B4\uC57C \uD569\uB2C8\uB2E4.");
+      }
+      if (!value.limits || !positiveInteger(value.limits.maxGeneratedTagsPerCall) || !positiveInteger(value.limits.maxBufferedRowsPerCycle)) {
+        throw error("SETTINGS_INVALID", "limits \uAC12\uC740 0\uBCF4\uB2E4 \uD070 \uC815\uC218\uC5EC\uC57C \uD569\uB2C8\uB2E4.");
+      }
+      const defaults = value.defaults;
+      if (!defaults || typeof defaults !== "object" || Array.isArray(defaults) || !defaults.database || typeof defaults.database !== "object" || Array.isArray(defaults.database) || typeof defaults.database.server !== "string" || !defaults.database.server) {
+        throw error("SETTINGS_INVALID", "\uAE30\uBCF8 Database \uC124\uC815\uC774 \uC798\uBABB\uB418\uC5C8\uC2B5\uB2C8\uB2E4.");
+      }
+      return {
+        schemaVersion: 1,
+        limits: {
+          maxGeneratedTagsPerCall: value.limits.maxGeneratedTagsPerCall,
+          maxBufferedRowsPerCycle: value.limits.maxBufferedRowsPerCycle
+        },
+        defaults: {
+          database: { server: defaults.database.server }
+        },
+        logging: loggingPolicy(value.logging),
+        ...lsPolicy(value.ls) ? { ls: lsPolicy(value.ls) } : {}
+      };
+    }
+    module2.exports = { validateSettings };
+  }
+});
+
+// cgi-bin/src/config/settings-loader.js
+var require_settings_loader = __commonJS({
+  "cgi-bin/src/config/settings-loader.js"(exports2, module2) {
+    "use strict";
+    var fs = require("fs");
+    var { error } = require_errors();
+    var { validateSettings } = require_settings_validator();
+    function defaultSettings() {
+      return {
+        schemaVersion: 1,
+        limits: {
+          maxGeneratedTagsPerCall: 1e3,
+          maxBufferedRowsPerCycle: 1e4
+        },
+        defaults: {
+          database: { server: "localhost" }
+        },
+        logging: {
+          maxFileBytes: 1024 * 1024,
+          maxFiles: 3,
+          summaryIntervalMs: 60 * 60 * 1e3
+        },
+        // LS writer tuning is intentionally an internal deployment setting. It
+        // is copied into the Go collector policy file but is not exposed in the UI.
+        ls: {
+          interval: { useTaskCycle: true },
+          timer: { showAbsoluteTimerOption: true, defaultUseAbsoluteTimer: false },
+          // Restart-only LS scheduling. Go clamps numeric ranges and audits the
+          // requested/applied values; this loader preserves out-of-range integers.
+          scheduler: { mode: "conditional", fifoPriority: 50, nice: -10, gomaxprocs: 0 },
+          writer: { queueCapacity: 512, flushMaxRows: 8192, flushIntervalMs: 1e3 },
+          performance: { enabled: true, jobSampleCount: 1e3, writerSummaryIntervalMs: 3e4, overrunDetailEnabled: true }
+        }
+      };
+    }
+    function loadSettings(file) {
+      let value;
+      try {
+        value = JSON.parse(fs.readFileSync(file, "utf8"));
+      } catch (readError) {
+        if (readError && readError.code === "ENOENT") return defaultSettings();
+        throw error("SETTINGS_INVALID", "settings \uD30C\uC77C\uC744 \uC77D\uC744 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.", {
+          message: readError.message
+        });
+      }
+      const base = defaultSettings();
+      const defaults = value.defaults && typeof value.defaults === "object" && !Array.isArray(value.defaults) ? value.defaults : {};
+      return validateSettings({
+        ...base,
+        ...value,
+        limits: value.limits || base.limits,
+        defaults: {
+          ...base.defaults,
+          ...defaults,
+          database: { ...base.defaults.database, ...defaults.database || {} }
+        },
+        logging: { ...base.logging, ...value.logging && typeof value.logging === "object" && !Array.isArray(value.logging) ? value.logging : {} },
+        ls: {
+          ...base.ls,
+          ...value.ls && typeof value.ls === "object" && !Array.isArray(value.ls) ? value.ls : {},
+          interval: { ...base.ls.interval, ...value.ls?.interval && typeof value.ls.interval === "object" && !Array.isArray(value.ls.interval) ? value.ls.interval : {} },
+          timer: { ...base.ls.timer, ...value.ls?.timer && typeof value.ls.timer === "object" && !Array.isArray(value.ls.timer) ? value.ls.timer : {} },
+          scheduler: value.ls?.scheduler === void 0 ? base.ls.scheduler : value.ls.scheduler && typeof value.ls.scheduler === "object" && !Array.isArray(value.ls.scheduler) ? { ...base.ls.scheduler, ...value.ls.scheduler } : value.ls.scheduler,
+          writer: { ...base.ls.writer, ...value.ls?.writer && typeof value.ls.writer === "object" && !Array.isArray(value.ls.writer) ? value.ls.writer : {} },
+          performance: { ...base.ls.performance, ...value.ls?.performance && typeof value.ls.performance === "object" && !Array.isArray(value.ls.performance) ? value.ls.performance : {} }
+        }
+      });
+    }
+    module2.exports = { loadSettings, defaultSettings };
+  }
+});
+
+// cgi-bin/src/service/controller-state.js
+var require_controller_state = __commonJS({
+  "cgi-bin/src/service/controller-state.js"(exports2, module2) {
+    "use strict";
+    var KNOWN_STATES = /* @__PURE__ */ new Set([
+      "RUNNING",
+      "STARTING",
+      "STOPPING",
+      "STOPPED",
+      "FAILED"
+    ]);
+    function controllerDetail(info) {
+      if (!info || typeof info !== "object") return "";
+      const value = info.error || info.config && info.config.start_error || "";
+      return String(value);
+    }
+    function reportedState(info) {
+      if (!info || typeof info !== "object") return "";
+      return String(info.status || info.state || "").toUpperCase();
+    }
+    function classifyControllerState(info, options) {
+      const settings = options || {};
+      const reported = reportedState(info);
+      let state;
+      if (settings.notInstalled) state = "NOT_INSTALLED";
+      else if (KNOWN_STATES.has(reported)) state = reported;
+      else if (!reported && info && info.running === true) state = "RUNNING";
+      else state = "UNKNOWN";
+      return {
+        state,
+        known: state !== "UNKNOWN",
+        running: state === "RUNNING" || state === "STARTING",
+        startComplete: state === "RUNNING",
+        activeForStop: state === "RUNNING" || state === "STARTING" || state === "STOPPING",
+        knownInactive: state === "STOPPED" || state === "FAILED" || state === "NOT_INSTALLED",
+        detail: controllerDetail(info)
+      };
+    }
+    module2.exports = {
+      classifyControllerState
+    };
+  }
+});
+
+// cgi-bin/src/service/controller-adapter.js
+var require_controller_adapter = __commonJS({
+  "cgi-bin/src/service/controller-adapter.js"(exports2, module2) {
+    "use strict";
+    function loadServiceModule(explicit) {
+      if (explicit !== void 0) return explicit;
+      try {
+        return require("service");
+      } catch (_) {
+        return null;
+      }
+    }
+    function createControllerAdapter(serviceModule) {
+      const source = loadServiceModule(serviceModule);
+      let client = null;
+      let clientError = null;
+      try {
+        if (!source || typeof source.Client !== "function") {
+          throw new Error("service.Client\uB97C \uC0AC\uC6A9\uD560 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.");
+        }
+        client = new source.Client();
+      } catch (creationError) {
+        clientError = creationError;
+      }
+      function invoke(method, args, callback) {
+        if (clientError) {
+          callback(clientError);
+          return;
+        }
+        try {
+          if (!client || typeof client[method] !== "function") {
+            callback(new Error(`service.Client.${method}()\uC744 \uC0AC\uC6A9\uD560 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.`));
+            return;
+          }
+          client[method](...args, callback);
+        } catch (callError) {
+          callback(callError);
+        }
+      }
+      return {
+        status(name, callback) {
+          invoke("status", [name], callback);
+        },
+        install(descriptor, callback) {
+          invoke("install", [descriptor], callback);
+        },
+        start(name, callback) {
+          invoke("start", [name], callback);
+        },
+        stop(name, callback) {
+          invoke("stop", [name], callback);
+        },
+        uninstall(name, callback) {
+          invoke("uninstall", [name], callback);
+        },
+        details(name, key, callback) {
+          if (clientError) {
+            callback(clientError);
+            return;
+          }
+          try {
+            if (!client || !client.details || typeof client.details.get !== "function") {
+              callback(new Error("service.Client.details.get()\uC744 \uC0AC\uC6A9\uD560 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4."));
+              return;
+            }
+            client.details.get(name, key, (detailsError, runtime) => {
+              if (detailsError && /Detail\s+'.+'\s+not found/i.test(detailsError.message || "")) {
+                callback(null, null);
+                return;
+              }
+              if (detailsError) {
+                callback(detailsError);
+                return;
+              }
+              const details = runtime && runtime.details;
+              callback(null, details && Object.prototype.hasOwnProperty.call(details, key) ? details[key] : null);
+            });
+          } catch (detailsError) {
+            callback(detailsError);
+          }
+        }
+      };
+    }
+    function isNotInstalled(error) {
+      if (error && error.rpcCode !== void 0) return error.rpcCode === -32004;
+      const message = error && error.message ? error.message : String(error || "");
+      return /service\b.*\b(?:not found|not installed|does not exist)\b/i.test(message) || /\b(?:no such|unknown) service\b/i.test(message);
+    }
+    module2.exports = { createControllerAdapter, isNotInstalled };
+  }
+});
+
+// cgi-bin/src/collector/ls-runtime.js
+var require_ls_runtime = __commonJS({
+  "cgi-bin/src/collector/ls-runtime.js"(exports2, module2) {
+    "use strict";
+    var fs = require("fs");
+    var path = require("path");
+    var process = require("process");
+    var { writeJsonAtomic } = require_atomic_json();
+    var { createServerStore } = require_server_store();
+    var { loadSettings } = require_settings_loader();
+    var { classifyControllerState } = require_controller_state();
+    var { isNotInstalled } = require_controller_adapter();
+    var LS_SERVICE_NAME = "_dbu_collector";
+    var SNAPSHOT_FILE = "go-collector.json";
+    var SECRET_FILE = "go-collector-secrets.json";
+    var ACTIVE_FILE = "go-collector-active-jobs.json";
+    var RUNTIME_FILE = "go-collector-runtime.json";
+    var BINARY_FILE = path.join("bin", "neo-dbus-collector");
+    var LAUNCHER_FILE = "neo-dbus-launcher.js";
+    var CONTROL_FILE = "neo-dbus-control.js";
+    function writePolicy(cgiRoot, settings) {
+      writeJsonAtomic(path.join(cgiRoot, "conf.d", SNAPSHOT_FILE), {
+        schemaVersion: 2,
+        logging: settings.logging,
+        writer: settings.ls.writer,
+        performance: settings.ls.performance,
+        scheduler: settings.ls.scheduler
+      });
+    }
+    function refreshLsPolicy(cgiRoot) {
+      writePolicy(cgiRoot, loadSettings(path.join(cgiRoot, "conf.d", "settings.json")));
+    }
+    function runtimePaths(cgiRoot) {
+      return {
+        snapshot: path.join(cgiRoot, "conf.d", SNAPSHOT_FILE),
+        secret: path.join(cgiRoot, "conf.d", SECRET_FILE),
+        active: path.join(cgiRoot, "conf.d", ACTIVE_FILE),
+        runtime: path.join(cgiRoot, "data", RUNTIME_FILE),
+        binary: path.join(cgiRoot, BINARY_FILE),
+        launcher: path.join(cgiRoot, LAUNCHER_FILE),
+        control: path.join(cgiRoot, CONTROL_FILE)
+      };
+    }
+    function readRuntime(file) {
+      try {
+        const value = JSON.parse(fs.readFileSync(file, "utf8"));
+        return value && typeof value === "object" && !Array.isArray(value) ? value : { jobs: {} };
+      } catch (readError) {
+        if (readError && readError.code === "ENOENT") return { jobs: {} };
+        throw readError;
+      }
+    }
+    function readActiveJobs(file) {
+      try {
+        const value = JSON.parse(fs.readFileSync(file, "utf8"));
+        if (!value || value.schemaVersion !== 1 || !Array.isArray(value.names) || value.names.some((name) => typeof name !== "string")) throw new Error("LS collector active Job state is invalid.");
+        return [...new Set(value.names)].sort();
+      } catch (readError) {
+        if (readError && readError.code === "ENOENT") return [];
+        throw readError;
+      }
+    }
+    function syncCallback(operation) {
+      let called = false;
+      let failure;
+      let value;
+      operation((error, result) => {
+        called = true;
+        failure = error;
+        value = result;
+      });
+      if (!called) throw new Error("LS collector configuration store must complete synchronously.");
+      if (failure) throw failure;
+      return value;
+    }
+    function writeSecretAtomic(file, value) {
+      writeJsonAtomic(file, value);
+      if (typeof fs.chmodSync !== "function") throw new Error("secure collector secret file permissions are unavailable.");
+      fs.chmodSync(file, 384);
+    }
+    function controllerStatus(controller, callback) {
+      controller.status(LS_SERVICE_NAME, (statusError, info) => {
+        if (statusError && isNotInstalled(statusError)) {
+          callback(null, { controllerState: "NOT_INSTALLED", controllerDetail: null, statusError: null });
+          return;
+        }
+        if (statusError) {
+          callback(null, { controllerState: "UNKNOWN", controllerDetail: statusError.message || null, statusError });
+          return;
+        }
+        const state = classifyControllerState(info);
+        callback(null, {
+          controllerState: state.known ? state.state : "UNKNOWN",
+          controllerDetail: state.detail || null,
+          statusError: state.known ? null : new Error(state.detail || "Controller state is unknown.")
+        });
+      });
+    }
+    function createLsRuntime(options) {
+      const settings = options || {};
+      const cgiRoot = settings.cgiRoot;
+      const controller = settings.controller;
+      const serverStore = settings.serverStore || createServerStore({ cgiRoot });
+      const processApi = settings.process || process;
+      const files = runtimePaths(cgiRoot);
+      function ensureExecutable() {
+        if (!fs.existsSync(files.binary)) throw new Error("LS Go collector executable is missing. Build the LS package first.");
+        if (!fs.existsSync(files.launcher) || !fs.existsSync(files.control)) {
+          throw new Error("LS Go collector JSH launcher files are missing.");
+        }
+        if (typeof fs.chmodSync !== "function") throw new Error("LS collector executable permissions cannot be set by this JSH runtime.");
+        fs.chmodSync(files.binary, 493);
+        fs.chmodSync(files.launcher, 493);
+        fs.chmodSync(files.control, 493);
+      }
+      function syncConfig() {
+        const settings2 = loadSettings(path.join(cgiRoot, "conf.d", "settings.json"));
+        const profileName = settings2.defaults.database.server;
+        const source = syncCallback((callback) => serverStore.get(profileName, callback));
+        if (!source) throw new Error(`LS collector DB server was not found: ${profileName}`);
+        const servers = {};
+        servers[profileName] = {
+          host: source.host,
+          port: source.port,
+          user: source.user,
+          password: source.password,
+          defaultTable: source.defaultTable || "",
+          valueColumn: source.valueColumn || "",
+          stringValueColumn: source.stringValueColumn || ""
+        };
+        writePolicy(cgiRoot, settings2);
+        writeSecretAtomic(files.secret, { schemaVersion: 1, servers });
+        if (!fs.existsSync(files.active)) writeJsonAtomic(files.active, { schemaVersion: 1, names: [] });
+      }
+      function execControl(action, name) {
+        ensureExecutable();
+        if (!processApi || typeof processApi.exec !== "function") throw new Error("JSH process.exec() is unavailable for LS collector control.");
+        const exitCode = processApi.exec(files.control, action, name);
+        if (exitCode !== 0) throw new Error(`LS collector ${action} control command failed (exit=${exitCode}).`);
+      }
+      function install(callback) {
+        try {
+          ensureExecutable();
+        } catch (permissionError) {
+          callback(permissionError);
+          return;
+        }
+        controllerStatus(controller, (_unused, state) => {
+          if (state.statusError) {
+            callback(state.statusError);
+            return;
+          }
+          if (state.controllerState !== "NOT_INSTALLED") {
+            callback(null, state);
+            return;
+          }
+          controller.install({
+            name: LS_SERVICE_NAME,
+            // The collector must come back after a Neo process restart and then
+            // restore the logical active-job checkpoint. Service-controller
+            // descriptors are disabled unless enable is explicitly true.
+            enable: true,
+            working_dir: cgiRoot,
+            executable: files.launcher
+          }, (installError) => {
+            if (!installError) {
+              controllerStatus(controller, (_ignored, installed) => callback(installed.statusError, installed));
+              return;
+            }
+            if (!/already exists/i.test(String(installError.message || installError))) {
+              callback(installError);
+              return;
+            }
+            callback(null, {
+              controllerState: "STOPPED",
+              controllerDetail: "Existing shared collector service retained during package install.",
+              statusError: null
+            });
+          });
+        });
+      }
+      function ensureRunning(callback) {
+        install((installError, state) => {
+          if (installError) {
+            callback(installError);
+            return;
+          }
+          if (["RUNNING", "STARTING"].includes(state.controllerState)) {
+            callback(null, state);
+            return;
+          }
+          controller.start(LS_SERVICE_NAME, (startError) => {
+            if (startError) {
+              callback(startError);
+              return;
+            }
+            controllerStatus(controller, (_ignored, started) => callback(started.statusError, started));
+          });
+        });
+      }
+      function daemonStatus(callback) {
+        controllerStatus(controller, callback);
+      }
+      function inspect(name, callback) {
+        controllerStatus(controller, (_unused, service) => {
+          if (service.statusError) {
+            callback(null, service);
+            return;
+          }
+          if (service.controllerState === "NOT_INSTALLED") {
+            callback(null, service);
+            return;
+          }
+          if (!["RUNNING", "STARTING"].includes(service.controllerState)) {
+            callback(null, {
+              controllerState: service.controllerState === "FAILED" ? "FAILED" : "STOPPED",
+              controllerDetail: service.controllerDetail,
+              statusError: null
+            });
+            return;
+          }
+          let runtime;
+          try {
+            runtime = readRuntime(files.runtime);
+          } catch (runtimeError) {
+            callback(null, { controllerState: "UNKNOWN", controllerDetail: runtimeError.message, statusError: runtimeError });
+            return;
+          }
+          const job = runtime.jobs && runtime.jobs[name];
+          const runtimeState = job && job.state;
+          const mappedState = runtimeState === "running" ? "RUNNING" : runtimeState === "starting" ? "STARTING" : runtimeState === "stopping" ? "STOPPING" : runtimeState === "failed" ? "FAILED" : "STOPPED";
+          callback(null, {
+            controllerState: mappedState,
+            controllerDetail: job && job.stateDetail || service.controllerDetail,
+            statusError: null
+          });
+        });
+      }
+      function overview(callback) {
+        controllerStatus(controller, (_unused, service) => {
+          if (service.statusError) {
+            callback(null, { service, runtime: { jobs: {} } });
+            return;
+          }
+          try {
+            callback(null, { service, runtime: readRuntime(files.runtime) });
+          } catch (runtimeError) {
+            callback(null, {
+              service: { controllerState: "UNKNOWN", controllerDetail: runtimeError.message, statusError: runtimeError },
+              runtime: { jobs: {} }
+            });
+          }
+        });
+      }
+      function lastRun(name, callback) {
+        try {
+          const runtime = readRuntime(files.runtime);
+          const job = runtime.jobs && runtime.jobs[name];
+          if (!job) {
+            callback(null, null);
+            return;
+          }
+          if (!job.lastReadAt && !job.lastStoredAt && !job.lastError) {
+            callback(null, null);
+            return;
+          }
+          callback(null, {
+            status: job.lastError ? "failed" : "success",
+            lastRunAt: job.lastReadAt || null,
+            lastSuccessfulRunAt: job.lastError ? null : job.lastReadAt || null,
+            lastStoredAt: job.lastStoredAt || null,
+            lastError: job.lastError || null,
+            overrunCount: Number.isSafeInteger(job.overrunCount) && job.overrunCount >= 0 ? job.overrunCount : 0,
+            queueSkipped: Number.isSafeInteger(job.queueSkipped) && job.queueSkipped >= 0 ? job.queueSkipped : 0,
+            lastOverrunAt: job.lastOverrunAt || null,
+            methodCalls: []
+          });
+        } catch (runtimeError) {
+          callback(runtimeError);
+        }
+      }
+      function uninstall(callback) {
+        controllerStatus(controller, (_unused, state) => {
+          if (state.statusError || state.controllerState === "NOT_INSTALLED") {
+            callback(state.statusError || null);
+            return;
+          }
+          const remove = () => controller.uninstall(LS_SERVICE_NAME, callback);
+          if (["RUNNING", "STARTING"].includes(state.controllerState)) {
+            controller.stop(LS_SERVICE_NAME, (stopError) => {
+              if (stopError) {
+                callback(stopError);
+                return;
+              }
+              remove();
+            });
+          } else remove();
+        });
+      }
+      return {
+        serviceName: LS_SERVICE_NAME,
+        syncConfig,
+        inspect,
+        lastRun,
+        install,
+        daemonStatus,
+        installPackage(callback) {
+          try {
+            syncConfig();
+          } catch (snapshotError) {
+            callback(snapshotError);
+            return;
+          }
+          install(callback);
+        },
+        ensureRunning,
+        startDaemon(callback) {
+          try {
+            syncConfig();
+          } catch (snapshotError) {
+            callback(snapshotError);
+            return;
+          }
+          ensureRunning(callback);
+        },
+        start(name, callback) {
+          try {
+            execControl("start", name);
+            callback(null);
+          } catch (controlError) {
+            callback(controlError);
+          }
+        },
+        stop(name, callback) {
+          try {
+            execControl("stop", name);
+            callback(null);
+          } catch (controlError) {
+            callback(controlError);
+          }
+        },
+        reload(name, callback) {
+          try {
+            execControl("reload", name);
+            callback(null);
+          } catch (controlError) {
+            callback(controlError);
+          }
+        },
+        refreshLog(name, callback) {
+          try {
+            execControl("refresh-log", name);
+            callback(null);
+          } catch (controlError) {
+            callback(controlError);
+          }
+        },
+        clearOverrun(name, callback) {
+          try {
+            execControl("clear-overrun", name);
+            callback(null);
+          } catch (controlError) {
+            callback(controlError);
+          }
+        },
+        stopDaemon(callback) {
+          controllerStatus(controller, (_unused, state) => {
+            if (state.statusError || ["NOT_INSTALLED", "STOPPED", "FAILED"].includes(state.controllerState)) {
+              callback(state.statusError || null);
+              return;
+            }
+            controller.stop(LS_SERVICE_NAME, callback);
+          });
+        },
+        databaseChangeBlockers() {
+          const blocked = new Set(readActiveJobs(files.active));
+          const runtime = readRuntime(files.runtime);
+          Object.keys(runtime.jobs || {}).forEach((name) => {
+            const state = String(runtime.jobs[name]?.state || "").toLowerCase();
+            if (["starting", "running", "stopping"].includes(state)) blocked.add(name);
+          });
+          return [...blocked].sort();
+        },
+        overview,
+        uninstall
+      };
+    }
+    module2.exports = {
+      ACTIVE_FILE,
+      BINARY_FILE,
+      LS_SERVICE_NAME,
+      RUNTIME_FILE,
+      SECRET_FILE,
+      SNAPSHOT_FILE,
+      createLsRuntime,
+      refreshLsPolicy,
+      readActiveJobs,
+      runtimePaths
+    };
+  }
+});
+
+// cgi-bin/src/log/sanitize.js
+var require_sanitize = __commonJS({
+  "cgi-bin/src/log/sanitize.js"(exports2, module2) {
+    "use strict";
+    var SENSITIVE_KEYS = /* @__PURE__ */ new Set([
+      "password",
+      "passwd",
+      "token",
+      "authorization",
+      "cookie",
+      "secret",
+      "body",
+      "rawbody",
+      "raw_body",
+      "config",
+      "request",
+      "response"
+    ]);
+    function sensitiveKey(key) {
+      return SENSITIVE_KEYS.has(String(key || "").toLowerCase());
+    }
+    function sanitizeFields(fields) {
+      const result = {};
+      Object.keys(fields || {}).forEach((key) => {
+        const value = fields[key];
+        if (sensitiveKey(key)) result[key] = "[REDACTED]";
+        else if (typeof value === "string") result[key] = sanitizeText(value);
+        else if (value && typeof value === "object") result[key] = "[OBJECT]";
+        else result[key] = value;
+      });
+      return result;
+    }
+    function sanitizeText(value) {
+      let text = String(value === void 0 || value === null ? "" : value);
+      text = text.replace(/("(?:password|passwd|token|authorization|cookie|secret|body|rawBody|raw_body)"\s*:\s*)"(?:\\.|[^"\\])*"/gi, '$1"[REDACTED]"');
+      text = text.replace(/("(?:config|request|response)"\s*:\s*)\{.*\}/gi, '$1"[REDACTED]"');
+      text = text.replace(/\b(password|passwd|token|authorization|cookie|secret|body|rawBody|raw_body|config)\s*([:=])\s*((?:"(?:\\.|[^"\\])*")|(?:'(?:\\.|[^'\\])*')|[^\s,;)]+)/gi, "$1$2[REDACTED]");
+      text = text.replace(/\bBearer\s+[A-Za-z0-9._~+\/-]+=*/gi, "Bearer [REDACTED]");
+      text = text.replace(/\b([a-z][a-z0-9+.-]*:\/\/)([^\s:/@]+):([^\s/@]+)@/gi, "$1$2:[REDACTED]@");
+      return text;
+    }
+    module2.exports = { sanitizeFields, sanitizeText, sensitiveKey };
+  }
+});
+
+// cgi-bin/src/cgi/http.js
+var require_http = __commonJS({
+  "cgi-bin/src/cgi/http.js"(exports2, module2) {
+    "use strict";
+    var process = require("process");
+    var { sanitizeText, sensitiveKey } = require_sanitize();
+    var MAX_REQUEST_JSON_BYTES = 512 * 1024;
+    var MAX_QUERY_BYTES = 128 * 1024;
+    function utf8Bytes(value) {
+      if (typeof Buffer !== "undefined" && Buffer.byteLength) return Buffer.byteLength(value, "utf8");
+      return unescape(encodeURIComponent(value)).length;
+    }
+    function parseQuery(queryString, options) {
+      const settings = options || {};
+      const arrayKeys = new Set(settings.arrayKeys || []);
+      const source = queryString === void 0 ? String(process.env.get && process.env.get("QUERY_STRING") || "") : String(queryString || "");
+      if (utf8Bytes(source) > (settings.maxBytes || MAX_QUERY_BYTES)) {
+        const failure = requestError("query string\uC774 \uB108\uBB34 \uD07D\uB2C8\uB2E4.");
+        failure.code = "REQUEST_TOO_LARGE";
+        throw failure;
+      }
+      const result = {};
+      source.split("&").forEach((part) => {
+        if (!part) return;
+        const pair = part.split("=");
+        const key = decodeURIComponent(String(pair.shift() || "").replace(/\+/g, " "));
+        const value = decodeURIComponent(pair.join("=").replace(/\+/g, " "));
+        if (!key) return;
+        if (arrayKeys.has(key)) {
+          if (!Array.isArray(result[key])) result[key] = [];
+          result[key].push(value);
+        } else result[key] = value;
+      });
+      return result;
+    }
+    function readQuery(queryString, options) {
+      try {
+        return { ok: true, value: parseQuery(queryString, options) };
+      } catch (failure) {
+        return {
+          ok: false,
+          error: failure && failure.code === "REQUEST_TOO_LARGE" ? failure : requestError("query string \uD615\uC2DD\uC774 \uC798\uBABB\uB418\uC5C8\uC2B5\uB2C8\uB2E4.")
+        };
+      }
+    }
+    function readBody(rawBody, options) {
+      try {
+        const raw = rawBody === void 0 ? process.stdin.read() : rawBody;
+        const maximum = options && options.maxBytes ? options.maxBytes : MAX_REQUEST_JSON_BYTES;
+        if (utf8Bytes(String(raw || "")) > maximum) {
+          const failure = requestError("JSON body\uAC00 \uB108\uBB34 \uD07D\uB2C8\uB2E4.", { maximum });
+          failure.code = "REQUEST_TOO_LARGE";
+          throw failure;
+        }
+        return { ok: true, value: raw ? JSON.parse(raw) : {} };
+      } catch (failure) {
+        return {
+          ok: false,
+          error: failure && failure.code === "REQUEST_TOO_LARGE" ? failure : requestError("JSON body \uD615\uC2DD\uC774 \uC798\uBABB\uB418\uC5C8\uC2B5\uB2C8\uB2E4.")
+        };
+      }
+    }
+    function requestError(reason, details) {
+      const error = new Error(reason);
+      error.code = "REQUEST_INVALID";
+      error.details = details || {};
+      return error;
+    }
+    function requireObject(value, label) {
+      if (!value || typeof value !== "object" || Array.isArray(value)) {
+        throw requestError(`${label || "request"}\uB294 JSON \uAC1D\uCCB4\uC5EC\uC57C \uD569\uB2C8\uB2E4.`);
+      }
+      return value;
+    }
+    function requireStringFields(value, fields) {
+      const object = requireObject(value, "request");
+      const missing = fields.filter((field) => typeof object[field] !== "string" || !object[field]);
+      if (missing.length) throw requestError("\uD544\uC218 \uBB38\uC790\uC5F4 \uAC12\uC774 \uC5C6\uC2B5\uB2C8\uB2E4.", { fields: missing });
+      return object;
+    }
+    function createFactory(factory) {
+      try {
+        return { ok: true, value: factory() };
+      } catch (factoryError) {
+        return { ok: false, error: factoryError };
+      }
+    }
+    function reply(status, payload) {
+      process.stdout.write("Content-Type: application/json\r\n");
+      process.stdout.write(`Status: ${status}\r
+`);
+      process.stdout.write("\r\n");
+      process.stdout.write(JSON.stringify(payload));
+    }
+    function fail(error, status) {
+      const payload = {
+        ok: false,
+        code: error && error.code || "INTERNAL_ERROR",
+        reason: sanitizeText(error && error.message ? error.message : String(error || "unknown error")),
+        details: sanitizeDetails(error && error.details || {})
+      };
+      reply(status || statusForError(error), payload);
+    }
+    function statusForError(error) {
+      const code = String(error && error.code || "");
+      if (code === "REQUEST_TOO_LARGE" || code === "LOG_TOO_LARGE") return 413;
+      if (code === "DB_SERVER_CREATE_LOCKED") return 409;
+      if (code === "JOB_REVISION_REQUIRED" || code === "TIMEZONE_UNSUPPORTED" || code === "JOB_DATA_SOURCE_MISMATCH") return 400;
+      if (code === "RUNTIME_VERSION_INVALID") return 503;
+      if (/_INVALID$/.test(code) || code === "SETTINGS_INVALID") return 400;
+      if (/_NOT_FOUND$/.test(code)) return 404;
+      if (/_ALREADY_EXISTS$/.test(code) || /_IN_USE/.test(code) || /_READ_ONLY$/.test(code) || /_DEFAULT$/.test(code) || /_NOT_AVAILABLE$/.test(code) || code === "JOB_INVALID_CONFIG" || code === "DBUS_ARGUMENT_UNSUPPORTED" || code === "JOB_NAME_IMMUTABLE" || code === "JOB_CONFLICT" || code === "JOB_RUNNING" || code === "LOG_HOT_APPLY_NOT_AVAILABLE" || code === "SERVICE_NOT_INSTALLED" || code === "SERVICE_ALREADY_INSTALLED" || code === "SERVICE_NOT_RUNNING") return 409;
+      if (/CONTROLLER|UNAVAILABLE|UNKNOWN/.test(code)) return 503;
+      if (error && error.kind === "not_found") return 404;
+      if (error && error.kind === "conflict") return 409;
+      if (error && error.kind === "controller") return 503;
+      return 500;
+    }
+    function sanitizeDetails(value, key) {
+      if (sensitiveKey(key)) return "[REDACTED]";
+      if (Array.isArray(value)) return value.slice(0, 100).map((item) => sanitizeDetails(item));
+      if (value && typeof value === "object") {
+        const result = {};
+        Object.keys(value).slice(0, 100).forEach((name) => {
+          result[name] = sanitizeDetails(value[name], name);
+        });
+        return result;
+      }
+      return typeof value === "string" ? sanitizeText(value) : value;
+    }
+    module2.exports = {
+      parseQuery,
+      readQuery,
+      readBody,
+      reply,
+      fail,
+      statusForError,
+      requestError,
+      requireObject,
+      requireStringFields,
+      createFactory,
+      MAX_QUERY_BYTES,
+      MAX_REQUEST_JSON_BYTES
+    };
+  }
+});
+
+// cgi-bin/src/dbus/types.js
+var require_types = __commonJS({
+  "cgi-bin/src/dbus/types.js"(exports2, module2) {
+    "use strict";
+    var OBJECT_PATH = /^\/(?:[A-Za-z0-9_]+(?:\/[A-Za-z0-9_]+)*)?$/;
+    var INTEGER_LIMITS = {
+      byte: [0n, 255n],
+      uint16: [0n, 65535n],
+      uint32: [0n, 4294967295n],
+      uint64: [0n, 18446744073709551615n],
+      int16: [-32768n, 32767n],
+      int32: [-2147483648n, 2147483647n],
+      int64: [-9223372036854775808n, 9223372036854775807n]
+    };
+    var BASIC_TYPES = /* @__PURE__ */ new Set(["byte", "boolean", "int16", "uint16", "int32", "uint32", "int64", "uint64", "double", "unix-fd", "string", "object-path", "signature", "variant"]);
+    var DICT_KEY_TYPES = /* @__PURE__ */ new Set(["byte", "boolean", "int16", "uint16", "int32", "uint32", "int64", "uint64", "double", "unix-fd", "string", "object-path", "signature"]);
+    var BASIC_SIGNATURE_TYPES = new Set("ybnqiuxthdsoghv".split(""));
+    var SIGNATURE_TYPE_MAP = { y: "byte", b: "boolean", n: "int16", q: "uint16", i: "int32", u: "uint32", x: "int64", t: "uint64", d: "double", h: "unix-fd", s: "string", o: "object-path", g: "signature", v: "variant" };
+    var TYPE_SIGNATURE_MAP = Object.fromEntries(Object.entries(SIGNATURE_TYPE_MAP).map(([signature, type]) => [type, signature]));
+    function own(value, key) {
+      return Object.prototype.hasOwnProperty.call(value, key);
+    }
+    function object(value) {
+      return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+    }
+    function sameFields(value, fields) {
+      return Object.keys(value).length === fields.length && fields.every((field) => own(value, field));
+    }
+    function parseSignatureType(value, offset, depth) {
+      if (depth > 32 || offset >= value.length) return -1;
+      const type = value[offset];
+      if (BASIC_SIGNATURE_TYPES.has(type)) return offset + 1;
+      if (type === "a") {
+        if (value[offset + 1] === "{") {
+          const key = value[offset + 2];
+          if (!BASIC_SIGNATURE_TYPES.has(key) || key === "v") return -1;
+          const afterValue = parseSignatureType(value, offset + 3, depth + 1);
+          return afterValue >= 0 && value[afterValue] === "}" ? afterValue + 1 : -1;
+        }
+        return parseSignatureType(value, offset + 1, depth + 1);
+      }
+      if (type === "(") {
+        let cursor = offset + 1;
+        const first = cursor;
+        while (cursor < value.length && value[cursor] !== ")") {
+          cursor = parseSignatureType(value, cursor, depth + 1);
+          if (cursor < 0) return -1;
+        }
+        return cursor > first && value[cursor] === ")" ? cursor + 1 : -1;
+      }
+      return -1;
+    }
+    function validSignature(value) {
+      if (typeof value !== "string" || value.length > 255) return false;
+      let offset = 0;
+      while (offset < value.length) {
+        offset = parseSignatureType(value, offset, 0);
+        if (offset < 0) return false;
+      }
+      return true;
+    }
+    function parseType(value, offset, depth, allowDictEntry) {
+      if (depth > 32 || offset >= value.length) return null;
+      const token = value[offset];
+      if (own(SIGNATURE_TYPE_MAP, token)) return { value: SIGNATURE_TYPE_MAP[token], offset: offset + 1 };
+      if (token === "a") {
+        if (value[offset + 1] === "{") {
+          const keyToken = value[offset + 2];
+          if (!own(SIGNATURE_TYPE_MAP, keyToken) || keyToken === "v") return null;
+          const nested = parseType(value, offset + 3, depth + 1, false);
+          if (!nested || value[nested.offset] !== "}") return null;
+          return { value: { type: "array", element: { type: "dict-entry", key: SIGNATURE_TYPE_MAP[keyToken], value: nested.value } }, offset: nested.offset + 1 };
+        }
+        const element = parseType(value, offset + 1, depth + 1, true);
+        return element ? { value: { type: "array", element: element.value }, offset: element.offset } : null;
+      }
+      if (token === "(") {
+        const fields = [];
+        let cursor = offset + 1;
+        while (cursor < value.length && value[cursor] !== ")") {
+          const field = parseType(value, cursor, depth + 1, false);
+          if (!field) return null;
+          fields.push(field.value);
+          cursor = field.offset;
+        }
+        return fields.length && value[cursor] === ")" ? { value: { type: "struct", fields }, offset: cursor + 1 } : null;
+      }
+      if (allowDictEntry && token === "{") return null;
+      return null;
+    }
+    function typeFromSignature(value) {
+      if (typeof value !== "string" || !value || value.length > 255) return null;
+      const parsed = parseType(value, 0, 0, false);
+      return parsed && parsed.offset === value.length ? parsed.value : null;
+    }
+    function signatureFromType(type) {
+      const normalized = normalizeType(type, 0, true);
+      if (normalized === null) return null;
+      if (typeof normalized === "string") return TYPE_SIGNATURE_MAP[normalized] || null;
+      if (normalized.type === "array") {
+        const element = signatureFromType(normalized.element);
+        return element ? `a${element}` : null;
+      }
+      if (normalized.type === "dict-entry") {
+        const key = TYPE_SIGNATURE_MAP[normalized.key];
+        const value = signatureFromType(normalized.value);
+        return key && value ? `{${key}${value}}` : null;
+      }
+      const fields = normalized.fields.map(signatureFromType);
+      return fields.every(Boolean) ? `(${fields.join("")})` : null;
+    }
+    function normalizeType(value, depth, allowDictEntry) {
+      if ((depth || 0) > 32) return null;
+      if (typeof value === "string") return BASIC_TYPES.has(value) ? value : null;
+      if (!object(value) || typeof value.type !== "string") return null;
+      if (value.type === "array" && sameFields(value, ["type", "element"])) {
+        const element = normalizeType(value.element, (depth || 0) + 1, true);
+        return element === null ? null : { type: "array", element };
+      }
+      if (allowDictEntry && value.type === "dict-entry" && sameFields(value, ["type", "key", "value"])) {
+        const nested = normalizeType(value.value, (depth || 0) + 1, false);
+        return typeof value.key === "string" && DICT_KEY_TYPES.has(value.key) && nested !== null ? { type: "dict-entry", key: value.key, value: nested } : null;
+      }
+      if (value.type === "struct" && sameFields(value, ["type", "fields"]) && Array.isArray(value.fields) && value.fields.length) {
+        const fields = value.fields.map((field) => normalizeType(field, (depth || 0) + 1, false));
+        return fields.some((field) => field === null) ? null : { type: "struct", fields };
+      }
+      return null;
+    }
+    function typeName(type) {
+      return typeof type === "string" ? type : type && type.type ? type.type : "unknown";
+    }
+    function integerValue(type, value) {
+      try {
+        const integer = typeof value === "bigint" ? value : typeof value === "number" && Number.isSafeInteger(value) ? BigInt(value) : typeof value === "string" && /^-?(?:0|[1-9]\d*)$/.test(value) ? BigInt(value) : null;
+        const range = INTEGER_LIMITS[type];
+        return integer !== null && integer >= range[0] && integer <= range[1];
+      } catch (_) {
+        return false;
+      }
+    }
+    function isValueValid(type, value) {
+      const normalized = normalizeType(type, 0, true);
+      if (normalized === null || value === void 0 || value === null) return false;
+      if (typeof normalized === "object") {
+        if (normalized.type === "array") return Array.isArray(value) && value.every((item) => isValueValid(normalized.element, item));
+        if (normalized.type === "dict-entry") return object(value) && sameFields(value, ["key", "value"]) && isValueValid(normalized.key, value.key) && isValueValid(normalized.value, value.value);
+        return Array.isArray(value) && value.length === normalized.fields.length && normalized.fields.every((field, index) => isValueValid(field, value[index]));
+      }
+      if (own(INTEGER_LIMITS, normalized)) return integerValue(normalized, value);
+      if (normalized === "double") return typeof value === "number" && Number.isFinite(value);
+      if (normalized === "boolean") return typeof value === "boolean";
+      if (normalized === "string") return typeof value === "string";
+      if (normalized === "object-path") return typeof value === "string" && OBJECT_PATH.test(value);
+      if (normalized === "signature") return validSignature(value);
+      if (normalized === "unix-fd") return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+      return object(value) && sameFields(value, ["type", "value"]) && normalizeType(value.type) !== null && isValueValid(value.type, value.value);
+    }
+    function neoArgument(type, value) {
+      const normalized = normalizeType(type);
+      if (normalized === null || !isValueValid(normalized, value)) return null;
+      if (typeof normalized === "object" || normalized === "variant" || normalized === "unix-fd") return { unsupported: typeName(normalized) };
+      const neoType = normalized === "boolean" ? "bool" : normalized === "object-path" ? "objectpath" : normalized;
+      const text = own(INTEGER_LIMITS, normalized) ? BigInt(value).toString() : String(value);
+      return { value: `${neoType}:${text}` };
+    }
+    module2.exports = { normalizeType, typeName, isValueValid, neoArgument, validSignature, typeFromSignature, signatureFromType };
+  }
+});
+
+// cgi-bin/src/jobs/validator.js
+var require_validator = __commonJS({
+  "cgi-bin/src/jobs/validator.js"(exports2, module2) {
+    "use strict";
+    var { error } = require_errors();
+    var { isValueValid, normalizeType } = require_types();
+    var MAX_JOB_JSON_BYTES = 512 * 1024;
+    var MAX_METHOD_CALLS = 128;
+    var MAX_JOB_NAME_LENGTH = 100;
+    var MAX_TAG_NAME_LENGTH = 100;
+    var JOB_NAME = /^[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?$/;
+    var CALL_ID = /^[A-Za-z0-9](?:[A-Za-z0-9_-]*[A-Za-z0-9])?$/;
+    var SAFE_NAME = /^[A-Za-z0-9_][A-Za-z0-9_-]*$/;
+    var SQL_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_$]*$/;
+    var INTEGER_TYPES = /* @__PURE__ */ new Set(["byte", "uint16", "uint32", "uint64", "int16", "int32", "int64"]);
+    var WIDE_INTEGER_TYPES = /* @__PURE__ */ new Set(["uint64", "int64"]);
+    var NUMBER_TYPES = /* @__PURE__ */ new Set([...INTEGER_TYPES, "double"]);
+    var NATIVE_SCALAR_OUTPUT_TYPES = /* @__PURE__ */ new Set([
+      "byte",
+      "uint16",
+      "uint32",
+      "uint64",
+      "int16",
+      "int32",
+      "int64",
+      "double",
+      "boolean",
+      "string",
+      "object-path",
+      "signature"
+    ]);
+    var INTEGER_RANGES = {
+      byte: [0, 255],
+      uint8: [0, 255],
+      uint16: [0, 65535],
+      uint32: [0, 4294967295],
+      int16: [-32768, 32767],
+      int32: [-2147483648, 2147483647]
+    };
+    var WIDE_INTEGER_RANGES = {
+      uint64: [0n, 18446744073709551615n],
+      int64: [-9223372036854775808n, 9223372036854775807n]
+    };
+    var SAVE_POLICIES = /* @__PURE__ */ new Set(["perMethod", "afterAllMethods"]);
+    var METHOD_ERROR_POLICIES = /* @__PURE__ */ new Set(["stop"]);
+    var LOG_LEVELS = /* @__PURE__ */ new Set(["trace", "debug", "info", "warn", "error"]);
+    function invalid(reason, details) {
+      throw error("JOB_INVALID", reason, details);
+    }
+    function isObject(value) {
+      return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+    }
+    function assertObject(value, label) {
+      if (!isObject(value)) invalid(`${label}\uC740(\uB294) JSON \uAC1D\uCCB4\uC5EC\uC57C \uD569\uB2C8\uB2E4.`);
+    }
+    function assertFields(value, fields, label) {
+      const unknown = Object.keys(value).filter((key) => !fields.includes(key));
+      if (unknown.length) invalid(`${label}\uC5D0 \uC54C \uC218 \uC5C6\uB294 \uD544\uB4DC\uAC00 \uC788\uC2B5\uB2C8\uB2E4.`, { fields: unknown });
+    }
+    function utf8Bytes(value) {
+      return unescape(encodeURIComponent(value)).length;
+    }
+    function clone(value) {
+      return JSON.parse(JSON.stringify(value));
+    }
+    function isValidJobName(name) {
+      return typeof name === "string" && name.length <= MAX_JOB_NAME_LENGTH && JOB_NAME.test(name) && !/[\\/]/.test(name);
+    }
+    function validateJobName(name) {
+      if (!isValidJobName(name)) {
+        invalid(`Job name\uC740 \uCD5C\uB300 ${MAX_JOB_NAME_LENGTH}\uC790\uC758 \uC601\uBB38 \uC18C\uBB38\uC790, \uC22B\uC790, _, -\uB9CC \uC0AC\uC6A9\uD558\uACE0 \uCC98\uC74C\uACFC \uB05D\uC740 \uC601\uBB38 \uC18C\uBB38\uC790 \uB610\uB294 \uC22B\uC790\uC5EC\uC57C \uD569\uB2C8\uB2E4.`);
+      }
+      return name;
+    }
+    function deepMerge(base, patch) {
+      if (!isObject(base) || !isObject(patch)) return clone(patch);
+      const result = clone(base);
+      Object.keys(patch).forEach((key) => {
+        const next = patch[key];
+        result[key] = isObject(next) && isObject(result[key]) ? deepMerge(result[key], next) : clone(next);
+      });
+      return result;
+    }
+    function inputName(input) {
+      return input.id || input.name;
+    }
+    function validateInputValue(input, value) {
+      const name = inputName(input);
+      if (value === void 0 || value === null) {
+        if (input.required !== false) invalid(`\uD544\uC218 input ${name} \uAC12\uC774 \uC5C6\uC2B5\uB2C8\uB2E4.`, { inputId: name });
+        return;
+      }
+      const type = normalizeType(input.type);
+      if (type === null || !isValueValid(type, value)) {
+        invalid(`input ${name} \uAC12\uC758 type\uC774 ${typeof type === "string" ? type : "DBusType"}\uC774 \uC544\uB2D9\uB2C8\uB2E4.`, { inputId: name });
+      }
+      if (typeof type !== "string") return;
+      function wideBound(source, label) {
+        let result;
+        try {
+          if (typeof source === "number" && Number.isSafeInteger(source)) result = BigInt(source);
+          else if (typeof source === "string" && /^-?(?:0|[1-9]\d*)$/.test(source)) result = BigInt(source);
+          else invalid(`input ${input.id} ${label}\uC758 ${input.type} \uC815\uC218 \uD615\uC2DD\uC774 \uC798\uBABB\uB418\uC5C8\uC2B5\uB2C8\uB2E4.`, { inputId: input.id });
+        } catch (_) {
+          invalid(`input ${input.id} ${label}\uC758 ${input.type} \uC815\uC218 \uD615\uC2DD\uC774 \uC798\uBABB\uB418\uC5C8\uC2B5\uB2C8\uB2E4.`, { inputId: input.id });
+        }
+        const range = WIDE_INTEGER_RANGES[type];
+        if (result < range[0] || result > range[1]) {
+          invalid(`input ${input.id} ${label}\uC774 ${input.type} \uBC94\uC704\uB97C \uBC97\uC5B4\uB0AC\uC2B5\uB2C8\uB2E4.`, { inputId: input.id });
+        }
+        return result;
+      }
+      let wideInteger = null;
+      if (WIDE_INTEGER_TYPES.has(type)) {
+        wideInteger = wideBound(value, "\uAC12");
+      } else if (NUMBER_TYPES.has(type)) {
+        if (typeof value !== "number" || !Number.isFinite(value) || INTEGER_TYPES.has(type) && !Number.isInteger(value)) {
+          invalid(`input ${input.id} \uAC12\uC758 type\uC774 ${input.type}\uC774 \uC544\uB2D9\uB2C8\uB2E4.`, { inputId: input.id });
+        }
+        const range = INTEGER_RANGES[type];
+        if (range && (value < range[0] || value > range[1])) {
+          invalid(`input ${input.id} \uAC12\uC774 ${input.type} \uBC94\uC704\uB97C \uBC97\uC5B4\uB0AC\uC2B5\uB2C8\uB2E4.`, { inputId: input.id });
+        }
+      }
+      const rules = input.validation || {};
+      if (wideInteger !== null) {
+        const minimum = rules.minimum === void 0 ? null : wideBound(rules.minimum, "minimum");
+        const maximum = rules.maximum === void 0 ? null : wideBound(rules.maximum, "maximum");
+        if (minimum !== null && maximum !== null && minimum > maximum) invalid(`input ${input.id} minimum\uC740 maximum\uBCF4\uB2E4 \uD074 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.`, { inputId: input.id });
+        if (minimum !== null && wideInteger < minimum) invalid(`input ${input.id} \uAC12\uC774 minimum\uBCF4\uB2E4 \uC791\uC2B5\uB2C8\uB2E4.`, { inputId: input.id });
+        if (maximum !== null && wideInteger > maximum) invalid(`input ${input.id} \uAC12\uC774 maximum\uBCF4\uB2E4 \uD07D\uB2C8\uB2E4.`, { inputId: input.id });
+      } else {
+        if (rules.minimum !== void 0 && value < rules.minimum) invalid(`input ${input.id} \uAC12\uC774 minimum\uBCF4\uB2E4 \uC791\uC2B5\uB2C8\uB2E4.`, { inputId: input.id });
+        if (rules.maximum !== void 0 && value > rules.maximum) invalid(`input ${input.id} \uAC12\uC774 maximum\uBCF4\uB2E4 \uD07D\uB2C8\uB2E4.`, { inputId: input.id });
+      }
+      if (rules.pattern !== void 0 && !new RegExp(rules.pattern).test(value)) {
+        invalid(`input ${input.id} \uAC12\uC774 pattern\uACFC \uB9DE\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.`, { inputId: input.id });
+      }
+    }
+    function validateTag(tag, names) {
+      assertObject(tag, "Tag");
+      assertFields(tag, ["outputIndex", "sourceAddress", "name", "bias", "multiplier", "calcOrder", "transformOrder", "conversion", "signed"], "Tag");
+      if (typeof tag.name !== "string" || !tag.name.trim()) {
+        invalid("Tag name\uC774 \uD544\uC694\uD569\uB2C8\uB2E4.");
+      }
+      if (tag.name.length > MAX_TAG_NAME_LENGTH) invalid(`Tag name\uC740 ${MAX_TAG_NAME_LENGTH}\uC790 \uC774\uD558\uC5EC\uC57C \uD569\uB2C8\uB2E4.`, { name: tag.name });
+      if (names.has(tag.name)) invalid("Job \uC548\uC5D0\uC11C Tag name\uC740 \uC911\uBCF5\uB420 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.", { name: tag.name });
+      names.add(tag.name);
+      if (typeof tag.bias !== "number" || !Number.isFinite(tag.bias) || typeof tag.multiplier !== "number" || !Number.isFinite(tag.multiplier)) {
+        invalid("Tag bias\uC640 multiplier\uB294 \uC720\uD55C\uD55C \uC22B\uC790\uC5EC\uC57C \uD569\uB2C8\uB2E4.");
+      }
+      if (tag.transformOrder !== void 0 && (!Array.isArray(tag.transformOrder) || tag.transformOrder.length !== 2 || new Set(tag.transformOrder).size !== 2 || !tag.transformOrder.includes("bias") || !tag.transformOrder.includes("multiplier"))) {
+        invalid("Tag transformOrder\uB294 bias\uC640 multiplier\uB97C \uAC01\uAC01 \uD55C \uBC88\uC529 \uAC00\uC838\uC57C \uD569\uB2C8\uB2E4.");
+      }
+      if (tag.conversion !== void 0 && !["BYTE2INT", "WORD2INT", "DWORD2INT", "DWORD2REAL", "LWORD2INT", "LWORD2LREAL"].includes(tag.conversion)) {
+        invalid("Tag conversion\uC744 \uC9C0\uC6D0\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.");
+      }
+      if (tag.signed !== void 0 && typeof tag.signed !== "boolean") invalid("Tag signed\uB294 boolean\uC774\uC5B4\uC57C \uD569\uB2C8\uB2E4.");
+      return { name: tag.name, bias: tag.bias, multiplier: tag.multiplier, ...tag.conversion ? { conversion: tag.conversion } : {}, signed: tag.signed === true, ...tag.transformOrder ? { transformOrder: tag.transformOrder.slice() } : {} };
+    }
+    function validateMethodCall(call, interfaceStore, options, callIds, callNames, tagNames) {
+      assertObject(call, "Method Call");
+      assertFields(call, ["id", "name", "interfaceId", "methodId", "inputs", "tags", "outputSelections"], "Method Call");
+      if (!CALL_ID.test(call.id || "") || callIds.has(call.id)) invalid("Method Call ID\uB294 \uC720\uD6A8\uD558\uACE0 \uC720\uC77C\uD574\uC57C \uD569\uB2C8\uB2E4.", { id: call.id });
+      callIds.add(call.id);
+      if (typeof call.name !== "string" || !call.name.trim() || callNames.has(call.name)) {
+        invalid("Method Call name\uC740 \uBE44\uC5B4 \uC788\uC9C0 \uC54A\uACE0 \uC720\uC77C\uD574\uC57C \uD569\uB2C8\uB2E4.", { name: call.name });
+      }
+      callNames.add(call.name);
+      const dbusInterface = interfaceStore && interfaceStore.find(call.interfaceId);
+      if (!dbusInterface) invalid("DBus Interface\uB97C \uCC3E\uC744 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.", { interfaceId: call.interfaceId });
+      const method = dbusInterface.methods.find((item) => item.id === call.methodId);
+      if (!method) invalid("DBus Interface\uC5D0\uC11C Method\uB97C \uCC3E\uC744 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.", { interfaceId: call.interfaceId, methodId: call.methodId });
+      assertObject(call.inputs, "Method Call inputs");
+      const allowedInputs = new Set(method.inputs.map(inputName));
+      const unknownInputs = Object.keys(call.inputs).filter((id) => !allowedInputs.has(id));
+      if (unknownInputs.length) invalid("\uC815\uC758\uB418\uC9C0 \uC54A\uC740 Method input\uC774 \uC788\uC2B5\uB2C8\uB2E4.", { inputs: unknownInputs });
+      method.inputs.forEach((input) => validateInputValue(input, call.inputs[inputName(input)]));
+      const legacyTags = Array.isArray(call.tags) ? call.tags : null;
+      const selections = Array.isArray(call.outputSelections) ? call.outputSelections : null;
+      if (!legacyTags && !selections) invalid("Method Call\uC740 tags \uB610\uB294 outputSelections\uAC00 \uD544\uC694\uD569\uB2C8\uB2E4.");
+      if (legacyTags && selections) invalid("Method Call\uC740 tags\uC640 outputSelections\uB97C \uD568\uAED8 \uAC00\uC9C8 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.");
+      const tagGroups = selections ? selections.map((selection) => ({ ...selection, tags: Array.isArray(selection.tags) ? selection.tags.slice() : selection.tags })) : [{ id: "legacy", sourceIndex: 0, path: "", mode: "each", tags: legacyTags.slice() }];
+      const selectionIds = /* @__PURE__ */ new Set();
+      tagGroups.forEach((selection) => {
+        assertObject(selection, "Output selection");
+        const legacySelection = Object.prototype.hasOwnProperty.call(selection, "path") || Object.prototype.hasOwnProperty.call(selection, "mode");
+        assertFields(selection, legacySelection ? ["id", "sourceIndex", "interpretation", "path", "mode", "tags"] : ["id", "sourceIndex", "interpretation", "selector", "valueType", "elementType", "tags"], "Output selection");
+        const basicInvalid = !CALL_ID.test(selection.id || "") || selectionIds.has(selection.id) || !Number.isInteger(selection.sourceIndex) || selection.sourceIndex < 0 || !["native", "json"].includes(selection.interpretation || "native") || !Array.isArray(selection.tags);
+        const nativeScalar = !legacySelection && selection.interpretation !== "json" && NATIVE_SCALAR_OUTPUT_TYPES.has(method.outputs[selection.sourceIndex]?.type);
+        const selectionInvalid = legacySelection ? typeof selection.path !== "string" || !["single", "each"].includes(selection.mode) : nativeScalar ? selection.selector !== void 0 && typeof selection.selector !== "string" || selection.valueType !== void 0 && !["numeric", "string", "json", "array"].includes(selection.valueType) || selection.valueType === "array" && !["numeric", "string", "json"].includes(selection.elementType) || selection.valueType !== "array" && selection.elementType !== void 0 : typeof selection.selector !== "string" || !["numeric", "string", "json", "array"].includes(selection.valueType) || selection.valueType === "array" && !["numeric", "string", "json"].includes(selection.elementType) || selection.valueType !== "array" && selection.elementType !== void 0;
+        if (basicInvalid || selectionInvalid) invalid("Output selection \uD615\uC2DD\uC774 \uC798\uBABB\uB418\uC5C8\uC2B5\uB2C8\uB2E4.");
+        if (nativeScalar) {
+          delete selection.selector;
+          delete selection.valueType;
+          delete selection.elementType;
+        }
+        selectionIds.add(selection.id);
+        if (selections && selection.sourceIndex >= method.outputs.length) invalid("Output selection sourceIndex\uAC00 Method output \uBC94\uC704\uB97C \uBC97\uC5B4\uB0AC\uC2B5\uB2C8\uB2E4.", { sourceIndex: selection.sourceIndex, methodId: method.id });
+        if (selection.interpretation === "json" && method.outputs[selection.sourceIndex]?.type !== "string") invalid("JSON \uD574\uC11D\uC740 string output\uC5D0\uB9CC \uC0AC\uC6A9\uD560 \uC218 \uC788\uC2B5\uB2C8\uB2E4.", { sourceIndex: selection.sourceIndex, methodId: method.id });
+        if (legacySelection && selection.mode === "single" || !legacySelection && (nativeScalar || selection.valueType !== "array")) {
+          if (selection.tags.length !== 1) invalid("\uB2E8\uC77C output selection\uC740 Tag \uD558\uB098\uAC00 \uD544\uC694\uD569\uB2C8\uB2E4.");
+        }
+      });
+      const tags = tagGroups.flatMap((selection) => selection.tags);
+      if (tags.length > options.limits.maxGeneratedTagsPerCall) {
+        invalid("Method Call Tag \uAC1C\uC218\uAC00 maxGeneratedTagsPerCall\uC744 \uB118\uC5C8\uC2B5\uB2C8\uB2E4.");
+      }
+      tagGroups.forEach((selection) => {
+        selection.tags = selection.tags.map((tag) => validateTag(tag, tagNames));
+      });
+      return {
+        id: call.id,
+        name: call.name,
+        interfaceId: call.interfaceId,
+        methodId: call.methodId,
+        inputs: clone(call.inputs),
+        ...selections ? { outputSelections: clone(tagGroups) } : { tags: clone(tagGroups[0].tags) }
+      };
+    }
+    function validateJobConfig(value, options) {
+      const settings = options || {};
+      assertObject(value, "Job config");
+      if (Object.prototype.hasOwnProperty.call(value, "name")) invalid("config\uC5D0\uB294 name\uC744 \uB123\uC744 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.");
+      const maxJobJsonBytes = Number.isInteger(settings.maxJobJsonBytes) && settings.maxJobJsonBytes >= MAX_JOB_JSON_BYTES ? settings.maxJobJsonBytes : MAX_JOB_JSON_BYTES;
+      if (utf8Bytes(JSON.stringify(value)) > maxJobJsonBytes) invalid(`Job JSON\uC740 ${maxJobJsonBytes} bytes \uC774\uD558\uC5EC\uC57C \uD569\uB2C8\uB2E4.`);
+      assertFields(value, [
+        "schemaVersion",
+        "schedule",
+        "retry",
+        "execution",
+        "methodCalls",
+        "database",
+        "log"
+      ], "Job config");
+      if (value.schemaVersion !== 1) invalid("Job schemaVersion\uC740 1\uC774\uC5B4\uC57C \uD569\uB2C8\uB2E4.");
+      if (!settings.interfaceStore || typeof settings.interfaceStore.find !== "function") {
+        invalid("DBus Interface \uC800\uC7A5\uC18C\uAC00 \uD544\uC694\uD569\uB2C8\uB2E4.");
+      }
+      const limits = settings.limits || {};
+      if (!Number.isInteger(limits.maxGeneratedTagsPerCall) || limits.maxGeneratedTagsPerCall < 1 || !Number.isInteger(limits.maxBufferedRowsPerCycle) || limits.maxBufferedRowsPerCycle < 1) {
+        invalid("Job validation limits\uAC00 \uC798\uBABB\uB418\uC5C8\uC2B5\uB2C8\uB2E4.");
+      }
+      assertObject(value.schedule, "schedule");
+      assertFields(value.schedule, settings.allowAbsoluteTimer ? ["intervalMs", "useAbsoluteTimer"] : ["intervalMs"], "schedule");
+      if (value.schedule.useAbsoluteTimer !== void 0 && typeof value.schedule.useAbsoluteTimer !== "boolean") invalid("schedule.useAbsoluteTimer\uB294 boolean\uC774\uC5B4\uC57C \uD569\uB2C8\uB2E4.");
+      const minimumIntervalMs = Number.isInteger(settings.minimumIntervalMs) ? settings.minimumIntervalMs : 1e3;
+      if (!Number.isInteger(value.schedule.intervalMs) || value.schedule.intervalMs < minimumIntervalMs || value.schedule.intervalMs > 864e5) invalid(`schedule.intervalMs\uB294 ${minimumIntervalMs}~86400000 \uC815\uC218\uC5EC\uC57C \uD569\uB2C8\uB2E4.`);
+      const intervalCycleMs = Number.isInteger(settings.intervalCycleMs) && settings.intervalCycleMs > 0 ? settings.intervalCycleMs : 1;
+      if (value.schedule.intervalMs < intervalCycleMs || value.schedule.intervalMs % intervalCycleMs !== 0) invalid(`schedule.intervalMs\uB294 ${intervalCycleMs}ms\uC758 \uBC30\uC218\uC5EC\uC57C \uD569\uB2C8\uB2E4.`);
+      assertObject(value.retry, "retry");
+      assertFields(value.retry, ["initialDelayMs", "maximumDelayMs", "multiplier"], "retry");
+      if (!Number.isInteger(value.retry.initialDelayMs) || value.retry.initialDelayMs < 1 || !Number.isInteger(value.retry.maximumDelayMs) || value.retry.maximumDelayMs < value.retry.initialDelayMs || value.retry.maximumDelayMs > 864e5 || typeof value.retry.multiplier !== "number" || !Number.isFinite(value.retry.multiplier) || value.retry.multiplier < 1 || value.retry.multiplier > 100) {
+        invalid("retry \uC124\uC815 \uBC94\uC704\uAC00 \uC798\uBABB\uB418\uC5C8\uC2B5\uB2C8\uB2E4.");
+      }
+      assertObject(value.execution, "execution");
+      assertFields(value.execution, ["savePolicy", "onMethodError", "test"], "execution");
+      if (!SAVE_POLICIES.has(value.execution.savePolicy) || !METHOD_ERROR_POLICIES.has(value.execution.onMethodError)) invalid("execution policy\uAC00 \uC798\uBABB\uB418\uC5C8\uC2B5\uB2C8\uB2E4.");
+      if (value.execution.test !== void 0 && typeof value.execution.test !== "boolean") invalid("execution.test\uB294 boolean\uC774\uC5B4\uC57C \uD569\uB2C8\uB2E4.");
+      if (!Array.isArray(value.methodCalls) || value.methodCalls.length < 1 || value.methodCalls.length > MAX_METHOD_CALLS) {
+        invalid(`methodCalls\uB294 1~${MAX_METHOD_CALLS}\uAC1C\uC5EC\uC57C \uD569\uB2C8\uB2E4.`);
+      }
+      const callIds = /* @__PURE__ */ new Set();
+      const callNames = /* @__PURE__ */ new Set();
+      const tagNames = /* @__PURE__ */ new Set();
+      const methodCalls = value.methodCalls.map((call) => validateMethodCall(
+        call,
+        settings.interfaceStore,
+        { limits },
+        callIds,
+        callNames,
+        tagNames
+      ));
+      const rowCount = methodCalls.reduce((sum, call) => sum + (call.outputSelections ? call.outputSelections.reduce((count, selection) => count + selection.tags.length, 0) : call.tags.length), 0);
+      if (rowCount > limits.maxBufferedRowsPerCycle) invalid("Job Tag \uC804\uCCB4 \uAC1C\uC218\uAC00 maxBufferedRowsPerCycle\uC744 \uB118\uC5C8\uC2B5\uB2C8\uB2E4.");
+      assertObject(value.database, "database");
+      assertFields(value.database, ["server", "table", "valueColumn", "stringValueColumn"], "database");
+      if (!SAFE_NAME.test(value.database.server || "") || !SQL_IDENTIFIER.test(value.database.table || "") || !SQL_IDENTIFIER.test(value.database.valueColumn || "") || value.database.stringValueColumn !== "" && !SQL_IDENTIFIER.test(value.database.stringValueColumn || "")) invalid("database \uC774\uB984 \uB610\uB294 column \uD615\uC2DD\uC774 \uC798\uBABB\uB418\uC5C8\uC2B5\uB2C8\uB2E4.");
+      assertObject(value.log, "log");
+      assertFields(value.log, ["level", "maxFiles"], "log");
+      if (!LOG_LEVELS.has(value.log.level) || !Number.isInteger(value.log.maxFiles) || value.log.maxFiles < 1 || value.log.maxFiles > 1e3) invalid("log \uC124\uC815\uC774 \uC798\uBABB\uB418\uC5C8\uC2B5\uB2C8\uB2E4.");
+      const normalized = clone(value);
+      if (settings.allowAbsoluteTimer) normalized.schedule.useAbsoluteTimer = normalized.schedule.useAbsoluteTimer === true;
+      normalized.database.table = normalized.database.table.toUpperCase();
+      normalized.execution.test = normalized.execution.test === true;
+      normalized.methodCalls = methodCalls;
+      return normalized;
+    }
+    module2.exports = {
+      CALL_ID,
+      JOB_NAME,
+      MAX_JOB_JSON_BYTES,
+      MAX_JOB_NAME_LENGTH,
+      MAX_METHOD_CALLS,
+      MAX_TAG_NAME_LENGTH,
+      deepMerge,
+      isValidJobName,
+      validateJobConfig,
+      validateJobName
+    };
+  }
+});
+
+// cgi-bin/src/jobs/repository.js
+var require_repository = __commonJS({
+  "cgi-bin/src/jobs/repository.js"(exports2, module2) {
+    "use strict";
+    var fs = require("fs");
+    var path = require("path");
+    var { writeJsonAtomic } = require_atomic_json();
+    var { error } = require_errors();
+    var { validateJobName } = require_validator();
+    function invalidConfig(name, documentName, reason) {
+      return error("JOB_INVALID_CONFIG", reason || "Job \uD30C\uC77C\uBA85\uACFC document name\uC774 \uB2E4\uB985\uB2C8\uB2E4.", {
+        name,
+        documentName
+      });
+    }
+    function revisionOf(document) {
+      return Number.isSafeInteger(document && document.revision) && document.revision >= 1 ? document.revision : 1;
+    }
+    var JobRepository = class {
+      constructor(options) {
+        this.directory = options && options.jobDir || path.join(options.cgiRoot, "conf.d", "jobs");
+        fs.mkdirSync(this.directory, { recursive: true });
+      }
+      file(name) {
+        return path.join(this.directory, `${validateJobName(name)}.json`);
+      }
+      exists(name) {
+        return fs.existsSync(this.file(name));
+      }
+      parse(name) {
+        let document;
+        try {
+          document = JSON.parse(fs.readFileSync(this.file(name), "utf8"));
+        } catch (readError) {
+          if (readError && readError.code === "ENOENT") {
+            throw error("JOB_NOT_FOUND", "Job\uC744 \uCC3E\uC744 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.", { name });
+          }
+          throw invalidConfig(name, null, `Job JSON\uC744 \uC77D\uC744 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4: ${readError.message}`);
+        }
+        if (!document || typeof document !== "object" || Array.isArray(document)) {
+          throw invalidConfig(name, null, "Job document\uB294 \uAC1D\uCCB4\uC5EC\uC57C \uD569\uB2C8\uB2E4.");
+        }
+        if (document.name !== name) throw invalidConfig(name, document.name);
+        return document;
+      }
+      read(name) {
+        validateJobName(name);
+        return this.parse(name);
+      }
+      create(name, config) {
+        validateJobName(name);
+        const file = this.file(name);
+        const document = { ...config, name, revision: 1 };
+        let descriptor = null;
+        try {
+          descriptor = fs.openSync(file, "wx");
+          fs.writeSync(descriptor, `${JSON.stringify(document, null, 2)}
+`);
+          if (typeof fs.fsyncSync === "function") fs.fsyncSync(descriptor);
+          fs.closeSync(descriptor);
+          descriptor = null;
+        } catch (writeError) {
+          if (descriptor !== null) {
+            try {
+              fs.closeSync(descriptor);
+            } catch (_) {
+            }
+            try {
+              fs.unlinkSync(file);
+            } catch (_) {
+            }
+          }
+          if (writeError && writeError.code === "EEXIST") {
+            throw error("JOB_ALREADY_EXISTS", "\uAC19\uC740 \uC774\uB984\uC758 Job\uC774 \uC774\uBBF8 \uC788\uC2B5\uB2C8\uB2E4.", { name });
+          }
+          throw writeError;
+        }
+        return document;
+      }
+      // LS holds the per-Job mutation lock before calling this method, so the
+      // canonical document can be committed with the same atomic file replacement
+      // used by Update. This avoids leaving a partially written 1MB Job after an
+      // interrupted CGI process.
+      createAtomic(name, config) {
+        validateJobName(name);
+        if (this.exists(name)) throw error("JOB_ALREADY_EXISTS", "\uAC19\uC740 \uC774\uB984\uC758 Job\uC774 \uC774\uBBF8 \uC788\uC2B5\uB2C8\uB2E4.", { name });
+        const document = { ...config, name, revision: 1 };
+        writeJsonAtomic(this.file(name), document);
+        return document;
+      }
+      save(name, document, expectedRevision) {
+        validateJobName(name);
+        const file = this.file(name);
+        const current = this.read(name);
+        if (!document || document.name !== name) throw invalidConfig(name, document && document.name);
+        const currentRevision = revisionOf(current);
+        if (expectedRevision !== currentRevision) {
+          throw error("JOB_CONFLICT", "\uB2E4\uB978 \uAD00\uB9AC\uC790\uAC00 Job\uC744 \uC218\uC815\uD588\uC2B5\uB2C8\uB2E4. \uCD5C\uC2E0 \uC124\uC815\uC744 \uB2E4\uC2DC \uC77D\uC740 \uB4A4 \uC218\uC815\uD558\uC138\uC694.", {
+            name,
+            expectedRevision,
+            currentRevision
+          });
+        }
+        writeJsonAtomic(file, document);
+        return document;
+      }
+      remove(name) {
+        this.read(name);
+        fs.unlinkSync(this.file(name));
+        return { name };
+      }
+      discard(name) {
+        const file = this.file(name);
+        try {
+          fs.unlinkSync(file);
+        } catch (failure) {
+          if (!failure || failure.code !== "ENOENT") throw failure;
+        }
+        return { name };
+      }
+      list() {
+        if (!fs.existsSync(this.directory)) return [];
+        return fs.readdirSync(this.directory).filter((entry) => entry.endsWith(".json")).sort().map((entry) => {
+          const name = entry.slice(0, -5);
+          try {
+            validateJobName(name);
+            const document = this.read(name);
+            return { name, document, documentName: document.name, error: null };
+          } catch (readError) {
+            let documentName = null;
+            try {
+              documentName = JSON.parse(fs.readFileSync(path.join(this.directory, entry), "utf8")).name;
+            } catch (_) {
+            }
+            return { name, document: null, documentName, error: readError };
+          }
+        });
+      }
+    };
+    module2.exports = { JobRepository, revisionOf };
   }
 });
 
@@ -3061,152 +3754,6 @@ var require_validation_adapter = __commonJS({
   }
 });
 
-// cgi-bin/src/config/settings-validator.js
-var require_settings_validator = __commonJS({
-  "cgi-bin/src/config/settings-validator.js"(exports2, module2) {
-    "use strict";
-    var { error } = require_errors();
-    function positiveInteger(value) {
-      return Number.isInteger(value) && value > 0;
-    }
-    function loggingPolicy(value) {
-      if (!value || typeof value !== "object" || Array.isArray(value) || !positiveInteger(value.maxFileBytes) || value.maxFileBytes < 64 * 1024 || value.maxFileBytes > 10 * 1024 * 1024 || !positiveInteger(value.maxFiles) || value.maxFiles > 10 || !positiveInteger(value.summaryIntervalMs) || value.summaryIntervalMs < 60 * 1e3 || value.summaryIntervalMs > 24 * 60 * 60 * 1e3) {
-        throw error("SETTINGS_INVALID", "logging \uC124\uC815\uC774 \uC798\uBABB\uB418\uC5C8\uC2B5\uB2C8\uB2E4.");
-      }
-      return {
-        maxFileBytes: value.maxFileBytes,
-        maxFiles: value.maxFiles,
-        summaryIntervalMs: value.summaryIntervalMs
-      };
-    }
-    function lsPolicy(value) {
-      if (value === void 0) return null;
-      const interval = value?.interval;
-      const timer = value?.timer === void 0 ? { showAbsoluteTimerOption: true, defaultUseAbsoluteTimer: false } : value.timer;
-      const writer = value?.writer;
-      const performance = value?.performance;
-      if (!value || typeof value !== "object" || Array.isArray(value) || !interval || typeof interval !== "object" || Array.isArray(interval) || typeof interval.useTaskCycle !== "boolean" || !timer || typeof timer !== "object" || Array.isArray(timer) || typeof timer.showAbsoluteTimerOption !== "boolean" || typeof timer.defaultUseAbsoluteTimer !== "boolean" || !writer || typeof writer !== "object" || Array.isArray(writer) || !positiveInteger(writer.queueCapacity) || writer.queueCapacity > 1024 || !positiveInteger(writer.flushMaxRows) || writer.flushMaxRows > 65535 || !positiveInteger(writer.flushIntervalMs) || writer.flushIntervalMs > 60 * 60 * 1e3 || !performance || typeof performance !== "object" || Array.isArray(performance) || typeof performance.enabled !== "boolean" || performance.overrunDetailEnabled !== void 0 && typeof performance.overrunDetailEnabled !== "boolean" || !positiveInteger(performance.jobSampleCount) || !positiveInteger(performance.writerSummaryIntervalMs)) {
-        throw error("SETTINGS_INVALID", "LS interval \uC124\uC815\uC774 \uC798\uBABB\uB418\uC5C8\uC2B5\uB2C8\uB2E4.");
-      }
-      return {
-        interval: { useTaskCycle: interval.useTaskCycle },
-        timer: { showAbsoluteTimerOption: timer.showAbsoluteTimerOption, defaultUseAbsoluteTimer: timer.defaultUseAbsoluteTimer },
-        // Shared writer settings; users do not edit them in the frontend.
-        writer: {
-          queueCapacity: writer.queueCapacity,
-          flushMaxRows: writer.flushMaxRows,
-          flushIntervalMs: writer.flushIntervalMs
-        },
-        // Go applies the operational floors and records a correction in the Job
-        // log. Preserve the requested values here so that audit message can show
-        // both the configured and applied values.
-        performance: {
-          enabled: performance.enabled,
-          jobSampleCount: performance.jobSampleCount,
-          writerSummaryIntervalMs: performance.writerSummaryIntervalMs,
-          overrunDetailEnabled: performance.overrunDetailEnabled !== false
-        }
-      };
-    }
-    function validateSettings(value) {
-      if (!value || typeof value !== "object" || Array.isArray(value)) {
-        throw error("SETTINGS_INVALID", "settings\uB294 JSON \uAC1D\uCCB4\uC5EC\uC57C \uD569\uB2C8\uB2E4.");
-      }
-      if (value.schemaVersion !== 1) {
-        throw error("SETTINGS_INVALID", "settings schemaVersion\uC740 1\uC774\uC5B4\uC57C \uD569\uB2C8\uB2E4.");
-      }
-      if (!value.limits || !positiveInteger(value.limits.maxGeneratedTagsPerCall) || !positiveInteger(value.limits.maxBufferedRowsPerCycle)) {
-        throw error("SETTINGS_INVALID", "limits \uAC12\uC740 0\uBCF4\uB2E4 \uD070 \uC815\uC218\uC5EC\uC57C \uD569\uB2C8\uB2E4.");
-      }
-      const defaults = value.defaults;
-      if (!defaults || typeof defaults !== "object" || Array.isArray(defaults) || !defaults.database || typeof defaults.database !== "object" || Array.isArray(defaults.database) || typeof defaults.database.server !== "string" || !defaults.database.server) {
-        throw error("SETTINGS_INVALID", "\uAE30\uBCF8 Database \uC124\uC815\uC774 \uC798\uBABB\uB418\uC5C8\uC2B5\uB2C8\uB2E4.");
-      }
-      return {
-        schemaVersion: 1,
-        limits: {
-          maxGeneratedTagsPerCall: value.limits.maxGeneratedTagsPerCall,
-          maxBufferedRowsPerCycle: value.limits.maxBufferedRowsPerCycle
-        },
-        defaults: {
-          database: { server: defaults.database.server }
-        },
-        logging: loggingPolicy(value.logging),
-        ...lsPolicy(value.ls) ? { ls: lsPolicy(value.ls) } : {}
-      };
-    }
-    module2.exports = { validateSettings };
-  }
-});
-
-// cgi-bin/src/config/settings-loader.js
-var require_settings_loader = __commonJS({
-  "cgi-bin/src/config/settings-loader.js"(exports2, module2) {
-    "use strict";
-    var fs = require("fs");
-    var { error } = require_errors();
-    var { validateSettings } = require_settings_validator();
-    function defaultSettings() {
-      return {
-        schemaVersion: 1,
-        limits: {
-          maxGeneratedTagsPerCall: 1e3,
-          maxBufferedRowsPerCycle: 1e4
-        },
-        defaults: {
-          database: { server: "localhost" }
-        },
-        logging: {
-          maxFileBytes: 1024 * 1024,
-          maxFiles: 3,
-          summaryIntervalMs: 60 * 60 * 1e3
-        },
-        // LS writer tuning is intentionally an internal deployment setting. It
-        // is copied into the Go collector policy file but is not exposed in the UI.
-        ls: {
-          interval: { useTaskCycle: true },
-          timer: { showAbsoluteTimerOption: true, defaultUseAbsoluteTimer: false },
-          writer: { queueCapacity: 512, flushMaxRows: 8192, flushIntervalMs: 1e3 },
-          performance: { enabled: true, jobSampleCount: 1e3, writerSummaryIntervalMs: 3e4, overrunDetailEnabled: true }
-        }
-      };
-    }
-    function loadSettings(file) {
-      let value;
-      try {
-        value = JSON.parse(fs.readFileSync(file, "utf8"));
-      } catch (readError) {
-        if (readError && readError.code === "ENOENT") return defaultSettings();
-        throw error("SETTINGS_INVALID", "settings \uD30C\uC77C\uC744 \uC77D\uC744 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.", {
-          message: readError.message
-        });
-      }
-      const base = defaultSettings();
-      const defaults = value.defaults && typeof value.defaults === "object" && !Array.isArray(value.defaults) ? value.defaults : {};
-      return validateSettings({
-        ...base,
-        ...value,
-        limits: value.limits || base.limits,
-        defaults: {
-          ...base.defaults,
-          ...defaults,
-          database: { ...base.defaults.database, ...defaults.database || {} }
-        },
-        logging: { ...base.logging, ...value.logging && typeof value.logging === "object" && !Array.isArray(value.logging) ? value.logging : {} },
-        ls: {
-          ...base.ls,
-          ...value.ls && typeof value.ls === "object" && !Array.isArray(value.ls) ? value.ls : {},
-          interval: { ...base.ls.interval, ...value.ls?.interval && typeof value.ls.interval === "object" && !Array.isArray(value.ls.interval) ? value.ls.interval : {} },
-          timer: { ...base.ls.timer, ...value.ls?.timer && typeof value.ls.timer === "object" && !Array.isArray(value.ls.timer) ? value.ls.timer : {} },
-          writer: { ...base.ls.writer, ...value.ls?.writer && typeof value.ls.writer === "object" && !Array.isArray(value.ls.writer) ? value.ls.writer : {} },
-          performance: { ...base.ls.performance, ...value.ls?.performance && typeof value.ls.performance === "object" && !Array.isArray(value.ls.performance) ? value.ls.performance : {} }
-        }
-      });
-    }
-    module2.exports = { loadSettings, defaultSettings };
-  }
-});
-
 // cgi-bin/src/config/product-policy.js
 var require_product_policy = __commonJS({
   "cgi-bin/src/config/product-policy.js"(exports2, module2) {
@@ -3230,536 +3777,6 @@ var require_product_policy = __commonJS({
       return policy;
     }
     module2.exports = { loadProductPolicy };
-  }
-});
-
-// cgi-bin/src/service/controller-state.js
-var require_controller_state = __commonJS({
-  "cgi-bin/src/service/controller-state.js"(exports2, module2) {
-    "use strict";
-    var KNOWN_STATES = /* @__PURE__ */ new Set([
-      "RUNNING",
-      "STARTING",
-      "STOPPING",
-      "STOPPED",
-      "FAILED"
-    ]);
-    function controllerDetail(info) {
-      if (!info || typeof info !== "object") return "";
-      const value = info.error || info.config && info.config.start_error || "";
-      return String(value);
-    }
-    function reportedState(info) {
-      if (!info || typeof info !== "object") return "";
-      return String(info.status || info.state || "").toUpperCase();
-    }
-    function classifyControllerState(info, options) {
-      const settings = options || {};
-      const reported = reportedState(info);
-      let state;
-      if (settings.notInstalled) state = "NOT_INSTALLED";
-      else if (KNOWN_STATES.has(reported)) state = reported;
-      else if (!reported && info && info.running === true) state = "RUNNING";
-      else state = "UNKNOWN";
-      return {
-        state,
-        known: state !== "UNKNOWN",
-        running: state === "RUNNING" || state === "STARTING",
-        startComplete: state === "RUNNING",
-        activeForStop: state === "RUNNING" || state === "STARTING" || state === "STOPPING",
-        knownInactive: state === "STOPPED" || state === "FAILED" || state === "NOT_INSTALLED",
-        detail: controllerDetail(info)
-      };
-    }
-    module2.exports = {
-      classifyControllerState
-    };
-  }
-});
-
-// cgi-bin/src/service/controller-adapter.js
-var require_controller_adapter = __commonJS({
-  "cgi-bin/src/service/controller-adapter.js"(exports2, module2) {
-    "use strict";
-    function loadServiceModule(explicit) {
-      if (explicit !== void 0) return explicit;
-      try {
-        return require("service");
-      } catch (_) {
-        return null;
-      }
-    }
-    function createControllerAdapter(serviceModule) {
-      const source = loadServiceModule(serviceModule);
-      let client = null;
-      let clientError = null;
-      try {
-        if (!source || typeof source.Client !== "function") {
-          throw new Error("service.Client\uB97C \uC0AC\uC6A9\uD560 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.");
-        }
-        client = new source.Client();
-      } catch (creationError) {
-        clientError = creationError;
-      }
-      function invoke(method, args, callback) {
-        if (clientError) {
-          callback(clientError);
-          return;
-        }
-        try {
-          if (!client || typeof client[method] !== "function") {
-            callback(new Error(`service.Client.${method}()\uC744 \uC0AC\uC6A9\uD560 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.`));
-            return;
-          }
-          client[method](...args, callback);
-        } catch (callError) {
-          callback(callError);
-        }
-      }
-      return {
-        status(name, callback) {
-          invoke("status", [name], callback);
-        },
-        install(descriptor, callback) {
-          invoke("install", [descriptor], callback);
-        },
-        start(name, callback) {
-          invoke("start", [name], callback);
-        },
-        stop(name, callback) {
-          invoke("stop", [name], callback);
-        },
-        uninstall(name, callback) {
-          invoke("uninstall", [name], callback);
-        },
-        details(name, key, callback) {
-          if (clientError) {
-            callback(clientError);
-            return;
-          }
-          try {
-            if (!client || !client.details || typeof client.details.get !== "function") {
-              callback(new Error("service.Client.details.get()\uC744 \uC0AC\uC6A9\uD560 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4."));
-              return;
-            }
-            client.details.get(name, key, (detailsError, runtime) => {
-              if (detailsError && /Detail\s+'.+'\s+not found/i.test(detailsError.message || "")) {
-                callback(null, null);
-                return;
-              }
-              if (detailsError) {
-                callback(detailsError);
-                return;
-              }
-              const details = runtime && runtime.details;
-              callback(null, details && Object.prototype.hasOwnProperty.call(details, key) ? details[key] : null);
-            });
-          } catch (detailsError) {
-            callback(detailsError);
-          }
-        }
-      };
-    }
-    function isNotInstalled(error) {
-      if (error && error.rpcCode !== void 0) return error.rpcCode === -32004;
-      const message = error && error.message ? error.message : String(error || "");
-      return /service\b.*\b(?:not found|not installed|does not exist)\b/i.test(message) || /\b(?:no such|unknown) service\b/i.test(message);
-    }
-    module2.exports = { createControllerAdapter, isNotInstalled };
-  }
-});
-
-// cgi-bin/src/collector/ls-runtime.js
-var require_ls_runtime = __commonJS({
-  "cgi-bin/src/collector/ls-runtime.js"(exports2, module2) {
-    "use strict";
-    var fs = require("fs");
-    var path = require("path");
-    var process = require("process");
-    var { writeJsonAtomic } = require_atomic_json();
-    var { createServerStore } = require_server_store();
-    var { loadSettings } = require_settings_loader();
-    var { classifyControllerState } = require_controller_state();
-    var { isNotInstalled } = require_controller_adapter();
-    var LS_SERVICE_NAME = "_dbu_collector";
-    var SNAPSHOT_FILE = "go-collector.json";
-    var SECRET_FILE = "go-collector-secrets.json";
-    var ACTIVE_FILE = "go-collector-active-jobs.json";
-    var RUNTIME_FILE = "go-collector-runtime.json";
-    var BINARY_FILE = path.join("bin", "neo-dbus-collector");
-    var LAUNCHER_FILE = "neo-dbus-launcher.js";
-    var CONTROL_FILE = "neo-dbus-control.js";
-    function runtimePaths(cgiRoot) {
-      return {
-        snapshot: path.join(cgiRoot, "conf.d", SNAPSHOT_FILE),
-        secret: path.join(cgiRoot, "conf.d", SECRET_FILE),
-        active: path.join(cgiRoot, "conf.d", ACTIVE_FILE),
-        runtime: path.join(cgiRoot, "data", RUNTIME_FILE),
-        binary: path.join(cgiRoot, BINARY_FILE),
-        launcher: path.join(cgiRoot, LAUNCHER_FILE),
-        control: path.join(cgiRoot, CONTROL_FILE)
-      };
-    }
-    function readRuntime(file) {
-      try {
-        const value = JSON.parse(fs.readFileSync(file, "utf8"));
-        return value && typeof value === "object" && !Array.isArray(value) ? value : { jobs: {} };
-      } catch (readError) {
-        if (readError && readError.code === "ENOENT") return { jobs: {} };
-        throw readError;
-      }
-    }
-    function readActiveJobs(file) {
-      try {
-        const value = JSON.parse(fs.readFileSync(file, "utf8"));
-        if (!value || value.schemaVersion !== 1 || !Array.isArray(value.names) || value.names.some((name) => typeof name !== "string")) throw new Error("LS collector active Job state is invalid.");
-        return [...new Set(value.names)].sort();
-      } catch (readError) {
-        if (readError && readError.code === "ENOENT") return [];
-        throw readError;
-      }
-    }
-    function syncCallback(operation) {
-      let called = false;
-      let failure;
-      let value;
-      operation((error, result) => {
-        called = true;
-        failure = error;
-        value = result;
-      });
-      if (!called) throw new Error("LS collector configuration store must complete synchronously.");
-      if (failure) throw failure;
-      return value;
-    }
-    function writeSecretAtomic(file, value) {
-      writeJsonAtomic(file, value);
-      if (typeof fs.chmodSync !== "function") throw new Error("secure collector secret file permissions are unavailable.");
-      fs.chmodSync(file, 384);
-    }
-    function controllerStatus(controller, callback) {
-      controller.status(LS_SERVICE_NAME, (statusError, info) => {
-        if (statusError && isNotInstalled(statusError)) {
-          callback(null, { controllerState: "NOT_INSTALLED", controllerDetail: null, statusError: null });
-          return;
-        }
-        if (statusError) {
-          callback(null, { controllerState: "UNKNOWN", controllerDetail: statusError.message || null, statusError });
-          return;
-        }
-        const state = classifyControllerState(info);
-        callback(null, {
-          controllerState: state.known ? state.state : "UNKNOWN",
-          controllerDetail: state.detail || null,
-          statusError: state.known ? null : new Error(state.detail || "Controller state is unknown.")
-        });
-      });
-    }
-    function createLsRuntime(options) {
-      const settings = options || {};
-      const cgiRoot = settings.cgiRoot;
-      const controller = settings.controller;
-      const serverStore = settings.serverStore || createServerStore({ cgiRoot });
-      const processApi = settings.process || process;
-      const files = runtimePaths(cgiRoot);
-      function ensureExecutable() {
-        if (!fs.existsSync(files.binary)) throw new Error("LS Go collector executable is missing. Build the LS package first.");
-        if (!fs.existsSync(files.launcher) || !fs.existsSync(files.control)) {
-          throw new Error("LS Go collector JSH launcher files are missing.");
-        }
-        if (typeof fs.chmodSync !== "function") throw new Error("LS collector executable permissions cannot be set by this JSH runtime.");
-        fs.chmodSync(files.binary, 493);
-        fs.chmodSync(files.launcher, 493);
-        fs.chmodSync(files.control, 493);
-      }
-      function syncConfig() {
-        const settings2 = loadSettings(path.join(cgiRoot, "conf.d", "settings.json"));
-        const profileName = settings2.defaults.database.server;
-        const source = syncCallback((callback) => serverStore.get(profileName, callback));
-        if (!source) throw new Error(`LS collector DB server was not found: ${profileName}`);
-        const servers = {};
-        servers[profileName] = {
-          host: source.host,
-          port: source.port,
-          user: source.user,
-          password: source.password,
-          defaultTable: source.defaultTable || "",
-          valueColumn: source.valueColumn || "",
-          stringValueColumn: source.stringValueColumn || ""
-        };
-        writeJsonAtomic(files.snapshot, {
-          schemaVersion: 2,
-          logging: settings2.logging,
-          writer: settings2.ls.writer,
-          performance: settings2.ls.performance
-        });
-        writeSecretAtomic(files.secret, { schemaVersion: 1, servers });
-        if (!fs.existsSync(files.active)) writeJsonAtomic(files.active, { schemaVersion: 1, names: [] });
-      }
-      function execControl(action, name) {
-        ensureExecutable();
-        if (!processApi || typeof processApi.exec !== "function") throw new Error("JSH process.exec() is unavailable for LS collector control.");
-        const exitCode = processApi.exec(files.control, action, name);
-        if (exitCode !== 0) throw new Error(`LS collector ${action} control command failed (exit=${exitCode}).`);
-      }
-      function install(callback) {
-        try {
-          ensureExecutable();
-        } catch (permissionError) {
-          callback(permissionError);
-          return;
-        }
-        controllerStatus(controller, (_unused, state) => {
-          if (state.statusError) {
-            callback(state.statusError);
-            return;
-          }
-          if (state.controllerState !== "NOT_INSTALLED") {
-            callback(null, state);
-            return;
-          }
-          controller.install({
-            name: LS_SERVICE_NAME,
-            // The collector must come back after a Neo process restart and then
-            // restore the logical active-job checkpoint. Service-controller
-            // descriptors are disabled unless enable is explicitly true.
-            enable: true,
-            working_dir: cgiRoot,
-            executable: files.launcher
-          }, (installError) => {
-            if (!installError) {
-              controllerStatus(controller, (_ignored, installed) => callback(installed.statusError, installed));
-              return;
-            }
-            if (!/already exists/i.test(String(installError.message || installError))) {
-              callback(installError);
-              return;
-            }
-            callback(null, {
-              controllerState: "STOPPED",
-              controllerDetail: "Existing shared collector service retained during package install.",
-              statusError: null
-            });
-          });
-        });
-      }
-      function ensureRunning(callback) {
-        install((installError, state) => {
-          if (installError) {
-            callback(installError);
-            return;
-          }
-          if (["RUNNING", "STARTING"].includes(state.controllerState)) {
-            callback(null, state);
-            return;
-          }
-          controller.start(LS_SERVICE_NAME, (startError) => {
-            if (startError) {
-              callback(startError);
-              return;
-            }
-            controllerStatus(controller, (_ignored, started) => callback(started.statusError, started));
-          });
-        });
-      }
-      function daemonStatus(callback) {
-        controllerStatus(controller, callback);
-      }
-      function inspect(name, callback) {
-        controllerStatus(controller, (_unused, service) => {
-          if (service.statusError) {
-            callback(null, service);
-            return;
-          }
-          if (service.controllerState === "NOT_INSTALLED") {
-            callback(null, service);
-            return;
-          }
-          if (!["RUNNING", "STARTING"].includes(service.controllerState)) {
-            callback(null, {
-              controllerState: service.controllerState === "FAILED" ? "FAILED" : "STOPPED",
-              controllerDetail: service.controllerDetail,
-              statusError: null
-            });
-            return;
-          }
-          let runtime;
-          try {
-            runtime = readRuntime(files.runtime);
-          } catch (runtimeError) {
-            callback(null, { controllerState: "UNKNOWN", controllerDetail: runtimeError.message, statusError: runtimeError });
-            return;
-          }
-          const job = runtime.jobs && runtime.jobs[name];
-          const runtimeState = job && job.state;
-          const mappedState = runtimeState === "running" ? "RUNNING" : runtimeState === "starting" ? "STARTING" : runtimeState === "stopping" ? "STOPPING" : runtimeState === "failed" ? "FAILED" : "STOPPED";
-          callback(null, {
-            controllerState: mappedState,
-            controllerDetail: job && job.stateDetail || service.controllerDetail,
-            statusError: null
-          });
-        });
-      }
-      function overview(callback) {
-        controllerStatus(controller, (_unused, service) => {
-          if (service.statusError) {
-            callback(null, { service, runtime: { jobs: {} } });
-            return;
-          }
-          try {
-            callback(null, { service, runtime: readRuntime(files.runtime) });
-          } catch (runtimeError) {
-            callback(null, {
-              service: { controllerState: "UNKNOWN", controllerDetail: runtimeError.message, statusError: runtimeError },
-              runtime: { jobs: {} }
-            });
-          }
-        });
-      }
-      function lastRun(name, callback) {
-        try {
-          const runtime = readRuntime(files.runtime);
-          const job = runtime.jobs && runtime.jobs[name];
-          if (!job) {
-            callback(null, null);
-            return;
-          }
-          if (!job.lastReadAt && !job.lastStoredAt && !job.lastError) {
-            callback(null, null);
-            return;
-          }
-          callback(null, {
-            status: job.lastError ? "failed" : "success",
-            lastRunAt: job.lastReadAt || null,
-            lastSuccessfulRunAt: job.lastError ? null : job.lastReadAt || null,
-            lastStoredAt: job.lastStoredAt || null,
-            lastError: job.lastError || null,
-            overrunCount: Number.isSafeInteger(job.overrunCount) && job.overrunCount >= 0 ? job.overrunCount : 0,
-            queueSkipped: Number.isSafeInteger(job.queueSkipped) && job.queueSkipped >= 0 ? job.queueSkipped : 0,
-            lastOverrunAt: job.lastOverrunAt || null,
-            methodCalls: []
-          });
-        } catch (runtimeError) {
-          callback(runtimeError);
-        }
-      }
-      function uninstall(callback) {
-        controllerStatus(controller, (_unused, state) => {
-          if (state.statusError || state.controllerState === "NOT_INSTALLED") {
-            callback(state.statusError || null);
-            return;
-          }
-          const remove = () => controller.uninstall(LS_SERVICE_NAME, callback);
-          if (["RUNNING", "STARTING"].includes(state.controllerState)) {
-            controller.stop(LS_SERVICE_NAME, (stopError) => {
-              if (stopError) {
-                callback(stopError);
-                return;
-              }
-              remove();
-            });
-          } else remove();
-        });
-      }
-      return {
-        serviceName: LS_SERVICE_NAME,
-        syncConfig,
-        inspect,
-        lastRun,
-        install,
-        daemonStatus,
-        installPackage(callback) {
-          try {
-            syncConfig();
-          } catch (snapshotError) {
-            callback(snapshotError);
-            return;
-          }
-          install(callback);
-        },
-        ensureRunning,
-        startDaemon(callback) {
-          try {
-            syncConfig();
-          } catch (snapshotError) {
-            callback(snapshotError);
-            return;
-          }
-          ensureRunning(callback);
-        },
-        start(name, callback) {
-          try {
-            execControl("start", name);
-            callback(null);
-          } catch (controlError) {
-            callback(controlError);
-          }
-        },
-        stop(name, callback) {
-          try {
-            execControl("stop", name);
-            callback(null);
-          } catch (controlError) {
-            callback(controlError);
-          }
-        },
-        reload(name, callback) {
-          try {
-            execControl("reload", name);
-            callback(null);
-          } catch (controlError) {
-            callback(controlError);
-          }
-        },
-        refreshLog(name, callback) {
-          try {
-            execControl("refresh-log", name);
-            callback(null);
-          } catch (controlError) {
-            callback(controlError);
-          }
-        },
-        clearOverrun(name, callback) {
-          try {
-            execControl("clear-overrun", name);
-            callback(null);
-          } catch (controlError) {
-            callback(controlError);
-          }
-        },
-        stopDaemon(callback) {
-          controllerStatus(controller, (_unused, state) => {
-            if (state.statusError || ["NOT_INSTALLED", "STOPPED", "FAILED"].includes(state.controllerState)) {
-              callback(state.statusError || null);
-              return;
-            }
-            controller.stop(LS_SERVICE_NAME, callback);
-          });
-        },
-        databaseChangeBlockers() {
-          const blocked = new Set(readActiveJobs(files.active));
-          const runtime = readRuntime(files.runtime);
-          Object.keys(runtime.jobs || {}).forEach((name) => {
-            const state = String(runtime.jobs[name]?.state || "").toLowerCase();
-            if (["starting", "running", "stopping"].includes(state)) blocked.add(name);
-          });
-          return [...blocked].sort();
-        },
-        overview,
-        uninstall
-      };
-    }
-    module2.exports = {
-      ACTIVE_FILE,
-      BINARY_FILE,
-      LS_SERVICE_NAME,
-      RUNTIME_FILE,
-      SECRET_FILE,
-      SNAPSHOT_FILE,
-      createLsRuntime,
-      readActiveJobs,
-      runtimePaths
-    };
   }
 });
 
@@ -8730,6 +8747,7 @@ var require_test_call = __commonJS({
 
 // cgi-bin/src/cgi/runtime.js
 module.exports = {
+  refreshLsPolicy: require_ls_runtime().refreshLsPolicy,
   bootstrap: require_bootstrap(),
   http: require_http(),
   jobApi: require_job_api(),

@@ -6,6 +6,7 @@
 // cannot be loaded directly by CGI. Bundling resolves those imports at build
 // time while leaving JSH built-in modules as runtime requires.
 module.exports = {
+  refreshLsPolicy: require('../collector/ls-runtime.js').refreshLsPolicy,
   bootstrap: require('./bootstrap.js'),
   http: require('./http.js'),
   jobApi: require('./job-api.js'),

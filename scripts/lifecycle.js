@@ -417,6 +417,19 @@ function runLsPackageAction(action) {
     // waits indefinitely and no orphan keeps collecting after package stop.
     const result = process.exec('@pkill', '-TERM', '-f', '/cgi-bin/bin/neo-dbus-collector');
     if (result instanceof Error) throw result;
+    // Let the launcher finish process.exec() and reap its native child before
+    // the controller stops JSH. Killing JSH first can orphan an exited child
+    // under Neo-as-PID-1, where it remains a zombie. The bracketed pgrep
+    // pattern does not match this polling shell's own command line. Keep this
+    // bounded so an unresponsive native shutdown cannot block package control.
+    const waited = exec('@/bin/sh', '-c',
+      `i=0; signal_pending=${result === 0 ? 0 : 1}; `
+      + "while pgrep -f '/cgi-bin/[n]eo-dbus-launcher[.]js( |$)' >/dev/null; do "
+      // A start still preparing its policy may spawn Go after the first pkill.
+      + 'if [ "$signal_pending" = 1 ]; then '
+      + "if pkill -TERM -f '/cgi-bin/bin/[n]eo-dbus-collector'; then signal_pending=0; fi; fi; "
+      + 'i=$((i+1)); if [ "$i" -ge 150 ]; then exit 1; fi; sleep 0.1; done');
+    if (waited !== 0) defaultPrint('[WARN] LS collector launcher did not exit within 15s; requesting controller stop.');
   };
 
   if (action === 'install') {

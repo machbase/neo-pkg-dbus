@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/rand"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,6 +20,24 @@ import (
 	client "github.com/machbase/neo-client/v2"
 	"github.com/machbase/neo-client/v2/api"
 )
+
+func TestConcreteDoubleConversionMatchesExistingBitsAndErrors(t *testing.T) {
+	values := []any{nil, "1", 1, int32(-1), uint64(0), uint64(math.MaxUint64), int64(math.MinInt64), math.Inf(1), math.Inf(-1), math.NaN(), math.Copysign(0, -1)}
+	random := rand.New(rand.NewSource(26))
+	for n := 0; n < 10000; n++ {
+		values = append(values, random.Uint64(), int64(random.Uint64()), math.Float64frombits(random.Uint64()))
+	}
+	for _, v := range values {
+		old, oldErr := valueForColumn(v, api.ColumnTypeDouble)
+		number, err := doubleForColumn(v)
+		if fmt.Sprint(oldErr) != fmt.Sprint(err) {
+			t.Fatalf("%T %v: errors %v / %v", v, v, oldErr, err)
+		}
+		if err == nil && math.Float64bits(number) != math.Float64bits(old.(float64)) {
+			t.Fatalf("%T %v: bits differ", v, v)
+		}
+	}
+}
 
 func BenchmarkReaderValueConversion4096(b *testing.B) {
 	encoded := make([]json.Number, 4096)

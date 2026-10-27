@@ -1,5 +1,7 @@
 # DBus Collector Frontend 설계서
 
+2026-10-26 LS scheduler 통합(CCR-099~101)은 FE 입력을 추가하지 않는다. 기존 standard/absolute Timer 선택과 skip 합계/Queue-full subset/Clear는 유지한다. `ls.scheduler`의 모드·FIFO·nice·Go 병렬도는 서비스 재시작 전용 내부 설정이며 FE에 노출하지 않는다. 직렬 Reader의 `scheduleSamples`는 실제 wake/start만 세므로 skip을 더한 항등식으로 해석하지 않는다.
+
 ## 1. 목적과 고정 범위
 
 이 문서는 `neo-pkg-dbus`의 화면과 사용자 동작을 정의한다. 구현 범위는 **Side**와 **Main**이다. 시각 규칙은 저장소 루트 `DESIGN.md`를 유일한 기준으로 사용하며, 이 문서는 색·글꼴·간격·모서리 값을 새로 정하지 않는다. 구현 중 확정한 추가 계약은 `DBUS_SDD.md`의 **1.1**을 따르며, **1.2는 JSH 호환성 수정 설계**다.

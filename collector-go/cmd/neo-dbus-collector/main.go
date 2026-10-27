@@ -62,6 +62,7 @@ type snapshot struct {
 	Logging       logPolicy         `json:"logging"`
 	Writer        writerPolicy      `json:"writer"`
 	Performance   performancePolicy `json:"performance"`
+	Scheduler     *schedulerPolicy  `json:"scheduler,omitempty"`
 }
 
 type conn struct {
@@ -412,6 +413,7 @@ type daemon struct {
 	writerPolicy           writerPolicy
 	performancePolicy      performancePolicy
 	performanceCorrections []string
+	scheduling             schedulerRuntime
 	mu                     sync.Mutex
 	jobs                   map[string]*activeJob
 	runtime                runtimeState
@@ -455,6 +457,13 @@ type activeJob struct {
 	registry     *tagRegistry
 	plan         *readPlan
 	buffers      *rowBufferPool
+	stopAt       atomic.Pointer[time.Time]
+}
+
+func (a *activeJob) requestStop() {
+	now := time.Now()
+	a.stopAt.CompareAndSwap(nil, &now)
+	a.cancel()
 }
 
 func buildReadPlan(config jobConfig) (*readPlan, error) {
@@ -616,14 +625,18 @@ func main() {
 	if flag.NArg() != 0 {
 		fatal(errors.New("daemon accepts no positional arguments"))
 	}
-	if err := runDaemon(*root, *parentPID); err != nil {
+	scheduling, err := prepareScheduler(*root)
+	if err != nil {
+		fatal(err)
+	}
+	if err := runDaemon(*root, *parentPID, scheduling); err != nil {
 		fatal(err)
 	}
 }
 
 func fatal(err error) { fmt.Fprintln(os.Stderr, "neo-dbus-collector:", err); os.Exit(1) }
 
-func runDaemon(root string, parentPID int) (retErr error) {
+func runDaemon(root string, parentPID int, scheduling ...schedulerRuntime) (retErr error) {
 	if parentPID < 0 {
 		return fmt.Errorf("parent PID must not be negative: %d", parentPID)
 	}
@@ -670,6 +683,9 @@ func runDaemon(root string, parentPID int) (retErr error) {
 		return err
 	}
 	d := &daemon{root: root, queue: make(chan *batch, writerPolicy.QueueCapacity), flushNow: make(chan struct{}, 1), appenderPrepare: make(chan appenderPrepareRequest), tagRegistry: newTagRegistry(), writerPolicy: writerPolicy, performancePolicy: performancePolicy, performanceCorrections: corrections, jobs: map[string]*activeJob{}, runtime: runtimeState{Jobs: map[string]jobRuntime{}}, logConfigs: map[string]logConfig{}, logPolicy: (logPolicy{}).normalized(), logSummaries: map[string]logSummary{}, jobPerformance: map[string]*jobPerformance{}, writerPerformance: newWriterPerformance(time.Now()), performanceLogs: make(chan performanceLogRecord, 64), controls: map[string]*sync.Mutex{}, runtimeDirty: make(chan struct{}, 1), runtimeForce: make(chan chan error), runtimeStop: make(chan struct{})}
+	if len(scheduling) > 0 {
+		d.scheduling = scheduling[0]
+	}
 	if err := d.writeRuntime(); err != nil {
 		return err
 	}
@@ -1176,7 +1192,7 @@ func (d *daemon) stop(name string) error {
 		v.StateDetail = ""
 	})
 	a.flushOnQueue.Store(true)
-	a.cancel()
+	a.requestStop()
 	d.mu.Unlock()
 	d.requestFlush()
 	<-a.done
@@ -1210,7 +1226,7 @@ func (d *daemon) shutdown() {
 	names := make([]string, 0, len(d.jobs))
 	for name, active := range d.jobs {
 		active.flushOnQueue.Store(true)
-		active.cancel()
+		active.requestStop()
 		jobs = append(jobs, active)
 		names = append(names, name)
 	}
@@ -1247,6 +1263,12 @@ func (d *daemon) reader(ctx context.Context, config jobConfig, name string, acti
 }
 
 func (d *daemon) readerWithTimer(ctx context.Context, config jobConfig, name string, active *activeJob, timer cycleTimer) {
+	restore, err := d.enterReaderScheduling(name)
+	if err != nil {
+		d.failStart(name, active, fmt.Errorf("reader scheduling: %w", err))
+		return
+	}
+	defer restore()
 	// SystemBus() returns a process-wide shared connection. Closing it per
 	// cycle lets one Job tear down another Job's DBus call. Each reader instead
 	// owns one dedicated connection for its whole logical Job lifetime. A
@@ -1266,7 +1288,8 @@ func (d *daemon) readerWithTimer(ctx context.Context, config jobConfig, name str
 	// bounded queue during one-time database initialization without inserting a
 	// dummy row or shifting the Job away from epoch-aligned boundaries.
 	primed := false
-	var current readerCycle
+	var previous serialCycleDetail
+	hasPrevious := false
 	for {
 		scheduledAt, wakeAt, err := timer.Wait(ctx)
 		if err != nil {
@@ -1279,29 +1302,34 @@ func (d *daemon) readerWithTimer(ctx context.Context, config jobConfig, name str
 			}
 			return
 		}
-		d.recordScheduleWake(name, scheduledAt, wakeAt)
-		if !primed {
-			startedAt := time.Now()
-			d.recordScheduleStart(name, scheduledAt, wakeAt, startedAt)
-			result := d.readCycle(ctx, config, name, &connection, active, true, startedAt)
-			primed = result.ok
-			d.recordReadResult(name, result)
-		} else if !current.begin(scheduledAt, wakeAt, interval) {
-			d.recordOverrun(name, false)
-		} else {
-			active.work.Add(1)
-			go func(expectedAt, timerWokeAt time.Time) {
-				defer active.work.Done()
-				startedAt := time.Now()
-				current.started(startedAt)
-				d.recordScheduleStart(name, expectedAt, timerWokeAt, startedAt)
-				result := d.readCycle(ctx, config, name, &connection, active, false, startedAt)
-				// Release the busy reader before handing a summary to the logger.
-				// The completed detail belongs to this exact blocked reader.
-				detail := current.finish(result.timing)
-				d.recordReadResult(name, result, detail)
-			}(scheduledAt, wakeAt)
+		// Count slots bypassed by bookkeeping between iterations against the
+		// preceding completed reader, without manufacturing timer wake samples.
+		pending := takeTimerSkipped(timer)
+		if hasPrevious && previous.normal {
+			d.recordInlineSkipped(name, pending, wakeAt, &previous)
 		}
+		startedAt := time.Now()
+		wasPrimed := primed
+		result := d.readCycle(ctx, config, name, &connection, active, !primed, startedAt)
+		completedAt := time.Now()
+		if stopAt := active.stopAt.Load(); stopAt != nil && stopAt.Before(completedAt) {
+			completedAt = *stopAt
+		}
+		skipped := skipTimerPast(timer, completedAt)
+		previous = serialCycleDetail{scheduled: scheduledAt, wake: wakeAt, started: startedAt, interval: interval, result: result, normal: wasPrimed}
+		current := &previous
+		// Actual read/decode/queue work is already complete. Statistics and
+		// possible logger backpressure must not precede the real reader entry.
+		d.recordScheduleWake(name, scheduledAt, wakeAt)
+		d.recordScheduleStart(name, scheduledAt, wakeAt, startedAt)
+		if wasPrimed {
+			d.recordInlineSkipped(name, skipped, completedAt, current)
+		}
+		d.recordReadResult(name, result)
+		if !primed {
+			primed = result.ok
+		}
+		hasPrevious = true
 	}
 }
 
@@ -1703,7 +1731,7 @@ func formatJobPerformance(name string, snapshot *jobPerformance) string {
 	) + formatOverrunDetail(snapshot.LastOverrun)
 }
 
-func (d *daemon) recordPerformanceSkip(name string, queueFull bool) {
+func (d *daemon) recordPerformanceSkip(name string, queueFull bool, amounts ...uint64) {
 	if !d.performancePolicy.Enabled {
 		return
 	}
@@ -1713,10 +1741,14 @@ func (d *daemon) recordPerformanceSkip(name string, queueFull bool) {
 		stats = newJobPerformance(d.performancePolicy.JobSampleCount, "dbus")
 		d.jobPerformance[name] = stats
 	}
+	amount := uint64(1)
+	if len(amounts) > 0 {
+		amount = amounts[0]
+	}
 	if queueFull {
-		stats.QueueFullSkipCount++
+		stats.QueueFullSkipCount += amount
 	} else {
-		stats.OverIntervalCount++
+		stats.OverIntervalCount += amount
 	}
 	d.performanceMu.Unlock()
 }
@@ -2617,6 +2649,16 @@ func valueForColumn(value any, typ api.ColumnType) (any, error) {
 	}
 }
 
+// Native DOUBLE batches need the concrete number, not a freshly boxed any.
+// Keep the same accepted source types and finite-value contract as above.
+func doubleForColumn(value any) (float64, error) {
+	number, err := numericFloat(value)
+	if err == nil && (math.IsNaN(number) || math.IsInf(number, 0)) {
+		err = errors.New("value is not finite")
+	}
+	return number, err
+}
+
 func openGoAppender(root string, database database, flushMaxRows int) (*nativeAppender, error) {
 	secrets, err := loadSecrets(root)
 	if err != nil {
@@ -2860,15 +2902,21 @@ func (d *daemon) setActive(name string, active bool) error {
 }
 
 func (d *daemon) recordOverrun(name string, queue bool) {
+	d.recordOverrunCount(name, queue, 1)
+}
+func (d *daemon) recordOverrunCount(name string, queue bool, amount uint64) {
+	if amount == 0 {
+		return
+	}
 	d.mu.Lock()
 	var count uint64
 	var first bool
 	d.updateLocked(name, func(v *jobRuntime) {
 		now := time.Now().UTC().Format(time.RFC3339Nano)
-		v.OverrunCount++
+		v.OverrunCount += amount
 		v.LastOverrunAt = now
 		if queue {
-			v.QueueSkipped++
+			v.QueueSkipped += amount
 		}
 		count = v.OverrunCount
 	})
@@ -2876,14 +2924,14 @@ func (d *daemon) recordOverrun(name string, queue bool) {
 	if summary.StartedAt.IsZero() {
 		summary.StartedAt = time.Now()
 	}
-	summary.Skipped++
+	summary.Skipped += amount
 	if queue {
-		summary.QueueSkipped++
+		summary.QueueSkipped += amount
 	}
-	first = summary.Skipped == 1
+	first = summary.Skipped == amount
 	d.logSummaries[name] = summary
 	d.mu.Unlock()
-	d.recordPerformanceSkip(name, queue)
+	d.recordPerformanceSkip(name, queue, amount)
 	if first {
 		stage := "scheduler"
 		if queue {

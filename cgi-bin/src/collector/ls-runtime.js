@@ -22,6 +22,22 @@ const BINARY_FILE = path.join('bin', 'neo-dbus-collector');
 const LAUNCHER_FILE = 'neo-dbus-launcher.js';
 const CONTROL_FILE = 'neo-dbus-control.js';
 
+function writePolicy(cgiRoot, settings) {
+  writeJsonAtomic(path.join(cgiRoot, 'conf.d', SNAPSHOT_FILE), {
+    schemaVersion: 2,
+    logging: settings.logging,
+    writer: settings.ls.writer,
+    performance: settings.ls.performance,
+    scheduler: settings.ls.scheduler,
+  });
+}
+
+// Service startup must also work before the first Database profile/Job exists.
+// Refresh restart-only policy without inventing credentials or rewriting secrets.
+function refreshLsPolicy(cgiRoot) {
+  writePolicy(cgiRoot, loadSettings(path.join(cgiRoot, 'conf.d', 'settings.json')));
+}
+
 function runtimePaths(cgiRoot) {
   return {
     snapshot: path.join(cgiRoot, 'conf.d', SNAPSHOT_FILE),
@@ -130,12 +146,7 @@ function createLsRuntime(options) {
       valueColumn: source.valueColumn || '',
       stringValueColumn: source.stringValueColumn || '',
     };
-    writeJsonAtomic(files.snapshot, {
-      schemaVersion: 2,
-      logging: settings.logging,
-      writer: settings.ls.writer,
-      performance: settings.ls.performance,
-    });
+    writePolicy(cgiRoot, settings);
     writeSecretAtomic(files.secret, { schemaVersion: 1, servers });
     if (!fs.existsSync(files.active)) writeJsonAtomic(files.active, { schemaVersion: 1, names: [] });
   }
@@ -355,6 +366,7 @@ module.exports = {
   SECRET_FILE,
   SNAPSHOT_FILE,
   createLsRuntime,
+  refreshLsPolicy,
   readActiveJobs,
   runtimePaths,
 };

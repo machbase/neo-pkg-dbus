@@ -532,6 +532,19 @@ func (a *machcliAppender) appendMeasured(rows []row, registry *tagRegistry, trac
 		if uint64(item.TagIndex) >= uint64(len(a.tagIndexes)) {
 			return trace, fmt.Errorf("TAG registry index out of range: %d", item.TagIndex)
 		}
+		if a.valueType == api.ColumnTypeDouble {
+			// Avoid boxing an integer->float64 result into any and immediately
+			// unboxing it into C.double for every row. Keep identical finite-value
+			// validation; other column representations use the existing path.
+			number, err := doubleForColumn(item.Value)
+			if err != nil {
+				return trace, fmt.Errorf("TAG index %d: %w", item.TagIndex, err)
+			}
+			a.buffer[index].tag_index = C.int32_t(a.tagIndexes[item.TagIndex])
+			a.buffer[index].timestamp_ns = C.int64_t(item.Time.UnixNano())
+			a.buffer[index].floating_value = C.double(number)
+			continue
+		}
 		value, err := valueForColumn(item.Value, a.valueType)
 		if err != nil {
 			return trace, fmt.Errorf("TAG index %d: %w", item.TagIndex, err)

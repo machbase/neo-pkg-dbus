@@ -1,5 +1,9 @@
 # DBus Collector Backend 설계서
 
+2026-10-26 LS scheduler 통합은 `DBUS_SDD.md` CCR-099~101을 따른다. `ls.scheduler`는 서비스 재시작 전용 내부 정책이며, JSH launcher가 시작 시 snapshot을 갱신한다. Docker/cgroup cpuset 확인과 FIFO/nice 적용·읽기 검증은 Go가 담당한다. 두 Timer 모두 동일 Job goroutine에서 대기와 Reader를 실행하고, 누락된 예약 경계 수를 read skip에 합산한다. 실제 wake/start만 표본으로 집계한다. Writer 분리·drain·버퍼 소유권은 유지하며 DOUBLE 경로는 재boxing 없이 동일 값을 C에 전달한다. 상세 범위와 예시는 `collector-go/README.md`를 참조한다.
+
+같은 검증에서 발견한 LS lifecycle 종료 버그는 기존 자식 소유권 보장을 유지하도록 수정했다. native TERM 후 JSH launcher가 `process.exec()` 자식을 수거하고 자연 종료하도록 약 15초 이내에서 기다린 뒤 controller Stop을 호출한다. 시작 준비 중 뒤늦게 생기는 native도 신호를 받으며, 대기 초과는 WARN 후 기존 controller Stop 경로를 사용한다. API/DBus 요청 timeout을 추가하는 변경은 아니다.
+
 ## 1. 목적과 변하지 않는 계약
 
 Backend는 Machbase Neo JSH CommonJS 환경에서 설정 파일, CGI API와 lifecycle을 제공한다. 최소 Neo 버전은 `8.5.8`이고 모든 새 설정의 `schemaVersion`은 `1`이다. generic은 기존 Job별 JSH 수집 service를 유지한다. LS만 실제 DBus read/decode/native append를 linux/amd64 Go daemon에 위임하며 JSH는 설정·API·기존 log 조회·service 관리를 계속 소유한다. Go daemon은 같은 Job log 파일 형식으로 lifecycle/error/overrun을 기록한다. 구현 중 확정한 추가 계약은 `DBUS_SDD.md`의 **1.1**과 CCR-060을 따른다. Frontend는 이번 LS data-plane 범위에서 바꾸지 않는다.
