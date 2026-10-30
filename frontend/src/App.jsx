@@ -2,7 +2,7 @@ import React, { createContext, useCallback, useContext, useEffect, useMemo, useR
 import { Link, MemoryRouter, Navigate, Route, Routes, useLocation, useNavigate, useParams } from "react-router";
 import { api } from "./api";
 import { createPackageChannel } from "./package-channel";
-import { buildJobTree, chartEvidenceKey, createDefaultJobConfig, createMethodCall, displayGridRow, hasCompleteNumericEvidence, hydrateJobConfig, intervalMsFromMultiplier, intervalMultiplier, jobActions, jobNeedsStringValueColumn, maxIntervalMultiplier, nextDefaultJobName, parseSuccessValue, reorder, serializeJobConfig, taskPeriodMs, validateJobTags } from "./model";
+import { DEFAULT_LS_DBUS_DESTINATION, DEFAULT_LS_DBUS_INTERFACE_PREFIX, MAX_LS_DBUS_DESTINATION_LENGTH, MAX_LS_DBUS_INTERFACE_PREFIX_LENGTH, buildJobTree, chartEvidenceKey, classifyLsDbusTestSettings, createDefaultJobConfig, createMethodCall, displayGridRow, hasCompleteNumericEvidence, hydrateJobConfig, isValidLsDbusDestination, isValidLsDbusInterfacePrefix, intervalMsFromMultiplier, intervalMultiplier, jobActions, jobNeedsStringValueColumn, maxIntervalMultiplier, nextDefaultJobName, parseSuccessValue, reorder, serializeJobConfig, taskPeriodMs, validateJobTags } from "./model";
 import { appendProductMethodCall, canUseTestMode as productCanUseTestMode, createInitialMethodCalls, dataCountLimit as productDataCountLimit, deviceStringBuilder as productDeviceStringBuilder, displayInputValue as productDisplayInputValue, inputLabel as productInputLabel, inputPrefix as productInputPrefix, minimumIntervalMs, normalizeProductTestMode, reconcileProductTags as reconcileGeneratedTags, retryConfigurable as productRetryConfigurable, resolveJobFormMode as jobFormMode, showsInterfaceManagement, storeInputValue as productStoreInputValue, supportsStringValueColumn as productSupportsStringValueColumn, tagConversionOptions as productTagConversionOptions, tagCsvImporter as productTagCsvImporter } from "@product";
 import Icon from "./components/Icon";
 import DataViewerPage from "./data-viewer/DataViewerPage";
@@ -473,6 +473,22 @@ function Modal({ title, ariaLabel = title, icon, variant = "", onClose, children
     return () => window.removeEventListener("keydown", closeOnEscape);
   }, [onClose, escapeDisabled]);
   return <div className="neo-modal" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section className={`neo-modal__dialog${variant ? ` neo-modal__dialog--${variant}` : ""}`} role="dialog" aria-modal="true" aria-label={ariaLabel}><header className="neo-modal__header"><div className="neo-modal__title">{icon ? <Icon name={icon} /> : null}<h2>{title}</h2></div><IconButton className="neo-modal__close" icon="close" label="Close" onClick={onClose} /></header><div className="neo-modal__body">{children}</div></section></div>;
+}
+
+function DbusNamesConfirmModal({ fields, onCancel, onConfirm }) {
+  useEffect(() => {
+    if (typeof window === "undefined") return undefined;
+    const cancelOnEscape = (event) => { if (event.key === "Escape") onCancel(); };
+    window.addEventListener("keydown", cancelOnEscape);
+    return () => window.removeEventListener("keydown", cancelOnEscape);
+  }, [onCancel]);
+  return <div className="neo-modal neo-modal--confirm" onMouseDown={(event) => { if (event.target === event.currentTarget) onCancel(); }}>
+    <section className="neo-modal__dialog neo-modal__dialog--database-confirm" role="dialog" aria-modal="true" aria-label="Confirm DBus names">
+      <header className="neo-modal__header"><div className="neo-modal__title"><Icon name="warning" /><h2>Confirm DBus Names</h2></div><IconButton icon="close" label="Close" onClick={onCancel} /></header>
+      <div className="neo-modal__body"><p>The following values differ from ls.plc and high.ls.plc:</p><ul>{fields.map(({ label, value }) => <li key={label}>{label}: <code className="neo-dbus-name-confirm-value">{value}</code></li>)}</ul><p>Apply these values anyway?</p></div>
+      <footer className="neo-modal__footer"><button type="button" className="neo-button" autoFocus onClick={onCancel}>Cancel</button><button type="button" className="neo-button neo-button--primary" onClick={onConfirm}>Apply Anyway</button></footer>
+    </section>
+  </div>;
 }
 
 export function JobSide({ jobs, selected, loading = false, error = null, settingsLoading = false, settingsError = null, provider = null, togglePending = false, jobSaving = false, deferredJobSelection = "", onSelect, onNew, onOpenModal = () => {}, onRefresh, onToggle }) {
@@ -1106,9 +1122,8 @@ function JobForm({ mode }) {
   const editing = mode === "edit";
   const formMode = jobFormMode({ settings: app.settings, settingsLoading: app.settingsLoading, settingsError: app.settingsError, editing });
   const fixedNewJob = formMode === "fixed";
-  const intervalTaskPeriodMs = taskPeriodMs(app.settings?.intervalPolicy?.cycleMs);
-  const intervalDefaultMs = intervalMsFromMultiplier(intervalTaskPeriodMs, Math.ceil(10 / intervalTaskPeriodMs));
-  const intervalMultiplierMax = maxIntervalMultiplier(intervalTaskPeriodMs);
+  const defaultTaskPeriodMs = taskPeriodMs(app.settings?.intervalPolicy?.cycleMs);
+  const intervalDefaultMs = intervalMsFromMultiplier(defaultTaskPeriodMs, Math.ceil(10 / defaultTaskPeriodMs));
   const currentEditName = useRef(params.name || "");
   currentEditName.current = params.name || "";
   const beginSubmission = useRouteMutation(editing ? params.name : "new", { abortOnRouteChange: false });
@@ -1126,7 +1141,20 @@ function JobForm({ mode }) {
   const [jobConfigurationModalOpen, setJobConfigurationModalOpen] = useState(false);
   const [databaseModalOpen, setDatabaseModalOpen] = useState(false);
   const [jobConfigurationDraft, setJobConfigurationDraft] = useState(null);
+  const [jobConfigurationError, setJobConfigurationError] = useState("");
+  const [pendingDbusNameConfirmation, setPendingDbusNameConfirmation] = useState(null);
+  const [jobIntervalPolicy, setJobIntervalPolicy] = useState(null);
   const [databaseDraft, setDatabaseDraft] = useState(null);
+  const selectedDbusDestination = jobConfigurationDraft?.dbusDestination ?? config.dbusDestination ?? DEFAULT_LS_DBUS_DESTINATION;
+  const dbusDestinationValid = isValidLsDbusDestination(selectedDbusDestination);
+  const selectedDbusInterfacePrefix = jobConfigurationDraft?.dbusInterfacePrefix ?? config.dbusInterfacePrefix ?? DEFAULT_LS_DBUS_INTERFACE_PREFIX;
+  const interfacePrefixValid = isValidLsDbusInterfacePrefix(selectedDbusInterfacePrefix);
+  const intervalPolicyReady = provider?.jobMode !== "fixed" || (dbusDestinationValid && interfacePrefixValid && jobIntervalPolicy?.destination === selectedDbusDestination
+    && jobIntervalPolicy?.interfacePrefix === selectedDbusInterfacePrefix);
+  const intervalTaskPeriodMs = taskPeriodMs(intervalPolicyReady && jobIntervalPolicy
+    ? jobIntervalPolicy.cycleMs : selectedDbusDestination === DEFAULT_LS_DBUS_DESTINATION
+      && selectedDbusInterfacePrefix === DEFAULT_LS_DBUS_INTERFACE_PREFIX ? defaultTaskPeriodMs : 1);
+  const intervalMultiplierMax = maxIntervalMultiplier(intervalTaskPeriodMs);
   const [validationWarnings, setValidationWarnings] = useState([]);
   const [warningApprovalKey, setWarningApprovalKey] = useState("");
   const [saving, setSaving] = useState(false);
@@ -1152,6 +1180,9 @@ function JobForm({ mode }) {
     setJobConfigurationModalOpen(false);
     setDatabaseModalOpen(false);
     setJobConfigurationDraft(null);
+    setJobConfigurationError("");
+    setPendingDbusNameConfirmation(null);
+    setJobIntervalPolicy(null);
     setDatabaseDraft(null);
     setValidationWarnings([]);
     setWarningApprovalKey("");
@@ -1171,7 +1202,7 @@ function JobForm({ mode }) {
     if (editing) {
       if (job?.name !== params.name) return;
       setName(job.name);
-      setConfig(hydrateJobConfig({ ...DEFAULT_CONFIG, ...job.config }, settings?.timerPolicy));
+      setConfig(hydrateJobConfig({ ...DEFAULT_CONFIG, ...job.config }, settings?.timerPolicy, provider?.jobMode === "fixed"));
       setEditRevision(job.revision);
     } else {
       const databaseServer = settings?.defaults?.database?.server || servers?.[0]?.name || "";
@@ -1179,6 +1210,17 @@ function JobForm({ mode }) {
       setConfig(createDefaultJobConfig(provider, server || { name: databaseServer }, createInitialMethodCalls(provider), intervalDefaultMs, settings?.timerPolicy));
     }
   }, [app.settings, editing, formMode, intervalDefaultMs, loaded.data, params.name, provider]);
+  useEffect(() => {
+    if (provider?.jobMode !== "fixed" || !dbusDestinationValid || !interfacePrefixValid) return undefined;
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      api.jobs.intervalPolicy(selectedDbusDestination, selectedDbusInterfacePrefix, { signal: controller.signal }).then(
+        (policy) => setJobIntervalPolicy({ ...policy, destination: selectedDbusDestination, interfacePrefix: selectedDbusInterfacePrefix }),
+        (failure) => { if (failure?.name !== "AbortError") setJobIntervalPolicy({ cycleMs: 1, source: "unavailable", destination: selectedDbusDestination, interfacePrefix: selectedDbusInterfacePrefix }); },
+      );
+    }, 250);
+    return () => { clearTimeout(timer); controller.abort(); };
+  }, [provider?.jobMode, selectedDbusDestination, selectedDbusInterfacePrefix, dbusDestinationValid, interfacePrefixValid]);
   useEffect(() => {
     const interfaceIds = [...new Set((config.methodCalls || []).map((call) => call.interfaceId).filter(Boolean))];
     if (!interfaceIds.length) return undefined;
@@ -1252,9 +1294,13 @@ function JobForm({ mode }) {
     };
   }, [tableListOpen]);
   const openJobConfiguration = () => {
+    setJobConfigurationError("");
+    setPendingDbusNameConfirmation(null);
     const normalizedIntervalMs = intervalMsFromMultiplier(intervalTaskPeriodMs, intervalMultiplier(intervalTaskPeriodMs, config.schedule.intervalMs));
     setJobConfigurationDraft({
       name,
+      ...(provider?.jobMode === "fixed" ? { dbusDestination: config.dbusDestination || DEFAULT_LS_DBUS_DESTINATION,
+        dbusInterfacePrefix: config.dbusInterfacePrefix || DEFAULT_LS_DBUS_INTERFACE_PREFIX } : {}),
       schedule: { ...config.schedule, intervalMs: normalizedIntervalMs },
       retry: { ...config.retry },
       execution: { ...config.execution, test: config.execution?.test === true && testModeAvailable },
@@ -1263,14 +1309,37 @@ function JobForm({ mode }) {
   };
   const cancelJobConfiguration = () => {
     setJobConfigurationDraft(null);
+    setJobConfigurationError("");
+    setPendingDbusNameConfirmation(null);
     setJobConfigurationModalOpen(false);
   };
-  const applyJobConfiguration = () => {
+  const applyJobConfiguration = (confirmed = false) => {
+    if (jobConfigurationDraft && provider?.jobMode === "fixed") {
+      const check = classifyLsDbusTestSettings(jobConfigurationDraft.dbusDestination, jobConfigurationDraft.dbusInterfacePrefix);
+      if (check.kind === "blank" || check.kind === "invalid") {
+        setPendingDbusNameConfirmation(null);
+        setJobConfigurationError(check.kind === "blank"
+          ? `Enter ${check.fields.join(" and ")}.`
+          : `Check the DBus name format for ${check.fields.join(" and ")}.`);
+        return;
+      }
+      if (check.kind === "confirm" && !confirmed) {
+        setJobConfigurationError("");
+        setPendingDbusNameConfirmation(check.fields);
+        return;
+      }
+    }
     if (jobConfigurationDraft) {
       setName(jobConfigurationDraft.name);
-      setConfig((current) => normalizeProductTestMode({ ...current, schedule: jobConfigurationDraft.schedule, retry: jobConfigurationDraft.retry, execution: jobConfigurationDraft.execution }));
+      setConfig((current) => normalizeProductTestMode({ ...current,
+        ...(provider?.jobMode === "fixed" ? { dbusDestination: jobConfigurationDraft.dbusDestination,
+          dbusInterfacePrefix: jobConfigurationDraft.dbusInterfacePrefix } : {}),
+        schedule: { ...jobConfigurationDraft.schedule, intervalMs: intervalMsFromMultiplier(intervalTaskPeriodMs, intervalMultiplier(intervalTaskPeriodMs, jobConfigurationDraft.schedule.intervalMs)) },
+        retry: jobConfigurationDraft.retry, execution: jobConfigurationDraft.execution }));
     }
     setJobConfigurationDraft(null);
+    setJobConfigurationError("");
+    setPendingDbusNameConfirmation(null);
     setJobConfigurationModalOpen(false);
   };
   const openDatabase = () => {
@@ -1366,7 +1435,7 @@ function JobForm({ mode }) {
         const latestJob = latest.status === "success" ? latest.data?.[2] : null;
         if (latestJob?.name === targetName) {
           setName(latestJob.name);
-          setConfig(hydrateJobConfig({ ...DEFAULT_CONFIG, ...latestJob.config }));
+          setConfig(hydrateJobConfig({ ...DEFAULT_CONFIG, ...latestJob.config }, app.settings?.timerPolicy, provider?.jobMode === "fixed"));
           setEditRevision(latestJob.revision);
           app.notify("Another user saved this Job. The latest setting was reloaded. Review and save again.");
         } else app.notify("Another user saved this Job. The latest setting could not be reloaded. Refresh and try again.");
@@ -1391,7 +1460,9 @@ function JobForm({ mode }) {
   const testCall = async (call, selectedMethod) => {
     const mutation = beginTestCall();
     try {
-      const result = await api.dbus.call({ interfaceId: call.interfaceId, methodId: call.methodId, inputs: call.inputs }, { signal: mutation.signal });
+      const result = await api.dbus.call({ interfaceId: call.interfaceId, methodId: call.methodId, inputs: call.inputs,
+        ...(provider?.jobMode === "fixed" ? { dbusDestination: config.dbusDestination || DEFAULT_LS_DBUS_DESTINATION,
+          dbusInterfacePrefix: config.dbusInterfacePrefix || DEFAULT_LS_DBUS_INTERFACE_PREFIX } : {}) }, { signal: mutation.signal });
       if (mutation.isCurrent()) setTestResult({ ...result, callId: call.id });
     } catch (failure) {
       if (mutation.isCurrent() && failure?.name !== "AbortError") {
@@ -1430,6 +1501,8 @@ function JobForm({ mode }) {
           { label: "RUN INTERVAL", value: `${config.schedule.intervalMs} ms (= ${intervalTaskPeriodMs} ms × ${intervalMultiplier(intervalTaskPeriodMs, config.schedule.intervalMs)})` },
           ...(app.settings?.timerPolicy?.showAbsoluteTimerOption || config.schedule.useAbsoluteTimer === true ? [{ label: "ABSOLUTE-TIME TIMER", value: config.schedule.useAbsoluteTimer === true ? "Enabled" : "Disabled" }] : []),
           { label: "SAVE POLICY", value: config.execution.savePolicy },
+          ...(provider?.jobMode === "fixed" ? [{ label: "DBUS SERVICE NAME", value: config.dbusDestination || DEFAULT_LS_DBUS_DESTINATION }] : []),
+          ...(provider?.jobMode === "fixed" ? [{ label: "INTERFACE PREFIX", value: config.dbusInterfacePrefix || DEFAULT_LS_DBUS_INTERFACE_PREFIX }] : []),
         ]} onEdit={openJobConfiguration} />
       </section>
       <section className="neo-panel neo-job-section-panel">
@@ -1438,11 +1511,20 @@ function JobForm({ mode }) {
           { label: "TABLE", value: config.database.table || "—" },
         ]} onEdit={provider?.jobMode === "fixed" ? null : openDatabase} />
       </section>
-      {jobConfigurationModalOpen && jobConfigurationDraft ? <Modal title="Edit Job Configuration" variant="job-section-editor" onClose={cancelJobConfiguration}>
-        <div className="neo-form-grid"><Field label="Job Name"><div className="neo-job-name-input"><Input maxLength={100} value={jobConfigurationDraft.name} readOnly={editing} disabled={editing} onChange={(value) => { nameEdited.current = true; setJobConfigurationDraft((current) => ({ ...current, name: value.toLowerCase() })); }} />{testModeAvailable ? <label className="neo-test-toggle" title="Generate test data without DBUS. Available only for the internal benchmark table."><input type="checkbox" aria-label="TEST" checked={jobConfigurationDraft.execution.test === true} onChange={(event) => setJobConfigurationDraft((current) => ({ ...current, execution: { ...current.execution, test: event.target.checked } }))} /><span>TEST</span></label> : null}</div></Field><Field label="Run Interval"><div className="neo-interval-formula"><span>Task Period {intervalTaskPeriodMs} ms</span><span aria-hidden="true">×</span><NumberStepper label="Run Interval Multiplier" min={1} max={intervalMultiplierMax} step={1} value={intervalMultiplier(intervalTaskPeriodMs, jobConfigurationDraft.schedule.intervalMs)} onChange={(value) => setJobConfigurationDraft((current) => ({ ...current, schedule: { ...current.schedule, intervalMs: intervalMsFromMultiplier(intervalTaskPeriodMs, value) } }))} /><span aria-hidden="true">=</span><strong>{jobConfigurationDraft.schedule.intervalMs} ms</strong></div></Field>{productRetryConfigurable ? <><Field label="Retry Initial (ms)"><Input type="number" value={jobConfigurationDraft.retry.initialDelayMs} onChange={(value) => setJobConfigurationDraft((current) => ({ ...current, retry: { ...current.retry, initialDelayMs: Number(value) } }))} /></Field><Field label="Retry Maximum (ms)"><Input type="number" value={jobConfigurationDraft.retry.maximumDelayMs} onChange={(value) => setJobConfigurationDraft((current) => ({ ...current, retry: { ...current.retry, maximumDelayMs: Number(value) } }))} /></Field><Field label="Retry Multiplier"><Input type="number" value={jobConfigurationDraft.retry.multiplier} onChange={(value) => setJobConfigurationDraft((current) => ({ ...current, retry: { ...current.retry, multiplier: Number(value) } }))} /></Field></> : null}<Field label="Save Policy"><select value={jobConfigurationDraft.execution.savePolicy} onChange={(event) => setJobConfigurationDraft((current) => ({ ...current, execution: { ...current.execution, savePolicy: event.target.value } }))}><option value="perMethod">perMethod</option><option value="afterAllMethods">afterAllMethods</option></select></Field></div>
+      {jobConfigurationModalOpen && jobConfigurationDraft ? <Modal title="Edit Job Configuration" variant="job-section-editor" onClose={cancelJobConfiguration} escapeDisabled={Boolean(pendingDbusNameConfirmation)}>
+        <div className="neo-form-grid"><Field label="Job Name"><div className="neo-job-name-input"><Input maxLength={100} value={jobConfigurationDraft.name} readOnly={editing} disabled={editing} onChange={(value) => { nameEdited.current = true; setJobConfigurationDraft((current) => ({ ...current, name: value.toLowerCase() })); }} />{testModeAvailable ? <label className="neo-test-toggle" title="Generate test data without DBUS. Available only for the internal benchmark table."><input type="checkbox" aria-label="TEST" checked={jobConfigurationDraft.execution.test === true} onChange={(event) => setJobConfigurationDraft((current) => ({ ...current, execution: { ...current.execution, test: event.target.checked } }))} /><span>TEST</span></label> : null}</div></Field><Field label="Run Interval"><div className="neo-interval-formula"><span>Task Period {intervalTaskPeriodMs} ms</span><span aria-hidden="true">×</span><NumberStepper label="Run Interval Multiplier" min={1} max={intervalMultiplierMax} step={1} value={intervalMultiplier(intervalTaskPeriodMs, jobConfigurationDraft.schedule.intervalMs)} onChange={(value) => setJobConfigurationDraft((current) => ({ ...current, schedule: { ...current.schedule, intervalMs: intervalMsFromMultiplier(intervalTaskPeriodMs, value) } }))} /><span aria-hidden="true">=</span><strong>{intervalMsFromMultiplier(intervalTaskPeriodMs, intervalMultiplier(intervalTaskPeriodMs, jobConfigurationDraft.schedule.intervalMs))} ms</strong></div></Field>{productRetryConfigurable ? <><Field label="Retry Initial (ms)"><Input type="number" value={jobConfigurationDraft.retry.initialDelayMs} onChange={(value) => setJobConfigurationDraft((current) => ({ ...current, retry: { ...current.retry, initialDelayMs: Number(value) } }))} /></Field><Field label="Retry Maximum (ms)"><Input type="number" value={jobConfigurationDraft.retry.maximumDelayMs} onChange={(value) => setJobConfigurationDraft((current) => ({ ...current, retry: { ...current.retry, maximumDelayMs: Number(value) } }))} /></Field><Field label="Retry Multiplier"><Input type="number" value={jobConfigurationDraft.retry.multiplier} onChange={(value) => setJobConfigurationDraft((current) => ({ ...current, retry: { ...current.retry, multiplier: Number(value) } }))} /></Field></> : null}<Field label="Save Policy"><select value={jobConfigurationDraft.execution.savePolicy} onChange={(event) => setJobConfigurationDraft((current) => ({ ...current, execution: { ...current.execution, savePolicy: event.target.value } }))}><option value="perMethod">perMethod</option><option value="afterAllMethods">afterAllMethods</option></select></Field></div>
         <AbsoluteTimerOption policy={app.settings?.timerPolicy} schedule={jobConfigurationDraft.schedule} onChange={(schedule) => setJobConfigurationDraft((current) => ({ ...current, schedule }))} />
-        <footer className="neo-modal__footer"><button type="button" className="neo-button" onClick={cancelJobConfiguration}>Cancel</button><button type="button" className="neo-button neo-button--primary" onClick={applyJobConfiguration}>Apply</button></footer>
+        {provider?.jobMode === "fixed" ? <section className="neo-job-dbus-test-settings" aria-label="DBus test settings">
+          <h3>DBUS TEST SETTINGS</h3>
+          <div className="neo-form-grid">
+            <Field label="Service Name"><Input aria-label="Service Name" maxLength={MAX_LS_DBUS_DESTINATION_LENGTH} autoCapitalize="off" autoComplete="off" spellCheck={false} value={jobConfigurationDraft.dbusDestination} onChange={(value) => { setJobConfigurationError(""); setJobConfigurationDraft((current) => ({ ...current, dbusDestination: value })); }} onKeyDown={(event) => { if (event.key === "Enter") event.preventDefault(); }} /></Field>
+            <Field label="Interface Prefix"><Input aria-label="Interface Prefix" maxLength={MAX_LS_DBUS_INTERFACE_PREFIX_LENGTH} autoCapitalize="off" autoComplete="off" spellCheck={false} value={jobConfigurationDraft.dbusInterfacePrefix} onChange={(value) => { setJobConfigurationError(""); setJobConfigurationDraft((current) => ({ ...current, dbusInterfacePrefix: value })); }} onKeyDown={(event) => { if (event.key === "Enter") event.preventDefault(); }} /></Field>
+          </div>
+          {jobConfigurationError ? <p className="neo-message neo-message--error" role="alert">{jobConfigurationError}</p> : null}
+        </section> : null}
+        <footer className="neo-modal__footer"><button type="button" className="neo-button" onClick={cancelJobConfiguration}>Cancel</button><button type="button" className="neo-button neo-button--primary" disabled={dbusDestinationValid && interfacePrefixValid && !intervalPolicyReady} onClick={() => applyJobConfiguration()}>Apply</button></footer>
       </Modal> : null}
+      {pendingDbusNameConfirmation ? <DbusNamesConfirmModal fields={pendingDbusNameConfirmation} onCancel={() => setPendingDbusNameConfirmation(null)} onConfirm={() => applyJobConfiguration(true)} /> : null}
       {databaseModalOpen && databaseDraft ? <Modal title="Edit Database" variant="job-section-editor" onClose={cancelDatabase}>
           <div className="neo-form-grid neo-job-database-editor">
           <Field label="Database Server">

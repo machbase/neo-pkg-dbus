@@ -5,6 +5,7 @@ const { error } = require('../config/errors.js');
 const { loadSettings } = require('../config/settings-loader.js');
 const { loadProductPolicy } = require('../config/product-policy.js');
 const { resolveIntervalPolicy } = require('../ls/interval-policy.js');
+const { resolveJobDestination, resolveJobInterfacePrefix } = require('../ls/dbus-destination.js');
 const { createDatabaseValidationAdapter } = require('../db/validation-adapter.js');
 const {
   DATABASE_PROFILE_LOCK_NAME,
@@ -147,6 +148,14 @@ class JobManager {
 
   requestJsonMaxBytes() { return this.productPolicy.maxRequestJsonBytes; }
 
+  intervalPolicy(destination, interfacePrefix, callback) {
+    this.callback(callback, () => {
+      const selected = this.isLs ? resolveJobDestination(destination, 'REQUEST_INVALID') : undefined;
+      const prefix = this.isLs ? resolveJobInterfacePrefix(interfacePrefix, 'REQUEST_INVALID') : undefined;
+      callback(null, resolveIntervalPolicy({ settings: this.settings(), productPolicy: this.productPolicy, dbusFactory: this.dbusFactory, destination: selected, interfacePrefix: prefix }));
+    });
+  }
+
   validateConfig(config, options) {
     if (this.isLs && options?.creating && config?.schedule
       && !Object.prototype.hasOwnProperty.call(config.schedule, 'useAbsoluteTimer')) {
@@ -157,8 +166,10 @@ class JobManager {
     // can legitimately contain an interval which predates the task-cycle
     // policy; enforce it only when a user creates or saves a Job.
     const enforceInterval = options?.enforceInterval !== false;
+    const destination = this.isLs ? resolveJobDestination(config?.dbusDestination) : undefined;
+    const interfacePrefix = this.isLs ? resolveJobInterfacePrefix(config?.dbusInterfacePrefix) : undefined;
     const intervalPolicy = enforceInterval
-      ? resolveIntervalPolicy({ settings: this.settings(), productPolicy: this.productPolicy, dbusFactory: this.dbusFactory })
+      ? resolveIntervalPolicy({ settings: this.settings(), productPolicy: this.productPolicy, dbusFactory: this.dbusFactory, destination, interfacePrefix })
       : { cycleMs: 1 };
     const validated = validateJobConfig(config, {
       interfaceStore: this.interfaceStore,
@@ -167,6 +178,7 @@ class JobManager {
       intervalCycleMs: intervalPolicy.cycleMs,
       maxJobJsonBytes: this.productPolicy.maxJobJsonBytes,
       allowAbsoluteTimer: this.isLs,
+      allowLsDBusDestination: this.isLs,
     });
     const productValidated = this.productPolicy.validateProductConfig(validated);
     if (this.isLs && options?.enforceDatabaseProfile !== false

@@ -1,6 +1,7 @@
 'use strict';
 
 const { createDbusAdapter } = require('../dbus/adapter.js');
+const { resolveJobDestination, interfaceForPrefix } = require('./dbus-destination.js');
 
 const TASK_NUMBER = 0;
 
@@ -18,8 +19,8 @@ function resolveIntervalPolicy(options) {
   try {
     dbus = (options?.dbusFactory || (() => createDbusAdapter()))();
     const response = dbus.call(
-      { busType: 'system', destination: 'ls.plc' },
-      { objectPath: '/ls/plc/program', interface: 'ls.plc.program', methodName: 'GetTaskCycleInfo' },
+      { busType: 'system', destination: resolveJobDestination(options?.destination) },
+      { objectPath: '/ls/plc/program', interface: interfaceForPrefix(options?.interfacePrefix, 'program'), methodName: 'GetTaskCycleInfo' },
       [`uint16:${TASK_NUMBER}`],
     );
     const body = response?.body;

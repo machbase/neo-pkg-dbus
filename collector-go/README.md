@@ -32,6 +32,16 @@ the executable with `--control start|stop|reload <job-name>` for logical Job
 control.  The daemon maintains a single native writer and an epoch-aligned,
 fixed-rate reader per running Job.
 
+Each LS Job stores `dbusDestination` and `dbusInterfacePrefix` independently.
+Both default to `ls.plc` for existing Jobs. The destination accepts any valid
+DBus bus name up to 255 ASCII bytes; the Interface prefix accepts a valid DBus
+name up to 247 ASCII bytes. The first
+selects the system-bus service; the second selects `<prefix>.device.GetDeviceData`
+and `<prefix>.program.GetTaskCycleInfo`. Job save, Test Call and the reader use
+the same pair. Stop, save and restart the Job after changing either value.
+The tested PLC uses `high.ls.plc` as the service with `ls.plc` as the interface
+prefix. Object paths remain `/ls/plc/device` and `/ls/plc/program`.
+
 Job performance summaries transfer ownership of the completed sample window to
 the existing logging worker. Percentile calculation, formatting and file I/O
 run there, not in the reader. The next window uses independent sample arrays.

@@ -67,11 +67,28 @@ and `readerStartLagUs`, the last skipped tick's `skippedTimerWakeLagUs`, and tha
 same reader's `readerTotalUs`, `dbusUs`, `parseUs`. No per-skip history is stored.
 Unmeasured DBus/parse is `n/a`. Disabling detail preserves all skip counters.
 
-To apply internal writer/performance policy edits, stop the package service,
+To apply internal LS policy edits, stop the package service,
 edit `cgi-bin/conf.d/settings.json`, remove only `conf.d/go-collector.json`, and
 start the package service. Start recreates that snapshot. Do not remove the
 secrets, active-Job checkpoint or Job configuration files. Verify queue edits in
 the writer summary's `queueCapacity` field.
+
+Each LS Job stores `dbusDestination` and `dbusInterfacePrefix` separately.
+The destination is a free-form DBus bus name (default `ls.plc`, up to 255 ASCII
+bytes); the Interface prefix is a free-form DBus identifier (default `ls.plc`,
+up to 247 ASCII bytes).
+The service name selects the DBus destination; the prefix forms
+`<prefix>.device.GetDeviceData` and
+`<prefix>.program.GetTaskCycleInfo`. The tested PLC uses `high.ls.plc` /
+`ls.plc`, while a PLC exposing high-prefixed interfaces can use both high values.
+Object paths remain unchanged. The Go collector logs both values at Job start.
+For a quick PLC test, stop the Job and edit `cgi-bin/conf.d/jobs/<name>.json`,
+for example `"dbusDestination": "high.ls.plc", "dbusInterfacePrefix": "ls.plc"`,
+then start that Job. Go reads the Job document again at every start; these
+fields are not stored in the lightweight Job index or global collector policy.
+Keep the Job's existing `name` and `revision` values. Manual edits bypass the
+save-time Task Period check, so verify that `schedule.intervalMs` is a multiple
+of the selected service's Task Period.
 
 The LS collector has one Go service, one native writer, and one reader goroutine per active Job. A reader uses the PLC timestamp returned by DBus, decodes and transforms typed rows, then puts them on the shared bounded writer queue without waiting for a database flush. Queue rows carry a daemon-stable numeric TAG registry index rather than a repeated TAG string; the channel allocates only its 512 pointer slots up front and batch payloads are allocated only by completed reads. The writer keeps one native Neo appender open for the shared Database profile; it is the only component which appends data. It also completes ordinary batches directly after Flush instead of creating one waiting goroutine per collection cycle; at short intervals this keeps goroutine and stack usage bounded by the daemon structure rather than by the number of batches awaiting the 1-second Flush. Its internal defaults are a 512-batch queue, an 8,192-row native batch threshold, and a 1-second forced flush. They live under `settings.json.ls.writer` for deployment tuning only and are not frontend controls. A controlled logical Job or package stop drains queued rows and requests a final flush; an unexpected process/power loss can lose rows still buffered since the last flush.
 

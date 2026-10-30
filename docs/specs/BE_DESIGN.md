@@ -45,7 +45,7 @@ LS interval은 1ms 이상 정수이며 PLC 로컬 Unix epoch의 `00:00:00`에 �
 
 LS Job의 비동기 TAG 준비는 Job별 로그에 시작과 완료를 한 번씩 기록한다. 완료 행은 준비 대상·기존·누락·실제 등록 TAG 수와 metadata 조회, 등록, 전체 경과 시간을 microsecond 단위로 포함한다. 전체 준비가 10초 이상이면 완료 행을 `WARN`으로 기록하고, 실패하면 완료된 등록 수와 실제 오류를 `ERROR`로 남긴다. 이미 준비된 registry를 재사용한 경우에는 `reused=true`로 표시한다. 이 lifecycle 계측은 사용자가 낮은 log level을 선택해도 운영 진단을 위해 남으며 cycle마다 반복하지 않는다.
 
-LS의 canonical Job 설정은 `conf.d/jobs/<name>.json`이고, 저장 완료 표시는 작은 `conf.d/job-index/<name>.json`이다. `conf.d/go-collector.json`은 logging/writer/performance 전역 정책만 가지며 Job이나 DB 연결을 복제하지 않는다. DB password와 shared table/column mapping은 `conf.d/go-collector-secrets.json`(0600)에 분리한다. Database Profile의 table/column mapping이 LS의 현재 공용 값이며, 경량 Job status와 Data Viewer도 index나 Job 안의 과거 복사본보다 이 공용 값을 우선한다. logical Job의 started/stopped 의도 상태는 `conf.d/go-collector-active-jobs.json`에 보존하고 Go daemon만 갱신한다. Go는 Start/Reload에서 index와 revision이 일치하는 canonical Job을 직접 읽고 runtime 설정을 검증한다. daemon runtime checkpoint는 `data/go-collector-runtime.json`, control socket은 `data/neo-dbus-collector.sock`이다. `refresh-log <jobName>` control도 canonical Job의 `log`만 다시 읽어 daemon의 mutex 보호 policy map에 교체한다. reader/writer·DBus connection·scheduler·overrun 값은 멈추거나 초기화하지 않는다. password와 원본 DBus body는 API, checkpoint, log에 넣지 않는다.
+LS의 canonical Job 설정은 `conf.d/jobs/<name>.json`이고, 저장 완료 표시는 작은 `conf.d/job-index/<name>.json`이다. `conf.d/go-collector.json`은 logging/writer/performance/scheduler 전역 정책만 가지며 Job이나 DB 연결을 복제하지 않는다. DB password와 shared table/column mapping은 `conf.d/go-collector-secrets.json`(0600)에 분리한다. Database Profile의 table/column mapping이 LS의 현재 공용 값이며, 경량 Job status와 Data Viewer도 index나 Job 안의 과거 복사본보다 이 공용 값을 우선한다. logical Job의 started/stopped 의도 상태는 `conf.d/go-collector-active-jobs.json`에 보존하고 Go daemon만 갱신한다. Go는 Start/Reload에서 index와 revision이 일치하는 canonical Job을 직접 읽고 runtime 설정을 검증한다. daemon runtime checkpoint는 `data/go-collector-runtime.json`, control socket은 `data/neo-dbus-collector.sock`이다. `refresh-log <jobName>` control도 canonical Job의 `log`만 다시 읽어 daemon의 mutex 보호 policy map에 교체한다. reader/writer·DBus connection·scheduler·overrun 값은 멈추거나 초기화하지 않는다. password와 원본 DBus body는 API, checkpoint, log에 넣지 않는다.
 
 내부 `ls.performance`는 기본 활성화하며 Job 1,000 cycle마다 Job 이름과 DBus latency
 `avg/p99/max`, parse `avg/max`, reader total `min/p99/max`, interval 초과와 error 수를 microsecond 단위로
@@ -139,7 +139,14 @@ target의 manifest 이름은 `neo-pkg-dbus`이고 루트의 같은 version과
 
 ## 3. 설정 모델
 
-`settings.json`은 다음 구조를 사용한다.
+`settings.json`은 다음 구조를 사용한다. LS DBus 서비스명과 Interface prefix는
+전역 설정이 아니라 각각 Job 문서의 `dbusDestination`, `dbusInterfacePrefix`다.
+destination은 유효한 DBus bus name을 허용하며 기본값은 `ls.plc`다. Interface
+prefix는 유효한 DBus 이름을 입력하며 기본값은 `ls.plc`다. 누락된 기존 Job은 각 필드에
+`ls.plc`를 사용한다. 호출은 선택한 destination과
+`<prefix>.device.GetDeviceData`/`<prefix>.program.GetTaskCycleInfo`를 조합한다.
+Object path는 유지한다. `GET /job/interval-policy?destination=...&interfacePrefix=...`와
+LS 내장 Interface의 `POST /dbus/call`도 두 값을 받는다.
 
 ```json
 {

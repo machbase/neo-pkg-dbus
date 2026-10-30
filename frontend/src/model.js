@@ -2,6 +2,35 @@ const TRANSITION_STATES = new Set(["STARTING", "STOPPING"]);
 const BLOCKING_REFERENCE_STATES = new Set(["RUNNING", "STARTING", "STOPPING", "UNKNOWN"]);
 export const MAX_TAG_NAME_LENGTH = 100;
 export const MAX_INTERVAL_MS = 86400000;
+export const DEFAULT_LS_DBUS_DESTINATION = "ls.plc";
+export const MAX_LS_DBUS_DESTINATION_LENGTH = 255;
+export function isValidLsDbusDestination(value) {
+  return typeof value === "string" && value.length <= MAX_LS_DBUS_DESTINATION_LENGTH
+    && (/^[A-Za-z_][A-Za-z0-9_-]*(?:\.[A-Za-z_][A-Za-z0-9_-]*)+$/.test(value)
+      || /^:[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)+$/.test(value));
+}
+export const DEFAULT_LS_DBUS_INTERFACE_PREFIX = DEFAULT_LS_DBUS_DESTINATION;
+export const MAX_LS_DBUS_INTERFACE_PREFIX_LENGTH = 247;
+export function isValidLsDbusInterfacePrefix(value) {
+  return typeof value === "string" && value.length <= MAX_LS_DBUS_INTERFACE_PREFIX_LENGTH
+    && /^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$/.test(value);
+}
+
+const STANDARD_LS_DBUS_NAMES = new Set(["ls.plc", "high.ls.plc"]);
+
+export function classifyLsDbusTestSettings(destination, interfacePrefix) {
+  const fields = [
+    { label: "Service Name", value: destination, valid: isValidLsDbusDestination(destination) },
+    { label: "Interface Prefix", value: interfacePrefix, valid: isValidLsDbusInterfacePrefix(interfacePrefix) },
+  ];
+  const blank = fields.filter(({ value }) => typeof value !== "string" || !value.trim());
+  if (blank.length) return { kind: "blank", fields: blank.map(({ label }) => label) };
+  const invalid = fields.filter(({ valid }) => !valid);
+  if (invalid.length) return { kind: "invalid", fields: invalid.map(({ label }) => label) };
+  const unusual = fields.filter(({ value }) => !STANDARD_LS_DBUS_NAMES.has(value));
+  if (unusual.length) return { kind: "confirm", fields: unusual.map(({ label, value }) => ({ label, value })) };
+  return { kind: "ok", fields: [] };
+}
 
 export function taskPeriodMs(value) {
   const period = Number(value);
@@ -163,6 +192,10 @@ export function createDefaultJobConfig(provider, server = "local-db", initialMet
   }] : [];
   return {
     schemaVersion: 1,
+    ...(provider?.jobMode === "fixed" ? {
+      dbusDestination: DEFAULT_LS_DBUS_DESTINATION,
+      dbusInterfacePrefix: DEFAULT_LS_DBUS_INTERFACE_PREFIX,
+    } : {}),
     schedule: { intervalMs, ...(timerPolicy ? { useAbsoluteTimer: timerPolicy.defaultUseAbsoluteTimer === true } : {}) },
     retry: { initialDelayMs: 5000, maximumDelayMs: 30000, multiplier: 2 },
     execution: { savePolicy: "perMethod", onMethodError: "stop", test: false },
@@ -198,8 +231,12 @@ export function serializeJobConfig(config) {
   return cloned;
 }
 
-export function hydrateJobConfig(config, timerPolicy = null) {
+export function hydrateJobConfig(config, timerPolicy = null, fixedProvider = false) {
   const cloned = typeof structuredClone === "function" ? structuredClone(config) : JSON.parse(JSON.stringify(config));
+  if (fixedProvider) {
+    cloned.dbusDestination ||= DEFAULT_LS_DBUS_DESTINATION;
+    cloned.dbusInterfacePrefix ||= DEFAULT_LS_DBUS_INTERFACE_PREFIX;
+  }
   if (timerPolicy || Object.hasOwn(cloned.schedule || {}, "useAbsoluteTimer")) {
     cloned.schedule = { ...cloned.schedule, useAbsoluteTimer: cloned.schedule?.useAbsoluteTimer === true };
   }

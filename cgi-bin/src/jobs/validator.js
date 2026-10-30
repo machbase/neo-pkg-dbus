@@ -2,6 +2,7 @@
 
 const { error } = require('../config/errors.js');
 const { isValueValid, normalizeType } = require('../dbus/types.js');
+const { resolveJobDestination, resolveJobInterfacePrefix } = require('../ls/dbus-destination.js');
 
 const MAX_JOB_JSON_BYTES = 512 * 1024;
 const MAX_METHOD_CALLS = 128;
@@ -252,6 +253,7 @@ function validateJobConfig(value, options) {
   assertFields(value, [
     'schemaVersion', 'schedule', 'retry', 'execution',
     'methodCalls', 'database', 'log',
+    ...(settings.allowLsDBusDestination ? ['dbusDestination', 'dbusInterfacePrefix'] : []),
   ], 'Job config');
   if (value.schemaVersion !== 1) invalid('Job schemaVersion은 1이어야 합니다.');
   if (!settings.interfaceStore || typeof settings.interfaceStore.find !== 'function') {
@@ -306,6 +308,10 @@ function validateJobConfig(value, options) {
     || value.log.maxFiles < 1 || value.log.maxFiles > 1000) invalid('log 설정이 잘못되었습니다.');
 
   const normalized = clone(value);
+  if (settings.allowLsDBusDestination) {
+    normalized.dbusDestination = resolveJobDestination(value.dbusDestination);
+    normalized.dbusInterfacePrefix = resolveJobInterfacePrefix(value.dbusInterfacePrefix);
+  }
   if (settings.allowAbsoluteTimer) normalized.schedule.useAbsoluteTimer = normalized.schedule.useAbsoluteTimer === true;
   // Neo stores unquoted SQL identifiers in uppercase. Persist the same
   // canonical form for every Job creation and update path.

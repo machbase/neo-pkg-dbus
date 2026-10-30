@@ -55,6 +55,7 @@ const (
 	testTableName          = "T4_DBUS_TEST_"
 	initialJobRowBuffers   = 4
 	maximumJobRowBuffers   = 32
+	defaultDBusDestination = "ls.plc"
 )
 
 type snapshot struct {
@@ -63,6 +64,73 @@ type snapshot struct {
 	Writer        writerPolicy      `json:"writer"`
 	Performance   performancePolicy `json:"performance"`
 	Scheduler     *schedulerPolicy  `json:"scheduler,omitempty"`
+}
+
+// Existing Jobs omit the service name and continue using the original bus.
+// The service name is an independently editable DBus bus name.
+func normalizedDBusDestination(value string) (string, error) {
+	if value == "" {
+		return defaultDBusDestination, nil
+	}
+	if len(value) > 255 {
+		return "", fmt.Errorf("LS DBus destination exceeds 255 bytes")
+	}
+	unique := strings.HasPrefix(value, ":")
+	name := value
+	if unique {
+		name = value[1:]
+	}
+	parts := strings.Split(name, ".")
+	if len(parts) < 2 {
+		return "", fmt.Errorf("invalid LS DBus destination %q", value)
+	}
+	for _, part := range parts {
+		if part == "" {
+			return "", fmt.Errorf("invalid LS DBus destination %q", value)
+		}
+		for index, char := range part {
+			valid := char == '_' || char >= 'A' && char <= 'Z' || char >= 'a' && char <= 'z'
+			if unique || index > 0 {
+				valid = valid || char >= '0' && char <= '9' || char == '-'
+			}
+			if !valid {
+				return "", fmt.Errorf("invalid LS DBus destination %q", value)
+			}
+		}
+	}
+	return value, nil
+}
+
+// The bus name and interface prefix are separate Job settings. The tested PLC
+// exposes both bus names with the original interface, while another target may
+// use a different interface name. Appending ".program" keeps a valid DBus
+// interface within the 255-byte limit when the prefix is at most 247 bytes.
+func normalizedDBusInterfacePrefix(value string) (string, error) {
+	if value == "" {
+		return defaultDBusDestination, nil
+	}
+	if len(value) > 247 {
+		return "", fmt.Errorf("LS DBus interface prefix exceeds 247 bytes")
+	}
+	for _, component := range strings.Split(value, ".") {
+		if len(component) == 0 {
+			return "", fmt.Errorf("invalid LS DBus interface prefix %q", value)
+		}
+		for index, char := range component {
+			valid := char == '_' || char >= 'A' && char <= 'Z' || char >= 'a' && char <= 'z'
+			if index > 0 {
+				valid = valid || char >= '0' && char <= '9'
+			}
+			if !valid {
+				return "", fmt.Errorf("invalid LS DBus interface prefix %q", value)
+			}
+		}
+	}
+	return value, nil
+}
+
+func lsDeviceMethod(interfacePrefix string) string {
+	return interfacePrefix + ".device.GetDeviceData"
 }
 
 type conn struct {
@@ -76,15 +144,17 @@ type conn struct {
 }
 
 type jobConfig struct {
-	SchemaVersion int       `json:"schemaVersion"`
-	Name          string    `json:"name"`
-	Revision      int       `json:"revision"`
-	Schedule      schedule  `json:"schedule"`
-	Retry         retry     `json:"retry"`
-	Execution     execution `json:"execution"`
-	Database      database  `json:"database"`
-	MethodCalls   []method  `json:"methodCalls"`
-	Log           logConfig `json:"log"`
+	SchemaVersion       int       `json:"schemaVersion"`
+	Name                string    `json:"name"`
+	Revision            int       `json:"revision"`
+	DBusDestination     string    `json:"dbusDestination"`
+	DBusInterfacePrefix string    `json:"dbusInterfacePrefix"`
+	Schedule            schedule  `json:"schedule"`
+	Retry               retry     `json:"retry"`
+	Execution           execution `json:"execution"`
+	Database            database  `json:"database"`
+	MethodCalls         []method  `json:"methodCalls"`
+	Log                 logConfig `json:"log"`
 }
 type execution struct {
 	Test bool `json:"test"`
@@ -945,7 +1015,7 @@ func (d *daemon) startJob(ctx context.Context, name string, active *activeJob) {
 		d.failStart(name, active, fmt.Errorf("publish running state: %w", err))
 		return
 	}
-	d.log(name, "INFO", "collector", fmt.Sprintf("collector started; source=%s intervalMs=%d timerMode=%s", sourceForConfig(active.config), active.config.Schedule.IntervalMS, timerMode(active.config.Schedule.UseAbsoluteTimer)))
+	d.log(name, "INFO", "collector", fmt.Sprintf("collector started; source=%s intervalMs=%d timerMode=%s dbusDestination=%s dbusInterfacePrefix=%s", sourceForConfig(active.config), active.config.Schedule.IntervalMS, timerMode(active.config.Schedule.UseAbsoluteTimer), active.config.DBusDestination, active.config.DBusInterfacePrefix))
 	if d.performancePolicy.Enabled {
 		message := fmt.Sprintf("performance logging enabled; jobSampleCount=%d writerSummaryIntervalMs=%d writerFlushIntervalMs=%d", d.performancePolicy.JobSampleCount, d.performancePolicy.WriterSummaryIntervalMS, d.writerPolicy.normalized().FlushIntervalMS)
 		if len(d.performanceCorrections) > 0 {
@@ -1413,7 +1483,7 @@ func (d *daemon) readCycle(ctx context.Context, config jobConfig, name string, c
 	if config.Execution.Test {
 		timing, err = generateTestRowsInto(active.plan, rows)
 	} else {
-		timing, err = readDBusInto(ctx, active.plan, *connection, rows)
+		timing, err = readDBusInto(ctx, active.plan, *connection, config.DBusDestination, config.DBusInterfacePrefix, rows)
 	}
 	result.timing = timing
 	if err != nil {
@@ -2088,19 +2158,19 @@ func readDBus(ctx context.Context, config jobConfig, connection *dbus.Conn) ([]r
 		return nil, readTiming{}, err
 	}
 	rows := make([]row, plan.rowCount)
-	timing, err := readDBusInto(ctx, plan, connection, rows)
+	timing, err := readDBusInto(ctx, plan, connection, config.DBusDestination, config.DBusInterfacePrefix, rows)
 	return rows, timing, err
 }
 
-func readDBusInto(ctx context.Context, plan *readPlan, connection *dbus.Conn, rows []row) (readTiming, error) {
+func readDBusInto(ctx context.Context, plan *readPlan, connection *dbus.Conn, destination, interfacePrefix string, rows []row) (readTiming, error) {
 	timing := readTiming{}
 	if plan == nil || len(rows) != plan.rowCount {
 		return timing, errors.New("LS read buffer does not match the prepared Job layout")
 	}
 	for _, call := range plan.calls {
-		object := connection.Object("ls.plc", dbus.ObjectPath("/ls/plc/device"))
+		object := connection.Object(destination, dbus.ObjectPath("/ls/plc/device"))
 		dbusStarted := time.Now()
-		result := object.CallWithContext(ctx, "ls.plc.device.GetDeviceData", 0, uint16(call.count), call.address)
+		result := object.CallWithContext(ctx, lsDeviceMethod(interfacePrefix), 0, uint16(call.count), call.address)
 		timing.DBus += time.Since(dbusStarted)
 		timing.DBusMeasured = true
 		if result.Err != nil {
@@ -2788,6 +2858,14 @@ func loadJob(root, name string) (jobConfig, error) {
 	}
 	if job.SchemaVersion != 1 || job.Name != name || job.Revision != index.Revision {
 		return jobConfig{}, errors.New("job document does not match its registration index")
+	}
+	job.DBusDestination, err = normalizedDBusDestination(job.DBusDestination)
+	if err != nil {
+		return jobConfig{}, err
+	}
+	job.DBusInterfacePrefix, err = normalizedDBusInterfacePrefix(job.DBusInterfacePrefix)
+	if err != nil {
+		return jobConfig{}, err
 	}
 	servers, err := loadSecrets(root)
 	if err != nil {

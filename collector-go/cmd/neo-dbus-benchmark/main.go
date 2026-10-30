@@ -26,16 +26,20 @@ import (
 	client "github.com/machbase/neo-client/v2"
 )
 
+const defaultBenchmarkDBusDestination = "ls.plc"
+
 type config struct {
-	Table    string
-	Jobs     int
-	Calls    int
-	Values   int
-	Warmup   int
-	Cycles   int
-	Interval time.Duration
-	Phase    time.Duration
-	DSN      string
+	Table           string
+	DBusDestination string
+	InterfacePrefix string
+	Jobs            int
+	Calls           int
+	Values          int
+	Warmup          int
+	Cycles          int
+	Interval        time.Duration
+	Phase           time.Duration
+	DSN             string
 }
 
 type durationStats struct {
@@ -158,6 +162,8 @@ func main() {
 	var intervalMS int
 	var phaseMS int
 	flag.StringVar(&cfg.Table, "table", "", "dedicated TAG table name (required)")
+	flag.StringVar(&cfg.DBusDestination, "dbus-destination", defaultBenchmarkDBusDestination, "LS DBus service name")
+	flag.StringVar(&cfg.InterfacePrefix, "interface-prefix", defaultBenchmarkDBusDestination, "LS DBus interface prefix")
 	flag.IntVar(&cfg.Jobs, "jobs", 1, "concurrent DBus readers")
 	flag.IntVar(&cfg.Calls, "calls-per-job", 1, "sequential DBus calls per logical Job")
 	flag.IntVar(&cfg.Values, "values", 1000, "values per DBus call")
@@ -361,11 +367,11 @@ func run(cfg config) (runErr error) {
 }
 
 func read(conn *dbus.Conn, cfg config, item *sample) error {
-	object := conn.Object("ls.plc", dbus.ObjectPath("/ls/plc/device"))
+	object := conn.Object(cfg.DBusDestination, dbus.ObjectPath("/ls/plc/device"))
 	item.rows = make([]row, 0, cfg.Values*cfg.Calls)
 	for call := 0; call < cfg.Calls; call++ {
 		readStarted := time.Now()
-		result := object.Call("ls.plc.device.GetDeviceData", 0, uint16(cfg.Values), fmt.Sprintf("%%MB%d", call*cfg.Values))
+		result := object.Call(cfg.InterfacePrefix+".device.GetDeviceData", 0, uint16(cfg.Values), fmt.Sprintf("%%MB%d", call*cfg.Values))
 		elapsed := time.Since(readStarted)
 		item.dbusRead += elapsed
 		item.callReads = append(item.callReads, elapsed)
