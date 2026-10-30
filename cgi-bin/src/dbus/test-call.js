@@ -6,6 +6,7 @@ const { loadSettings } = require('../config/settings-loader.js');
 const { buildTypedArguments } = require('./arguments.js');
 const { createDbusAdapter } = require('./adapter.js');
 const { InterfaceStore } = require('../interfaces/store.js');
+const { resolveJobDestination, interfaceForPrefix } = require('../ls/dbus-destination.js');
 
 function invalid(reason, details) { throw error('REQUEST_INVALID', reason, details); }
 
@@ -21,20 +22,24 @@ class TestCallManager {
 
   resolve(payload) {
     if (!payload || typeof payload !== 'object' || Array.isArray(payload)) invalid('Test Call body는 객체여야 합니다.');
-    if (Object.keys(payload).some((key) => !['interfaceId', 'methodId', 'inputs'].includes(key))) invalid('Test Call은 interfaceId, methodId, inputs만 받을 수 있습니다.');
+    if (Object.keys(payload).some((key) => !['interfaceId', 'methodId', 'inputs', 'dbusDestination', 'dbusInterfacePrefix'].includes(key))) invalid('Test Call에 알 수 없는 필드가 있습니다.');
     if (typeof payload.interfaceId !== 'string' || !payload.interfaceId) invalid('Test Call interfaceId가 필요합니다.');
     if (typeof payload.methodId !== 'string' || !payload.methodId) invalid('Test Call methodId가 필요합니다.');
     if (!payload.inputs || typeof payload.inputs !== 'object' || Array.isArray(payload.inputs)) invalid('Test Call inputs는 객체여야 합니다.');
     if (!this.interfaceStore) invalid('DBus Interface 저장소를 읽을 수 없습니다.');
     const dbusInterface = this.interfaceStore.find(payload.interfaceId);
     if (!dbusInterface) throw error('DBUS_INTERFACE_NOT_FOUND', 'Test Call DBus Interface를 찾을 수 없습니다.', { id: payload.interfaceId });
+    const lsBuiltIn = dbusInterface.id === 'ls-plc-device' && dbusInterface.builtIn === true;
+    if ((payload.dbusDestination !== undefined || payload.dbusInterfacePrefix !== undefined) && !lsBuiltIn) invalid('DBus service/interface 선택은 LS 내장 Interface에서만 사용할 수 있습니다.');
     const method = dbusInterface.methods.find((item) => item.id === payload.methodId);
     if (!method) throw error('DBUS_METHOD_NOT_FOUND', 'Test Call DBus Method를 찾을 수 없습니다.', { interfaceId: payload.interfaceId, methodId: payload.methodId });
     if (!this.settings || !this.settings.limits) invalid('Test Call settings limits를 읽을 수 없습니다.');
     return {
       dbusInterface, method,
-      dbus: { busType: dbusInterface.busType, destination: dbusInterface.destination },
-      callMethod: { objectPath: dbusInterface.objectPath, interface: dbusInterface.interface, methodName: method.member },
+      dbus: { busType: dbusInterface.busType, destination: lsBuiltIn
+        ? resolveJobDestination(payload.dbusDestination, 'REQUEST_INVALID') : dbusInterface.destination },
+      callMethod: { objectPath: dbusInterface.objectPath, interface: lsBuiltIn
+        ? interfaceForPrefix(payload.dbusInterfacePrefix, 'device', 'REQUEST_INVALID') : dbusInterface.interface, methodName: method.member },
       inputs: payload.inputs,
     };
   }

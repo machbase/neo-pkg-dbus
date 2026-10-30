@@ -4,7 +4,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { createDefaultJobConfig } from "../src/model.js";
+import { classifyLsDbusTestSettings, createDefaultJobConfig, hydrateJobConfig, isValidLsDbusDestination, isValidLsDbusInterfacePrefix, serializeJobConfig } from "../src/model.js";
 import * as generic from "../../products/generic/frontend/model.mjs";
 import * as ls from "../../products/ls/frontend/model.mjs";
 
@@ -60,6 +60,24 @@ test("generic 새 Job은 Database 기본값만 복사한다", () => {
 test("LS 새 Job은 제품의 고정 Call을 공유하지 않고 복사한다", () => {
   const profile = loadLsProfile();
   const config = createDefaultJobConfig(profile, databaseServer, ls.createInitialMethodCalls(profile));
+  assert.equal(config.dbusDestination, "ls.plc");
+  assert.equal(config.dbusInterfacePrefix, "ls.plc");
+  assert.equal(hydrateJobConfig({ ...config, dbusDestination: undefined }, null, true).dbusDestination, "ls.plc");
+  assert.equal(hydrateJobConfig({ ...config, dbusInterfacePrefix: undefined }, null, true).dbusInterfacePrefix, "ls.plc");
+  assert.equal(serializeJobConfig({ ...config, dbusDestination: "high.ls.plc" }).dbusDestination, "high.ls.plc");
+  assert.equal(serializeJobConfig({ ...config, dbusDestination: "vendor-test.plc3" }).dbusDestination, "vendor-test.plc3");
+  assert.equal(isValidLsDbusDestination("vendor-test.plc3"), true);
+  assert.equal(isValidLsDbusDestination(":1.2"), true);
+  for (const destination of ["", "single", "a..b", "1a.b", "a/b.c", "a".repeat(256)]) {
+    assert.equal(isValidLsDbusDestination(destination), false);
+  }
+  assert.equal(serializeJobConfig({ ...config, dbusInterfacePrefix: "high.ls.plc" }).dbusInterfacePrefix, "high.ls.plc");
+  assert.equal(serializeJobConfig({ ...config, dbusInterfacePrefix: "vendor_plc3" }).dbusInterfacePrefix, "vendor_plc3");
+  assert.equal(isValidLsDbusInterfacePrefix("vendor_plc3"), true);
+  assert.equal(isValidLsDbusInterfacePrefix("a.b_2"), true);
+  for (const prefix of ["", "a..b", "1plc", "a-b", "a/b", "a".repeat(248)]) {
+    assert.equal(isValidLsDbusInterfacePrefix(prefix), false);
+  }
   assert.equal(config.methodCalls[0].interfaceId, "ls-plc-device");
   assert.deepEqual(config.methodCalls[0].inputs, { DeviceString: "%MB0", DataCount: 1 });
   assert.deepEqual(config.methodCalls[0].outputSelections[0].tags.map((tag) => tag.name), ["MB0"]);
@@ -113,4 +131,22 @@ test("LS 제품은 수동 이름을 같은 위치에 유지하고 범위를 벗�
 test("generic 제품은 LS Tag 규칙을 적용하지 않는다", () => {
   const existing = [{ name: "KEEP", nameMode: "manual" }];
   assert.deepEqual(generic.reconcileProductTags({ DeviceString: "%MB3", DataCount: 3 }, existing), existing);
+});
+
+
+test("DBus Apply blocks blank names and combines custom-name confirmations", () => {
+  for (const destination of ["ls.plc", "high.ls.plc"]) {
+    for (const prefix of ["ls.plc", "high.ls.plc"]) {
+      assert.equal(classifyLsDbusTestSettings(destination, prefix).kind, "ok");
+    }
+  }
+  assert.deepEqual(classifyLsDbusTestSettings("  ", "ls.plc"), { kind: "blank", fields: ["Service Name"] });
+  assert.deepEqual(classifyLsDbusTestSettings("ls.plc", ""), { kind: "blank", fields: ["Interface Prefix"] });
+  assert.deepEqual(classifyLsDbusTestSettings("", "\t"), { kind: "blank", fields: ["Service Name", "Interface Prefix"] });
+  assert.deepEqual(classifyLsDbusTestSettings("other.plc", "ls.plc"), { kind: "confirm", fields: [{ label: "Service Name", value: "other.plc" }] });
+  assert.deepEqual(classifyLsDbusTestSettings("ls.plc", "other.plc"), { kind: "confirm", fields: [{ label: "Interface Prefix", value: "other.plc" }] });
+  assert.deepEqual(classifyLsDbusTestSettings("other.service", "other.prefix"), { kind: "confirm", fields: [
+    { label: "Service Name", value: "other.service" }, { label: "Interface Prefix", value: "other.prefix" },
+  ] });
+  assert.equal(classifyLsDbusTestSettings("bad name", "ls.plc").kind, "invalid");
 });

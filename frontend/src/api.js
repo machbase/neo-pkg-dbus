@@ -93,13 +93,14 @@ export const api = {
     updateLogLevel: (name, patch, options) => send("PUT", named("/job/log", name), patch, options),
     remove: (name, options) => request(named("/job", name), { ...options, method: "DELETE" }),
     validate: (draft, options) => send("POST", "/job/validate", draft, options),
+    intervalPolicy: (destination, interfacePrefix, options) => get("/job/interval-policy", { destination, interfacePrefix }, options),
     start: (name, options) => send("POST", named("/job/start", name), undefined, options),
     stop: (name, options) => send("POST", named("/job/stop", name), undefined, options),
     lastRun: (name, options) => get("/job/last-run", { name }, options),
     clearOverrun: (name, options) => send("POST", named("/job/overrun/reset", name), undefined, options),
   },
   dbus: {
-    call: ({ interfaceId, methodId, inputs }, options) => send("POST", "/dbus/call", { interfaceId, methodId, inputs }, options),
+    call: ({ interfaceId, methodId, inputs, dbusDestination, dbusInterfacePrefix }, options) => send("POST", "/dbus/call", { interfaceId, methodId, inputs, ...(dbusDestination ? { dbusDestination } : {}), ...(dbusInterfacePrefix ? { dbusInterfacePrefix } : {}) }, options),
   },
   db: {
     servers: {

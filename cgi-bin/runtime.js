@@ -1887,12 +1887,54 @@ var require_types = __commonJS({
   }
 });
 
+// cgi-bin/src/ls/dbus-destination.js
+var require_dbus_destination = __commonJS({
+  "cgi-bin/src/ls/dbus-destination.js"(exports2, module2) {
+    "use strict";
+    var { error } = require_errors();
+    var DEFAULT_DBUS_DESTINATION = "ls.plc";
+    var DEFAULT_DBUS_INTERFACE_PREFIX = DEFAULT_DBUS_DESTINATION;
+    var MAX_DBUS_DESTINATION_LENGTH = 255;
+    var WELL_KNOWN_DBUS_DESTINATION = /^[A-Za-z_][A-Za-z0-9_-]*(?:\.[A-Za-z_][A-Za-z0-9_-]*)+$/;
+    var UNIQUE_DBUS_DESTINATION = /^:[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)+$/;
+    var MAX_DBUS_INTERFACE_PREFIX_LENGTH = 247;
+    var DBUS_INTERFACE_PREFIX = /^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$/;
+    function resolveJobDestination(value, code = "JOB_INVALID") {
+      if (value === void 0) return DEFAULT_DBUS_DESTINATION;
+      if (typeof value !== "string" || value.length > MAX_DBUS_DESTINATION_LENGTH || !(WELL_KNOWN_DBUS_DESTINATION.test(value) || UNIQUE_DBUS_DESTINATION.test(value))) {
+        throw error(code, "LS DBus Service Name\uC740 \uC720\uD6A8\uD55C DBus bus name\uC774\uC5B4\uC57C \uD569\uB2C8\uB2E4.");
+      }
+      return value;
+    }
+    function resolveJobInterfacePrefix(value, code = "JOB_INVALID") {
+      if (value === void 0) return DEFAULT_DBUS_INTERFACE_PREFIX;
+      if (typeof value !== "string" || value.length > MAX_DBUS_INTERFACE_PREFIX_LENGTH || !DBUS_INTERFACE_PREFIX.test(value)) {
+        throw error(code, "LS DBus Interface prefix\uB294 \uC601\uBB38\uC790\xB7\uC22B\uC790\xB7\uBC11\uC904\uACFC \uC810\uC73C\uB85C \uAD6C\uC131\uB41C \uC720\uD6A8\uD55C DBus \uC774\uB984\uC774\uC5B4\uC57C \uD569\uB2C8\uB2E4.");
+      }
+      return value;
+    }
+    function interfaceForPrefix(value, component, code = "JOB_INVALID") {
+      return `${resolveJobInterfacePrefix(value, code)}.${component}`;
+    }
+    module2.exports = {
+      DEFAULT_DBUS_DESTINATION,
+      MAX_DBUS_DESTINATION_LENGTH,
+      resolveJobDestination,
+      DEFAULT_DBUS_INTERFACE_PREFIX,
+      MAX_DBUS_INTERFACE_PREFIX_LENGTH,
+      resolveJobInterfacePrefix,
+      interfaceForPrefix
+    };
+  }
+});
+
 // cgi-bin/src/jobs/validator.js
 var require_validator = __commonJS({
   "cgi-bin/src/jobs/validator.js"(exports2, module2) {
     "use strict";
     var { error } = require_errors();
     var { isValueValid, normalizeType } = require_types();
+    var { resolveJobDestination, resolveJobInterfacePrefix } = require_dbus_destination();
     var MAX_JOB_JSON_BYTES = 512 * 1024;
     var MAX_METHOD_CALLS = 128;
     var MAX_JOB_NAME_LENGTH = 100;
@@ -2120,7 +2162,8 @@ var require_validator = __commonJS({
         "execution",
         "methodCalls",
         "database",
-        "log"
+        "log",
+        ...settings.allowLsDBusDestination ? ["dbusDestination", "dbusInterfacePrefix"] : []
       ], "Job config");
       if (value.schemaVersion !== 1) invalid("Job schemaVersion\uC740 1\uC774\uC5B4\uC57C \uD569\uB2C8\uB2E4.");
       if (!settings.interfaceStore || typeof settings.interfaceStore.find !== "function") {
@@ -2169,6 +2212,10 @@ var require_validator = __commonJS({
       assertFields(value.log, ["level", "maxFiles"], "log");
       if (!LOG_LEVELS.has(value.log.level) || !Number.isInteger(value.log.maxFiles) || value.log.maxFiles < 1 || value.log.maxFiles > 1e3) invalid("log \uC124\uC815\uC774 \uC798\uBABB\uB418\uC5C8\uC2B5\uB2C8\uB2E4.");
       const normalized = clone(value);
+      if (settings.allowLsDBusDestination) {
+        normalized.dbusDestination = resolveJobDestination(value.dbusDestination);
+        normalized.dbusInterfacePrefix = resolveJobInterfacePrefix(value.dbusInterfacePrefix);
+      }
       if (settings.allowAbsoluteTimer) normalized.schedule.useAbsoluteTimer = normalized.schedule.useAbsoluteTimer === true;
       normalized.database.table = normalized.database.table.toUpperCase();
       normalized.execution.test = normalized.execution.test === true;
@@ -4658,6 +4705,7 @@ var require_interval_policy = __commonJS({
   "cgi-bin/src/ls/interval-policy.js"(exports2, module2) {
     "use strict";
     var { createDbusAdapter } = require_adapter();
+    var { resolveJobDestination, interfaceForPrefix } = require_dbus_destination();
     var TASK_NUMBER = 0;
     function fallback(source) {
       return { cycleMs: 1, source };
@@ -4671,8 +4719,8 @@ var require_interval_policy = __commonJS({
       try {
         dbus = (options?.dbusFactory || (() => createDbusAdapter()))();
         const response = dbus.call(
-          { busType: "system", destination: "ls.plc" },
-          { objectPath: "/ls/plc/program", interface: "ls.plc.program", methodName: "GetTaskCycleInfo" },
+          { busType: "system", destination: resolveJobDestination(options?.destination) },
+          { objectPath: "/ls/plc/program", interface: interfaceForPrefix(options?.interfacePrefix, "program"), methodName: "GetTaskCycleInfo" },
           [`uint16:${TASK_NUMBER}`]
         );
         const body = response?.body;
@@ -5133,6 +5181,7 @@ var require_manager = __commonJS({
     var { loadSettings } = require_settings_loader();
     var { loadProductPolicy } = require_product_policy();
     var { resolveIntervalPolicy } = require_interval_policy();
+    var { resolveJobDestination, resolveJobInterfacePrefix } = require_dbus_destination();
     var { createDatabaseValidationAdapter } = require_validation_adapter();
     var {
       DATABASE_PROFILE_LOCK_NAME,
@@ -5281,20 +5330,30 @@ var require_manager = __commonJS({
       requestJsonMaxBytes() {
         return this.productPolicy.maxRequestJsonBytes;
       }
+      intervalPolicy(destination, interfacePrefix, callback) {
+        this.callback(callback, () => {
+          const selected = this.isLs ? resolveJobDestination(destination, "REQUEST_INVALID") : void 0;
+          const prefix = this.isLs ? resolveJobInterfacePrefix(interfacePrefix, "REQUEST_INVALID") : void 0;
+          callback(null, resolveIntervalPolicy({ settings: this.settings(), productPolicy: this.productPolicy, dbusFactory: this.dbusFactory, destination: selected, interfacePrefix: prefix }));
+        });
+      }
       validateConfig(config, options) {
         if (this.isLs && options?.creating && config?.schedule && !Object.prototype.hasOwnProperty.call(config.schedule, "useAbsoluteTimer")) {
           config = { ...config, schedule: { ...config.schedule, useAbsoluteTimer: this.settings().ls.timer.defaultUseAbsoluteTimer } };
         }
         const productLimits = this.productPolicy.validationLimits || {};
         const enforceInterval = options?.enforceInterval !== false;
-        const intervalPolicy = enforceInterval ? resolveIntervalPolicy({ settings: this.settings(), productPolicy: this.productPolicy, dbusFactory: this.dbusFactory }) : { cycleMs: 1 };
+        const destination = this.isLs ? resolveJobDestination(config?.dbusDestination) : void 0;
+        const interfacePrefix = this.isLs ? resolveJobInterfacePrefix(config?.dbusInterfacePrefix) : void 0;
+        const intervalPolicy = enforceInterval ? resolveIntervalPolicy({ settings: this.settings(), productPolicy: this.productPolicy, dbusFactory: this.dbusFactory, destination, interfacePrefix }) : { cycleMs: 1 };
         const validated = validateJobConfig(config, {
           interfaceStore: this.interfaceStore,
           limits: { ...this.settings().limits, ...productLimits },
           minimumIntervalMs: this.productPolicy.minimumIntervalMs || 1e3,
           intervalCycleMs: intervalPolicy.cycleMs,
           maxJobJsonBytes: this.productPolicy.maxJobJsonBytes,
-          allowAbsoluteTimer: this.isLs
+          allowAbsoluteTimer: this.isLs,
+          allowLsDBusDestination: this.isLs
         });
         const productValidated = this.productPolicy.validateProductConfig(validated);
         if (this.isLs && options?.enforceDatabaseProfile !== false && productValidated.database.server !== this.settings().defaults.database.server) {
@@ -8682,6 +8741,7 @@ var require_test_call = __commonJS({
     var { buildTypedArguments } = require_arguments();
     var { createDbusAdapter } = require_adapter();
     var { InterfaceStore } = require_store();
+    var { resolveJobDestination, interfaceForPrefix } = require_dbus_destination();
     function invalid(reason, details) {
       throw error("REQUEST_INVALID", reason, details);
     }
@@ -8696,21 +8756,23 @@ var require_test_call = __commonJS({
       }
       resolve(payload) {
         if (!payload || typeof payload !== "object" || Array.isArray(payload)) invalid("Test Call body\uB294 \uAC1D\uCCB4\uC5EC\uC57C \uD569\uB2C8\uB2E4.");
-        if (Object.keys(payload).some((key) => !["interfaceId", "methodId", "inputs"].includes(key))) invalid("Test Call\uC740 interfaceId, methodId, inputs\uB9CC \uBC1B\uC744 \uC218 \uC788\uC2B5\uB2C8\uB2E4.");
+        if (Object.keys(payload).some((key) => !["interfaceId", "methodId", "inputs", "dbusDestination", "dbusInterfacePrefix"].includes(key))) invalid("Test Call\uC5D0 \uC54C \uC218 \uC5C6\uB294 \uD544\uB4DC\uAC00 \uC788\uC2B5\uB2C8\uB2E4.");
         if (typeof payload.interfaceId !== "string" || !payload.interfaceId) invalid("Test Call interfaceId\uAC00 \uD544\uC694\uD569\uB2C8\uB2E4.");
         if (typeof payload.methodId !== "string" || !payload.methodId) invalid("Test Call methodId\uAC00 \uD544\uC694\uD569\uB2C8\uB2E4.");
         if (!payload.inputs || typeof payload.inputs !== "object" || Array.isArray(payload.inputs)) invalid("Test Call inputs\uB294 \uAC1D\uCCB4\uC5EC\uC57C \uD569\uB2C8\uB2E4.");
         if (!this.interfaceStore) invalid("DBus Interface \uC800\uC7A5\uC18C\uB97C \uC77D\uC744 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.");
         const dbusInterface = this.interfaceStore.find(payload.interfaceId);
         if (!dbusInterface) throw error("DBUS_INTERFACE_NOT_FOUND", "Test Call DBus Interface\uB97C \uCC3E\uC744 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.", { id: payload.interfaceId });
+        const lsBuiltIn = dbusInterface.id === "ls-plc-device" && dbusInterface.builtIn === true;
+        if ((payload.dbusDestination !== void 0 || payload.dbusInterfacePrefix !== void 0) && !lsBuiltIn) invalid("DBus service/interface \uC120\uD0DD\uC740 LS \uB0B4\uC7A5 Interface\uC5D0\uC11C\uB9CC \uC0AC\uC6A9\uD560 \uC218 \uC788\uC2B5\uB2C8\uB2E4.");
         const method = dbusInterface.methods.find((item) => item.id === payload.methodId);
         if (!method) throw error("DBUS_METHOD_NOT_FOUND", "Test Call DBus Method\uB97C \uCC3E\uC744 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.", { interfaceId: payload.interfaceId, methodId: payload.methodId });
         if (!this.settings || !this.settings.limits) invalid("Test Call settings limits\uB97C \uC77D\uC744 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.");
         return {
           dbusInterface,
           method,
-          dbus: { busType: dbusInterface.busType, destination: dbusInterface.destination },
-          callMethod: { objectPath: dbusInterface.objectPath, interface: dbusInterface.interface, methodName: method.member },
+          dbus: { busType: dbusInterface.busType, destination: lsBuiltIn ? resolveJobDestination(payload.dbusDestination, "REQUEST_INVALID") : dbusInterface.destination },
+          callMethod: { objectPath: dbusInterface.objectPath, interface: lsBuiltIn ? interfaceForPrefix(payload.dbusInterfacePrefix, "device", "REQUEST_INVALID") : dbusInterface.interface, methodName: method.member },
           inputs: payload.inputs
         };
       }

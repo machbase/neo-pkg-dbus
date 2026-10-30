@@ -21,6 +21,78 @@ import (
 	"github.com/machbase/neo-client/v2/api"
 )
 
+func TestLSDBusDestinationFromJob(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		want  string
+		bad   bool
+	}{
+		{"", defaultDBusDestination, false},
+		{defaultDBusDestination, defaultDBusDestination, false},
+		{"high.ls.plc", "high.ls.plc", false},
+		{"other.plc", "other.plc", false},
+		{"vendor-test.plc3", "vendor-test.plc3", false},
+		{":1.2", ":1.2", false},
+		{"single", "", true},
+		{"a..b", "", true},
+		{"1a.b", "", true},
+		{strings.Repeat("a", 256), "", true},
+	} {
+		got, err := normalizedDBusDestination(tc.value)
+		if tc.bad != (err != nil) || got != tc.want {
+			t.Fatalf("destination %q: got %q, %v; want %q, bad=%v", tc.value, got, err, tc.want, tc.bad)
+		}
+	}
+	for _, tc := range []struct {
+		value, want, method string
+		bad                 bool
+	}{
+		{"", defaultDBusDestination, "ls.plc.device.GetDeviceData", false},
+		{defaultDBusDestination, defaultDBusDestination, "ls.plc.device.GetDeviceData", false},
+		{"high.ls.plc", "high.ls.plc", "high.ls.plc.device.GetDeviceData", false},
+		{"other.plc", "other.plc", "other.plc.device.GetDeviceData", false},
+		{"a..b", "", "", true},
+	} {
+		got, err := normalizedDBusInterfacePrefix(tc.value)
+		if tc.bad != (err != nil) || got != tc.want {
+			t.Fatalf("interface prefix %q: got %q, %v; want %q, bad=%v", tc.value, got, err, tc.want, tc.bad)
+		}
+		if !tc.bad && lsDeviceMethod(got) != tc.method {
+			t.Fatalf("interface prefix %q resolved to wrong method", got)
+		}
+	}
+}
+
+func TestJobRestartReadsEditedFullDBusServiceName(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "cgi-bin")
+	writeRegisteredJobFixture(t, root, true)
+	job, err := loadJob(root, "line-a")
+	if err != nil || job.DBusDestination != defaultDBusDestination || job.DBusInterfacePrefix != defaultDBusDestination {
+		t.Fatalf("legacy Job destination=%q prefix=%q err=%v", job.DBusDestination, job.DBusInterfacePrefix, err)
+	}
+	jobPath := filepath.Join(root, "conf.d", "jobs", "line-a.json")
+	data, err := os.ReadFile(jobPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated := strings.Replace(string(data), `"revision":1,`, `"revision":1,"dbusDestination":"high.ls.plc","dbusInterfacePrefix":"vendor_plc3",`, 1)
+	if err := os.WriteFile(jobPath, []byte(updated), 0644); err != nil {
+		t.Fatal(err)
+	}
+	job, err = loadJob(root, "line-a")
+	if err != nil || job.DBusDestination != "high.ls.plc" || job.DBusInterfacePrefix != "vendor_plc3" {
+		t.Fatalf("edited Job destination=%q prefix=%q err=%v", job.DBusDestination, job.DBusInterfacePrefix, err)
+	}
+	if lsDeviceMethod(job.DBusInterfacePrefix) != "vendor_plc3.device.GetDeviceData" {
+		t.Fatalf("wrong DBus method %q", lsDeviceMethod(job.DBusInterfacePrefix))
+	}
+	for _, prefix := range []string{"a..b", "1plc", "a-b", "a/b", strings.Repeat("a", 248)} {
+		if _, err := normalizedDBusInterfacePrefix(prefix); err == nil {
+			t.Errorf("invalid interface prefix accepted: %q", prefix)
+		}
+	}
+}
+
 func TestConcreteDoubleConversionMatchesExistingBitsAndErrors(t *testing.T) {
 	values := []any{nil, "1", 1, int32(-1), uint64(0), uint64(math.MaxUint64), int64(math.MinInt64), math.Inf(1), math.Inf(-1), math.NaN(), math.Copysign(0, -1)}
 	random := rand.New(rand.NewSource(26))

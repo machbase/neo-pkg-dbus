@@ -38,8 +38,16 @@ LS Profile은 다음 고정값을 가진다.
 
 Profile에는 `displayName`이나 Method의 입력·출력 signature를 넣지 않는다. Method의
 단일 기준은 `products/ls/interfaces/ls-plc-device.json`이다. 이 Interface는 System
-Bus의 `ls.plc`, `/ls/plc/device`, `ls.plc.device`를 사용하며 다음 Method 하나를
-제공한다.
+Bus의 기본 destination `ls.plc`, object path `/ls/plc/device`, interface
+`ls.plc.device`를 사용하며 다음 Method 하나를 제공한다.
+
+LS Job은 `dbusDestination`과 `dbusInterfacePrefix`를 각각 저장한다. 서비스명은
+유효한 DBus bus name, Interface prefix는 유효한 DBus Interface 접두어를 직접
+입력한다. 두 필드 모두 기존 Job에서 생략하면 `ls.plc`로
+처리한다. 서비스명은 DBus destination, prefix는
+`<prefix>.device.GetDeviceData` 및 `<prefix>.program.GetTaskCycleInfo`를
+결정한다. 테스트 PLC는 `high.ls.plc` 서비스에서도 prefix `ls.plc`를 사용한다.
+Object path는 그대로 유지한다. 변경하려면 Job을 중지하고 저장한 뒤 재시작한다.
 
 ```text
 GetDeviceData(DataCount:uint16, DeviceString:string) -> Return:string

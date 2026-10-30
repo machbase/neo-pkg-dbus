@@ -1,5 +1,16 @@
 # DBus Collector Frontend 설계서
 
+2026-10-30 LS Job Configuration은 일반 Job 설정 아래 별도 `DBUS TEST SETTINGS`
+영역에 `Service Name`과 `Interface Prefix` 자유 입력을 제공한다. 둘 다 `ls.plc`가
+기본값이다. Service Name은 유효한 DBus bus name, prefix는 유효한 DBus Interface
+접두어를 입력한다. 어느 값을 바꿔도 선택한 조합으로 Task Period를 다시 조회하며
+Test Call에도 두 값을 보낸다. 잘못된 값은 Apply를 막고 안내한다. 입력 중에는
+Task Period 조회를 잠시 지연시켜 불필요한 DBus 호출을 줄인다.
+Apply 시 둘 중 하나라도 공백이면 해당 항목을 안내하고 적용하지 않는다. 이름 형식이
+유효하더라도 `ls.plc`와 `high.ls.plc` 이외의 값은 한 확인창에 함께 표시하며,
+사용자가 Apply Anyway를 선택한 경우만 적용한다. Cancel은 입력값을 유지하고
+Job Configuration으로 돌아간다. 실제 Job 저장은 이후 Create/Save로 수행한다.
+
 2026-10-26 LS scheduler 통합(CCR-099~101)은 FE 입력을 추가하지 않는다. 기존 standard/absolute Timer 선택과 skip 합계/Queue-full subset/Clear는 유지한다. `ls.scheduler`의 모드·FIFO·nice·Go 병렬도는 서비스 재시작 전용 내부 설정이며 FE에 노출하지 않는다. 직렬 Reader의 `scheduleSamples`는 실제 wake/start만 세므로 skip을 더한 항등식으로 해석하지 않는다.
 
 ## 1. 목적과 고정 범위

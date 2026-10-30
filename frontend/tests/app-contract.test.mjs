@@ -1512,9 +1512,54 @@ test("Method 모달 스크롤은 dialog가 아니라 본문에 적용한다", ()
   assert.doesNotMatch(css, /neo-dbus-method-list--scroll \{[^}]*overflow-y/);
 });
 
-test("Job 생성과 수정 폼은 계산된 Service Name 필드를 표시하지 않는다", () => {
+test("Job의 Service Name 입력은 계산된 JSH 서비스명이 아닌 LS DBus 테스트 설정이다", () => {
   const source = fs.readFileSync(new URL("../src/App.jsx", import.meta.url), "utf8");
-  assert.doesNotMatch(source, /<Field label="Service Name">/);
+  assert.match(source, /provider\?\.jobMode === "fixed" \? <section className="neo-job-dbus-test-settings"/);
+  assert.match(source, /<Field label="Service Name"><Input[^>]*value=\{jobConfigurationDraft\.dbusDestination\}/);
+  assert.doesNotMatch(source, /<Field label="Service Name"><Input[^>]*value=\{.*serviceName/);
+});
+
+test("DBus Apply는 공백을 거부하고 두 사용자 지정 이름을 한 번에 확인한다", async () => {
+  const original = { settings: api.settings.get, interfaces: api.interfaces.list, jobs: api.jobs.list, servers: api.db.servers.list, policy: api.jobs.intervalPolicy };
+  api.settings.get = async () => ({ provider: { jobMode: "fixed" }, defaults: { database: { server: "local-db" } }, limits: {}, intervalPolicy: { cycleMs: 1 } });
+  api.interfaces.list = async () => [];
+  api.jobs.list = async () => [];
+  api.db.servers.list = async () => [{ name: "local-db" }];
+  api.jobs.intervalPolicy = async () => ({ cycleMs: 1 });
+  let renderer;
+  const input = (label) => renderer.root.findAll((node) => node.type === "input" && node.props["aria-label"] === label)[0];
+  const confirm = () => renderer.root.findAll((node) => node.type === "section" && node.props["aria-label"] === "Confirm DBus names")[0];
+  try {
+    await act(async () => { renderer = create(React.createElement(MemoryRouter, { initialEntries: ["/jobs/new"] }, React.createElement(AppProvider, { surface: "main" }, React.createElement(MainRoutes)))); });
+    await flush();
+    await act(async () => { button(renderer.root, "Edit Job Configuration").props.onClick(); });
+    await act(async () => input("Service Name").props.onChange({ target: { value: "  " } }));
+    await act(async () => buttonText(renderer.root, "Apply").props.onClick());
+    assert.match(JSON.stringify(renderer.toJSON()), /Enter Service Name/);
+    assert.equal(confirm(), undefined);
+    await act(async () => {
+      input("Service Name").props.onChange({ target: { value: "other.service" } });
+      input("Interface Prefix").props.onChange({ target: { value: "other.prefix" } });
+    });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 280)); });
+    await act(async () => buttonText(renderer.root, "Apply").props.onClick());
+    assert.ok(confirm());
+    assert.match(confirm().findAllByType("code").map((node) => node.children.join("")).join(" "), /other.service/);
+    assert.match(confirm().findAllByType("code").map((node) => node.children.join("")).join(" "), /other.prefix/);
+    await act(async () => buttonText(confirm(), "Cancel").props.onClick());
+    assert.equal(confirm(), undefined);
+    assert.equal(input("Service Name").props.value, "other.service");
+    await act(async () => buttonText(renderer.root, "Apply").props.onClick());
+    await act(async () => buttonText(confirm(), "Apply Anyway").props.onClick());
+    assert.equal(input("Service Name"), undefined);
+    const summary = renderer.root.findAll((node) => node.props["aria-label"] === "Job Configuration summary")[0];
+    assert.match(summary.findAllByType("strong").map((node) => node.children.join("")).join(" "), /other.service/);
+    assert.match(summary.findAllByType("strong").map((node) => node.children.join("")).join(" "), /other.prefix/);
+  } finally {
+    if (renderer) await act(async () => renderer.unmount());
+    api.settings.get = original.settings; api.interfaces.list = original.interfaces;
+    api.jobs.list = original.jobs; api.db.servers.list = original.servers; api.jobs.intervalPolicy = original.policy;
+  }
 });
 
 test("새 Job 이름은 목록 준비 뒤 한 번만 기본값을 적용하고 사용자 입력을 보존한다", () => {
