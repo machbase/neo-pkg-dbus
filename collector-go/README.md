@@ -1,5 +1,10 @@
 # LS Go collector
 
+This implementation is retained for reference and rollback. Current LS builds
+select the standalone [C++ collector](../collector-cpp/README.md). The commands
+and Go-specific tuning below apply only when explicitly building this retained
+implementation; the C++ executable has no Go runtime or CGo transition.
+
 `neo-dbus-collector` is only staged by `npm run build -- --target=ls`.  It is
 not part of the generic package.
 
@@ -25,6 +30,12 @@ uses only the shared writer's configured periodic Flush (one second by default).
 Table switches and collector shutdown still make pending rows durable through
 `SQLAppendClose`. The pure-Go backend keeps its existing forced-Flush behavior
 so it can be selected again without restoring removed code.
+
+The native CLI receives an explicit `SERVER`/`PORT_NO`/`UID`/`PWD` connection
+string for the selected database profile. The Go connector URI remains specific
+to metadata/schema queries through neo-client. CLI connection values containing
+semicolon, newline or NUL are rejected with a field-only error instead of being
+interpreted as another connection option; passwords are never included in it.
 
 The daemon reads the JSH-created `cgi-bin/conf.d/go-collector.json` and the
 0600 `go-collector-secrets.json`.  JSH starts one daemon service and invokes

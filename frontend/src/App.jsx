@@ -2051,29 +2051,44 @@ function LogsPage() {
   const params = useParams();
   const name = params.name || "";
   const navigate = useNavigate();
+  const mainRef = useRef(null);
   const loaded = useLoad((signal) => name ? api.logs.list(name, { signal }) : api.logs.all({ signal }), [name]);
   const [file, setFile] = useState("");
   const [content, setContent] = useState("");
   const [error, setError] = useState(null);
-  const [view, setView] = useState("content");
-  const read = async (kind, targetFile = file) => { try { setError(null); const result = await api.logs[kind](name, targetFile); setContent(typeof result.content === "string" ? result.content : Array.isArray(result.lines) ? result.lines.join("\n") : ""); } catch (failure) { setError(failure); } };
+  const [view, setView] = useState("tail");
+  const [completedRead, setCompletedRead] = useState(null);
+  const read = async (kind, targetFile = file) => {
+    try {
+      setError(null);
+      const result = await api.logs[kind](name, targetFile);
+      setContent(typeof result.content === "string" ? result.content : Array.isArray(result.lines) ? result.lines.join("\n") : "");
+      // A new completion also scrolls repeated Tail reads with unchanged text.
+      setCompletedRead({ kind });
+    } catch (failure) { setError(failure); }
+  };
+  useEffect(() => {
+    if (completedRead?.kind === "tail" && mainRef.current) {
+      mainRef.current.scrollTop = mainRef.current.scrollHeight;
+    }
+  }, [completedRead]);
   const files = loaded.data?.files || [];
   useEffect(() => {
     if (file || files.length === 0) return;
     const initialFile = files[0].name;
     setFile(initialFile);
-    setView("content");
-    void read("content", initialFile);
+    setView("tail");
+    void read("tail", initialFile);
   }, [file, files]);
   const selectFile = (event) => {
     const nextFile = event.target.value;
     setFile(nextFile);
-    setView("content");
+    setView("tail");
     setContent("");
-    if (nextFile) void read("content", nextFile);
+    if (nextFile) void read("tail", nextFile);
   };
   const changeView = (kind) => { setView(kind); void read(kind); };
-  return <main className="neo-main" aria-label="DBus Collector main"><MainHeader title={name ? `Logs · ${name}` : "All Logs"} onBack={() => navigate(name ? `/jobs/${encodeURIComponent(name)}` : "/")}></MainHeader><Notice error={loaded.error || error} /><div className="neo-page-body"><section className="neo-panel"><h2>{name ? "LOG FILES" : "JOB LOGS"}</h2>{name ? <><select aria-label="Log file" value={file} onChange={selectFile}><option value="">Select file</option>{files.map((item) => <option key={item.name} value={item.name}>{item.name}</option>)}</select><span className="neo-actions"><button className={`neo-button${view === "content" ? " is-active" : ""}`} title="Read the current log file" aria-pressed={view === "content"} disabled={!file} onClick={() => changeView("content")}>Content</button><button className={`neo-button${view === "contentAll" ? " is-active" : ""}`} title="Read this log and its rotated files" aria-pressed={view === "contentAll"} disabled={!file} onClick={() => changeView("contentAll")}>All</button><button className={`neo-button${view === "tail" ? " is-active" : ""}`} title="Read the most recent log lines" aria-pressed={view === "tail"} disabled={!file} onClick={() => changeView("tail")}>Tail</button></span></> : <pre className="neo-code">{JSON.stringify(loaded.data?.jobs || [], null, 2)}</pre>}</section>{name ? <pre className="neo-code neo-log-content">{content || (file ? "Loading log content…" : "No log file is available.")}</pre> : null}</div></main>;
+  return <main ref={mainRef} className="neo-main" aria-label="DBus Collector main"><MainHeader title={name ? `Logs · ${name}` : "All Logs"} onBack={() => navigate(name ? `/jobs/${encodeURIComponent(name)}` : "/")}></MainHeader><Notice error={loaded.error || error} /><div className="neo-page-body"><section className="neo-panel"><h2>{name ? "LOG FILES" : "JOB LOGS"}</h2>{name ? <><select aria-label="Log file" value={file} onChange={selectFile}><option value="">Select file</option>{files.map((item) => <option key={item.name} value={item.name}>{item.name}</option>)}</select><span className="neo-actions"><button className={`neo-button${view === "content" ? " is-active" : ""}`} title="Read the beginning of the selected log file" aria-pressed={view === "content"} disabled={!file} onClick={() => changeView("content")}>Content</button><button className={`neo-button${view === "contentAll" ? " is-active" : ""}`} title="Read the entire selected log file" aria-pressed={view === "contentAll"} disabled={!file} onClick={() => changeView("contentAll")}>All</button><button className={`neo-button${view === "tail" ? " is-active" : ""}`} title="Read the most recent log lines" aria-pressed={view === "tail"} disabled={!file} onClick={() => changeView("tail")}>Tail</button></span></> : <pre className="neo-code">{JSON.stringify(loaded.data?.jobs || [], null, 2)}</pre>}</section>{name ? <><pre className="neo-code neo-log-content">{content || (file ? "Loading log content…" : "No log file is available.")}</pre><div className="neo-actions neo-log-actions"><button type="button" className="neo-button" title="Go to the top of the log page" disabled={!file} onClick={() => { if (mainRef.current) mainRef.current.scrollTop = 0; }}><Icon name="arrow_upward" />Top</button></div></> : null}</div></main>;
 }
 
 export function MainRoutes() {

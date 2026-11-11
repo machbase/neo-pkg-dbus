@@ -196,9 +196,9 @@ test("초기 Job 선택, skip 초기화와 로그 파일 기본 읽기 UX를 제
   assert.match(source, /label="Clear skipped cycle monitoring"/);
   assert.match(source, /icon="delete_sweep"/);
   assert.match(source, /const initialFile = files\[0\]\.name/);
-  assert.match(source, /void read\("content", initialFile\)/);
-  assert.match(source, /title="Read the current log file"/);
-  assert.match(source, /title="Read this log and its rotated files"/);
+  assert.match(source, /void read\("tail", initialFile\)/);
+  assert.match(source, /title="Read the beginning of the selected log file"/);
+  assert.match(source, /title="Read the entire selected log file"/);
   assert.match(source, /title="Read the most recent log lines"/);
   assert.match(source, /onBack=\{\(\) => navigate\(name \? `\/jobs\/\$\{encodeURIComponent\(name\)\}` : "\/"\)\}/);
   assert.match(styles, /\.neo-side \{[^}]*width: 100%;[^}]*min-width: 0;/);

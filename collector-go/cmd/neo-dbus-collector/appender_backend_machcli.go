@@ -655,7 +655,11 @@ func openAppender(root string, config database, flushMaxRows int) (appenderStrea
 		return openGoAppender(root, config, flushMaxRows)
 	}
 
-	cDSN := C.CString(dsn)
+	nativeDSN, err := machcliConnectionString(server)
+	if err != nil {
+		return nil, err
+	}
+	cDSN := C.CString(nativeDSN)
 	cTable := C.CString(config.Table)
 	defer C.free(unsafe.Pointer(cDSN))
 	defer C.free(unsafe.Pointer(cTable))

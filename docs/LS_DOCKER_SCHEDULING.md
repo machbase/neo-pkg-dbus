@@ -115,7 +115,9 @@ docker run -d \
 변경 뒤 **패키지의 Collector 서비스**를 중지·시작한다. Job 중지·시작만으로는 적용되지
 않는다. `go-collector.json`은 서비스 시작 때 생성되는 snapshot이므로 직접 수정하지 않는다.
 각 항목의 범위와 `off`/`conditional`/`force` 차이는
-[Collector README](../collector-go/README.md#linux-scheduling-ls-internal-settings)를 참조한다.
+[Collector README](../collector-cpp/README.md#scheduling-and-configuration)를 참조한다.
+현재 C++ Collector는 `gomaxprocs` 값을 호환 목적으로 읽지만 사용하지 않는다.
+이 값은 보관한 Go 구현에만 의미가 있으며 C++ 시작 로그에는 적용 대상이 아님을 표시한다.
 
 ## 실제 적용 확인
 
@@ -132,7 +134,7 @@ docker exec machbase-neo-test \
 ```text
 mode=conditional enabled=true
 cpus="6-7" cpuset="6-7"
-requestedFIFO=50 requestedNice=-10 appliedNice=-10 gomaxprocs=2
+requestedFIFO=50 requestedNice=-10 appliedNice=-10 implementation=cpp gomaxprocs=not-applicable configuredGoMaxProcs=0
 ```
 
 Job 시작 로그에는 Reader의 실제 OS thread ID, FIFO priority와 nice가 기록된다.

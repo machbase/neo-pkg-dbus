@@ -1,6 +1,6 @@
 'use strict';
 
-// Run one Go control operation through JSH's external-command bridge. This is
+// Run one native control operation through JSH's external-command bridge. This is
 // intentionally separate from the launcher: CGI scripts must wait for a single
 // control reply, while the launcher must remain alive for the daemon lifetime.
 const path = require('path');

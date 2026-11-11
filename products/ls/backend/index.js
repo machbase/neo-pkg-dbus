@@ -1,7 +1,7 @@
 'use strict';
 
 // GetDeviceData receives DataCount as DBus uint16. LS intentionally does not
-// inherit the generic JSH collector's 1,000/10,000-row limits: its Go data
+// inherit the generic JSH collector's 1,000/10,000-row limits: its native data
 // plane owns a bounded queue and one native writer instead. A Job still has a
 // uint16-sized reader batch, and its JSON may grow beyond generic's 512 KiB
 // when it contains a Tag per PLC address.

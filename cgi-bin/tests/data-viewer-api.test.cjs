@@ -912,6 +912,12 @@ async function run() {
   await rejectsCode(call(fixture().viewer, 'data', {
     job: 'line-a', server: 'local-db', table: 'TAG', names: ['%MB3'], valueColumn: 'VALUE', timezone: '+09:00',
   }), 'TIMEZONE_UNSUPPORTED');
+  for (const method of ['data', 'dataTotal', 'stat', 'tags']) {
+    await rejectsCode(call(fixture().viewer, method, {
+      job: 'line-a', server: 'local-db', table: 'TAG', names: ['%MB3'],
+      valueColumn: 'VALUE', page: '1', pageSize: '10', timezone: 'Asia/Seoul',
+    }), 'TIMEZONE_UNSUPPORTED');
+  }
   await rejectsCode(call(fixture().viewer, 'chart', {
     job: 'line-a', names: ['%MB3'], timezone: '',
   }), 'TIMEZONE_UNSUPPORTED');

@@ -938,11 +938,11 @@ var require_settings_loader = __commonJS({
           summaryIntervalMs: 60 * 60 * 1e3
         },
         // LS writer tuning is intentionally an internal deployment setting. It
-        // is copied into the Go collector policy file but is not exposed in the UI.
+        // is copied into the native collector policy file but is not exposed in the UI.
         ls: {
           interval: { useTaskCycle: true },
           timer: { showAbsoluteTimerOption: true, defaultUseAbsoluteTimer: false },
-          // Restart-only LS scheduling. Go clamps numeric ranges and audits the
+          // Restart-only LS scheduling. The collector clamps ranges and audits the
           // requested/applied values; this loader preserves out-of-range integers.
           scheduler: { mode: "conditional", fifoPriority: 50, nice: -10, gomaxprocs: 0 },
           writer: { queueCapacity: 512, flushMaxRows: 8192, flushIntervalMs: 1e3 },
@@ -1229,9 +1229,9 @@ var require_ls_runtime = __commonJS({
       const processApi = settings.process || process;
       const files = runtimePaths(cgiRoot);
       function ensureExecutable() {
-        if (!fs.existsSync(files.binary)) throw new Error("LS Go collector executable is missing. Build the LS package first.");
+        if (!fs.existsSync(files.binary)) throw new Error("LS native collector executable is missing. Build the LS package first.");
         if (!fs.existsSync(files.launcher) || !fs.existsSync(files.control)) {
-          throw new Error("LS Go collector JSH launcher files are missing.");
+          throw new Error("LS native collector JSH launcher files are missing.");
         }
         if (typeof fs.chmodSync !== "function") throw new Error("LS collector executable permissions cannot be set by this JSH runtime.");
         fs.chmodSync(files.binary, 493);
@@ -2733,6 +2733,7 @@ var require_data_viewer = __commonJS({
       }
       function jobDataRequest(params, requireNames = true) {
         request(params, false);
+        timezone(params);
         const name = jobName(params.job);
         let document;
         if (!jobs) jobs = new JobRepository({ cgiRoot: settings.cgiRoot, jobDir: settings.jobDir });

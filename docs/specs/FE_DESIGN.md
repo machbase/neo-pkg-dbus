@@ -1,5 +1,9 @@
 # DBus Collector Frontend 설계서
 
+2026-11-05 LS native C++ 전환(CCR-107)은 화면과 CGI API/상태/Job schema를
+바꾸지 않는다. FE 회귀 검증은 기존 Start/Stop, 비동기 STARTING, monitoring,
+로그레벨/조회, overrun reset 및 설정 화면 흐름을 그대로 기준으로 한다.
+
 2026-10-30 LS Job Configuration은 일반 Job 설정 아래 별도 `DBUS TEST SETTINGS`
 영역에 `Service Name`과 `Interface Prefix` 자유 입력을 제공한다. 둘 다 `ls.plc`가
 기본값이다. Service Name은 유효한 DBus bus name, prefix는 유효한 DBus Interface
@@ -284,7 +288,7 @@ Test Call은 저장되지 않은 현재 DBus Interface/Method와 원시 Inputs�
 
 DataViewer는 `neo-pkg-opcua-client` 원본과 같은 화면과 상호작용을 사용한다. Job은 Database Server/Table/Column mapping을 고르는 기준일 뿐이고, Tag 목록은 같은 Table의 전체 실제 Tag를 탐색·검색·다중 선택한다. Tags/Asset/Derived 탭, hierarchy folder 접기, Raw Grid 가상 스크롤, 시간 범위 모달과 quick range, first/previous/next/last page, Forward/Backward scan, Chart와 split chart, zoom/pan, 시간 format·UTC/LOCAL/IANA 표시 선택, Neo Web Tag Analyzer 연결을 제공한다. `/db/table/tags`, `/db/table/data`, `/db/table/stat`, `/db/table/chart`에는 모두 현재 Job name과 server/table/names를 보낸다. Chart SQL은 CGI가 검증해 만들고 Neo Web `/web/api/query`만 실행한다. CGI 시간은 UTC `Z`지만 화면 timezone은 표시만 바꾼다. 상세 규칙은 `DBUS_SDD.md` CCR-052와 4.1을 따른다.
 
-Log Viewer는 `GET /log/list?name=...`으로 Job 로그 파일을 고른다. 선택 파일의 페이지 내용은 필수 `name`, `file`과 선택 `page`, `lines`를 넣은 `GET /log/content?name=...&file=...&page=...&lines=...`으로 읽으며 응답은 `{name,file,page,linesPerPage,totalLines,lines,nextPage,previousPage}`다. 전체 본문은 필수 `name`, `file`을 넣은 `GET /log/content/all?name=...&file=...`으로 읽으며 응답은 `{name,file,size,content}`다. 마지막 부분은 필수 `name`, `file`과 선택 `lines`를 넣은 `GET /log/tail?name=...&file=...&lines=...`으로 갱신하며 응답은 `{name,file,lines,totalLines}`다. 전체 Job 로그 보기에는 `GET /log/all`을 쓴다.
+Log Viewer는 `GET /log/list?name=...`으로 Job 로그 파일을 고른다. CCR-108에 따라 최초 진입과 파일 선택 시 Tail을 활성화하고 마지막 200줄을 즉시 읽는다. CCR-110에 따라 Tail의 성공 응답을 표시한 뒤 Main을 맨 아래로 이동하며 같은 내용의 재조회에도 적용한다. 로그 본문 아래 오른쪽의 Top 버튼은 해당 Main의 맨 위로 이동한다. Content는 처음 200줄, All은 선택 파일 전체를 표시하며 회전 파일은 목록에서 별도로 고른다. 선택 파일의 페이지 내용은 필수 `name`, `file`과 선택 `page`, `lines`를 넣은 `GET /log/content?name=...&file=...&page=...&lines=...`으로 읽으며 응답은 `{name,file,page,linesPerPage,totalLines,lines,nextPage,previousPage}`다. 전체 본문은 필수 `name`, `file`을 넣은 `GET /log/content/all?name=...&file=...`으로 읽으며 응답은 `{name,file,size,content}`다. 마지막 부분은 필수 `name`, `file`과 선택 `lines`를 넣은 `GET /log/tail?name=...&file=...&lines=...`으로 갱신하며 응답은 `{name,file,lines,totalLines}`다. 전체 Job 로그 보기에는 `GET /log/all`을 쓴다.
 
 icon button에는 `aria-label`과 title을 둔다. 상태는 색과 텍스트를 함께 표시하고 오류는 `role="alert"`, 경고는 `role="status"`, 첫 로딩은 `aria-live="polite"`를 사용한다. 대량 Tag 변경은 변경 건수와 preview를 먼저 보여 준다.
 
