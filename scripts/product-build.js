@@ -7,7 +7,7 @@ const { spawnSync } = require('child_process');
 
 const PACKAGE_NAME = 'neo-pkg-dbus';
 const TARGETS = new Set(['generic', 'ls']);
-const LS_COLLECTOR_SOURCE = path.join('collector-go', 'dist', 'linux-amd64', 'neo-dbus-collector');
+const LS_COLLECTOR_SOURCE = path.join('collector-cpp', 'dist', 'linux-amd64', 'neo-dbus-collector');
 const CGI_RUNTIME_ENTRY = path.join('cgi-bin', 'src', 'cgi', 'runtime.js');
 const CGI_RUNTIME_OUTPUT = path.join('cgi-bin', 'runtime.js');
 const RELEASE_EXECUTABLES = [
@@ -123,12 +123,12 @@ function validateStaging(stagingRoot, target) {
 }
 
 function buildLsCollector(root) {
-  const script = path.join(root, 'collector-go', 'build.sh');
+  const script = path.join(root, 'collector-cpp', 'build.sh');
   if (!fs.existsSync(script)) throw new Error('LS collector build script not found.');
   const result = spawnSync('bash', [script], { cwd: root, stdio: 'inherit' });
-  if (result.status !== 0) throw new Error('LS Go collector build failed.');
+  if (result.status !== 0) throw new Error('LS C++ collector build failed.');
   const binary = path.join(root, LS_COLLECTOR_SOURCE);
-  if (!fs.existsSync(binary) || fs.statSync(binary).size === 0) throw new Error('LS Go collector output not found.');
+  if (!fs.existsSync(binary) || fs.statSync(binary).size === 0) throw new Error('LS C++ collector output not found.');
 }
 
 function copyOutput(source, destination) {

@@ -1,5 +1,18 @@
 # DBus Collector 통합 SDD
 
+2026-11-05 승인 전환 **CCR-107**: LS의 실제 수집·저장 daemon을 Go/CGO에서
+독립 C++로 전환한다. 사용자 승인: “C++로 결정하자”, 기존 기능 검증 및 메모리
+누수 장기시험 요청. 이전 계약의 언어·goroutine 설명은 C++ native thread로
+대체하되 공개 API, Job/설정 schema, Unix socket 명령, 상태/오류/UTC 시간,
+Start/Stop·복구·drain·로그·두 Timer·FIFO/nice 정책은 유지한다. JSH와 FE의
+소유권은 변하지 않는다. go-collector*.json의 파일명과 실행파일 CLI는 기존
+설치와의 호환을 위해 유지한다. gomaxprocs는 보관한 Go backend에만 적용되는
+기존 내부 값이며 C++는 이를 받아도 사용하지 않고 시작 로그에 해당 사실을
+표시한다. C++ 소스/빌드는 collector-cpp/에 두고 이전 Go 소스는 보존한다.
+LS 완료 산출물은 기존 cgi-bin/bin/neo-dbus-collector 위치에 준비한다.
+Generic은 이번 전환 범위에서 제외한다. 성능 probe 결과를 전체 기능 검증
+완료로 취급하지 않으며 제품 통합 후 회귀 및 최소24시간 메모리 관찰을 수행한다.
+
 ## 1. 결정 요약과 우선순위
 
 이 문서는 `neo-pkg-dbus` 구현의 단일 기능 기준이다. 기능이 `FE_DESIGN.md` 또는 `BE_DESIGN.md`와 다르게 읽히면 이 문서의 결정이 우선한다. 시각 규칙은 저장소 루트 `DESIGN.md`가 우선하며 이 문서는 화면의 기능과 상태만 정한다.
@@ -131,6 +144,26 @@ Database default track (approved 2026-08-11): `settings.json` stores one default
 | CCR-104 | CCR-103은 Interface prefix를 두 값으로 제한하여 현장 장비의 실제 이름이 다르면 다시 빌드해야 한다. | LS Job Configuration의 Interface prefix를 자유 입력으로 바꾸고, 유효한 DBus 이름(최대 247 ASCII 바이트)만 저장한다. 기본값 `ls.plc`, 서비스명 선택, object path와 기존 Job 기본값은 유지한다. | 장비별 Interface 이름을 FE에서 직접 수정해 시험하기 위함이다. | 승인됨 — 2026-10-30 사용자: FE에서 Interface prefix를 input으로 수정하도록 요청 |
 | CCR-105 | 서비스명 선택지가 두 개로 제한되고 Job Configuration의 일반 입력 사이에 섞여 시험 설정을 바꾸기 불편하다. | LS Job Configuration 하단에 `DBUS TEST SETTINGS` 영역을 두고 Service Name과 Interface Prefix를 각각 자유 입력으로 제공한다. Service Name은 유효한 DBus bus name(최대 255 ASCII 바이트), prefix는 CCR-104의 규칙을 따른다. 두 필드의 기본값은 `ls.plc`이고 Job별 저장·Task Period 조회·Test Call·Go Reader 경로는 유지한다. | 개발 단계에서 장비별 서비스명과 Interface 조합을 빌드 없이 시험하기 위함이다. | 승인됨 — 2026-10-30 사용자: 두 입력을 하단에 분리하고 서비스명도 직접 입력하도록 요청 |
 | CCR-106 | 자유 입력 DBus 이름에 대한 Apply 확인이 없었다. | Service Name 또는 Interface Prefix가 공백이면 Apply를 거부하고 항목을 안내한다. 유효한 이름 중 `ls.plc`·`high.ls.plc` 이외의 값은 해당 항목 모두를 하나의 확인창에 표시하며 사용자 동의 후만 적용한다. 취소하면 입력값을 유지한다. 실제 Job 저장은 기존 Create/Save 흐름을 따른다. | 테스트용 이름의 오입력을 확인하고 두 항목의 경고를 한 번에 처리하기 위함이다. | 승인됨 — 2026-10-30 사용자 Apply의 공백 거부 및 비표준 값 일괄 확인 요청 |
+
+CCR-108 저장 로그 기본 보기 — 승인됨, 2026-11-10 사용자 요청: Log Viewer의
+최초 진입 및 파일 선택 시 기본 보기를 Content(처음 200줄)에서 Tail(마지막 200줄)로
+바꾼다. 같은 이름의 Job 로그가 기존 파일에 이어 기록될 때 오래된 첫 페이지를
+최신 로그로 오해하지 않게 하기 위함이다. Content와 All의 기존 API·읽기 상한은
+유지한다. All은 선택 파일 전체이며 회전 파일은 목록에서 따로 선택한다. 공개 API와
+Collector에는 변경이 없고, PLC의 기존 로그 및 수집 상태도 변경하지 않는다.
+
+CCR-109 writer summary 문구 간소화 — 승인됨, 2026-11-10 사용자 요청: 기존
+`scope=shared writer summary;`에서 `scope=shared`를 제거하여 `writer summary;`로
+기록한다. writer가 모든 Job에 공유된다는 의미, 각 통계의 계산·단위·기록 주기와
+기록 대상 Job 로그는 유지한다. 중복 scope 표기를 줄이는 LS 로그 문구 변경이며
+공개 API, Job summary와 수집·저장 동작에는 변경이 없다. CCR-080의 scope 문구만
+이 결정으로 대체한다.
+
+CCR-110 저장 로그 스크롤 — 승인됨, 2026-11-10 사용자 요청: Tail 읽기가 성공하여
+내용이 반영되면 Log Viewer의 Main 스크롤을 맨 아래로 이동한다. 같은 내용을 다시
+읽어도 적용한다. 선택 Job의 로그 본문 아래 오른쪽에 Top 버튼을 제공하여 로그
+페이지의 맨 위로 돌아가게 한다. 기존 파일 선택·Content/All/Tail 읽기와 API, 다른
+패널의 스크롤 및 수집 동작은 유지한다.
 
 CCR-061 배포 기준 재확인 — 2026-10-13 사용자: 별도 지시가 없으면 현재 수정·검증·
 커밋 산출물은 LS 기준이다. generic은 향후 사용을 위한 source 보관 대상으로만 두고

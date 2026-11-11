@@ -357,6 +357,10 @@ function createDataViewer(options) {
 
   function jobDataRequest(params, requireNames = true) {
     request(params, false);
+    // Validate before branching into paged data/count, tags or statistics.
+    // These paths must reject timezone just like the legacy data/chart path;
+    // API timestamps stay UTC and display conversion belongs to the browser.
+    timezone(params);
     const name = jobName(params.job);
     let document;
     if (!jobs) jobs = new JobRepository({ cgiRoot: settings.cgiRoot, jobDir: settings.jobDir });

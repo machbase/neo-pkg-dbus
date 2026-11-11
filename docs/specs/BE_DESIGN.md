@@ -1,5 +1,12 @@
 # DBus Collector Backend 설계서
 
+2026-11-05 C++ 전환은 DBUS_SDD.md의 **CCR-107**을 따른다. LS native Collector를
+독립 C++로 구현하며 기존 Go source는 보관한다. 아래의 이전 Go/goroutine
+구현 설명에서 데이터 경로의 소유권과 의미는 유지하고 실행 단위만 native
+thread로 대체한다. 바이너리 이름/CLI, go-collector*.json, Unix socket 제어,
+공개 API와 JSH lifecycle은 유지한다. gomaxprocs는 Go용 내부 호환 값으로
+받되 C++에는 적용하지 않는다. 구현·빌드·검증은 collector-cpp/를 참조한다.
+
 2026-10-26 LS scheduler 통합은 `DBUS_SDD.md` CCR-099~101을 따른다. `ls.scheduler`는 서비스 재시작 전용 내부 정책이며, JSH launcher가 시작 시 snapshot을 갱신한다. Docker/cgroup cpuset 확인과 FIFO/nice 적용·읽기 검증은 Go가 담당한다. 두 Timer 모두 동일 Job goroutine에서 대기와 Reader를 실행하고, 누락된 예약 경계 수를 read skip에 합산한다. 실제 wake/start만 표본으로 집계한다. Writer 분리·drain·버퍼 소유권은 유지하며 DOUBLE 경로는 재boxing 없이 동일 값을 C에 전달한다. 상세 범위와 예시는 `collector-go/README.md`를 참조한다.
 
 같은 검증에서 발견한 LS lifecycle 종료 버그는 기존 자식 소유권 보장을 유지하도록 수정했다. native TERM 후 JSH launcher가 `process.exec()` 자식을 수거하고 자연 종료하도록 약 15초 이내에서 기다린 뒤 controller Stop을 호출한다. 시작 준비 중 뒤늦게 생기는 native도 신호를 받으며, 대기 초과는 WARN 후 기존 controller Stop 경로를 사용한다. API/DBus 요청 timeout을 추가하는 변경은 아니다.
@@ -49,7 +56,7 @@ LS의 canonical Job 설정은 `conf.d/jobs/<name>.json`이고, 저장 완료 표
 
 내부 `ls.performance`는 기본 활성화하며 Job 1,000 cycle마다 Job 이름과 DBus latency
 `avg/p99/max`, parse `avg/max`, reader total `min/p99/max`, interval 초과와 error 수를 microsecond 단위로
-한 줄 기록한다. shared writer는 Job 이름 없이 `scope=shared`로 표시하고 30초마다 channel 대기 batch 최대값,
+한 줄 기록한다. CCR-109에 따라 shared writer는 Job 이름이나 scope 필드 없이 `writer summary;`로 표시하고 30초마다 channel 대기 batch 최대값,
 append+flush busy ratio, append `avg/p99/max`, flush max, enqueue부터 성공 Flush까지 `p99/max`를 한 줄 기록한다. durable
 latency 표본은 최근 4,096개만 유지한다. 이 설정과 통계는 public Settings/API에
 노출하지 않으며 기존 rotation 용량 안에서 Job log에 기록한다. 기본값은 1,000회와

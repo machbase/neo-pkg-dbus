@@ -121,9 +121,9 @@ function createLsRuntime(options) {
   // Do this before both service registration and direct control invocation so
   // LS delivery does not depend on the downloader or archive utility.
   function ensureExecutable() {
-    if (!fs.existsSync(files.binary)) throw new Error('LS Go collector executable is missing. Build the LS package first.');
+    if (!fs.existsSync(files.binary)) throw new Error('LS native collector executable is missing. Build the LS package first.');
     if (!fs.existsSync(files.launcher) || !fs.existsSync(files.control)) {
-      throw new Error('LS Go collector JSH launcher files are missing.');
+      throw new Error('LS native collector JSH launcher files are missing.');
     }
     if (typeof fs.chmodSync !== 'function') throw new Error('LS collector executable permissions cannot be set by this JSH runtime.');
     fs.chmodSync(files.binary, 0o755);

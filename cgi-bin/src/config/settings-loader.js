@@ -20,11 +20,11 @@ function defaultSettings() {
       summaryIntervalMs: 60 * 60 * 1000,
     },
     // LS writer tuning is intentionally an internal deployment setting. It
-    // is copied into the Go collector policy file but is not exposed in the UI.
+    // is copied into the native collector policy file but is not exposed in the UI.
     ls: {
       interval: { useTaskCycle: true },
       timer: { showAbsoluteTimerOption: true, defaultUseAbsoluteTimer: false },
-      // Restart-only LS scheduling. Go clamps numeric ranges and audits the
+      // Restart-only LS scheduling. The collector clamps ranges and audits the
       // requested/applied values; this loader preserves out-of-range integers.
       scheduler: { mode: 'conditional', fifoPriority: 50, nice: -10, gomaxprocs: 0 },
       writer: { queueCapacity: 512, flushMaxRows: 8192, flushIntervalMs: 1000 },
