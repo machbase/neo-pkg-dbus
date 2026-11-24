@@ -74,6 +74,18 @@ start the package service. Start recreates that snapshot. Do not remove the
 secrets, active-Job checkpoint or Job configuration files. Verify queue edits in
 the writer summary's `queueCapacity` field.
 
+For the LS C++ collector, `ls.writer.queueCapacity` is a batch count from 1 to
+2,147,483,647 (signed 32-bit representation limit; default 512), shared by all
+Jobs. The actual operating capacity is selected in the internal settings file.
+A batch contains one Job cycle. Buffers
+grow with actual queued work; a full 4,096-batch queue with 4,096 rows per cycle
+holds about 768 MiB of row payload on Linux/amd64, excluding other allocations.
+A larger queue provides more temporary buffering, not a higher sustained write
+rate. Changing the supported upper bound does not change existing settings.
+After Append, row buffers return to the Job pool (at most 32 idle buffers) or
+are freed. Freed memory can remain in the allocator, so an empty queue does not
+imply that process RSS returns to its starting value.
+
 Each LS Job stores `dbusDestination` and `dbusInterfacePrefix` separately.
 The destination is a free-form DBus bus name (default `ls.plc`, up to 255 ASCII
 bytes); the Interface prefix is a free-form DBus identifier (default `ls.plc`,

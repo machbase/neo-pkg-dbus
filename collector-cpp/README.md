@@ -79,17 +79,25 @@ its table manually.
 
 ## Scheduling and configuration
 
-Use the existing [Docker scheduling guide](../docs/LS_DOCKER_SCHEDULING.md).
+Use the [Docker/Podman scheduling guide](../docs/LS_DOCKER_SCHEDULING.md).
 `mode`, `fifoPriority` (0..99) and `nice` (-20..19) retain their semantics and
 range correction logs. `off` leaves inherited priorities unchanged;
 `conditional` applies them only in the confirmed environment and can fall back;
 `force` attempts application regardless of that environment and fails on an
 application error. Priority 0 selects ordinary scheduling; 1..99 selects FIFO,
 with larger numbers having higher priority. Lower nice values have higher
-ordinary scheduling priority. Conditional mode requires Docker and an explicitly
+ordinary scheduling priority. Conditional mode requires Docker or Podman and an explicitly
 restricted cgroup cpuset; a CPU quota alone is insufficient. CPU numbers are
 detected from the environment, never hardcoded. Non-RT kernels use the same
 Linux calls; latency guarantees do not follow from successful application.
+
+Podman is detected by `/run/.containerenv` (including an empty file) or a
+`/libpod/` / `/libpod-...` cgroup path. Container detection never replaces the
+explicit cpuset check. If runtime, cpuset or scheduling permissions cannot be
+confirmed, conditional mode retains ordinary execution and logs the reason.
+Startup logs show separate `docker` and `podman` flags, `enabled`, and the
+detected CPU range. Confirm the Job's `reader policy applied` line and actual
+Reader TID as well; the collector's main thread intentionally remains non-FIFO.
 
 Nice is applied before creating native threads. FIFO is applied only after TAG
 preparation, and restored before reader teardown/drain. Requested and effective
@@ -103,6 +111,21 @@ writer/performance/scheduler policy. JSH regenerates the policy snapshot. Job
 timer selection takes effect on the next logical Job Start. Hot log-level
 changes remain available through the existing monitoring API. Rotation and
 performance summary formatting run in the logging worker, not the reader.
+
+`ls.writer.queueCapacity` accepts 1..2,147,483,647 **batches** and defaults to 512.
+The upper bound is the signed 32-bit queue counter's representation limit;
+operators choose the actual capacity in the internal settings file. One
+batch contains one Job cycle's rows, including all of its Calls. The queue does
+not preallocate all row buffers; memory grows with queued work. On Linux/amd64,
+4,096 rows use 192 KiB of row payload per batch, so 4,096 full batches require
+about 768 MiB, plus pools, in-flight work and process overhead. Increasing the
+queue absorbs temporary writer pauses; it does not increase sustained append
+throughput. Existing configured capacities stay unchanged after upgrading.
+Append returns row buffers immediately; the pool caches at most 32 idle buffers
+per Job and releases the rest. Releasing a buffer does not require the allocator
+to return its pages to the OS immediately, so RSS can stay above its initial
+value after the queue drains. Job Stop retires the pool; collector exit releases
+the process memory.
 
 The vendored JSON and systemd headers retain their license notices under
 `vendor/`. No generic collector behavior is changed by this implementation.

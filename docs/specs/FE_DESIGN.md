@@ -1,5 +1,16 @@
 # DBus Collector Frontend 설계서
 
+2026-11-23 **CCR-113**은 LS 내부 writer queue 상한을 signed 32-bit 표현 범위인
+2,147,483,647 batch로 늘린다. 실제 capacity는 내부 설정으로 정하고 기본값은512다.
+FE 설정·skip 표시·API·Job schema는 변경하지 않는다.
+
+2026-11-18 **CCR-112**는 LS 내부 writer queue 상한을 1,024에서 4,096 batch로
+늘린다. FE에는 설정을 추가하지 않으며 skip 표시·API·Job schema는 유지한다.
+
+2026-11-18 **CCR-111**은 LS C++의 Podman `conditional` 환경 인식만 확장한다.
+화면·API·Job schema는 바꾸지 않는다. 설정은 기존처럼 내부 파일에서 변경하고
+Collector 서비스를 재시작하며 Job 재시작만으로 적용하지 않는다.
+
 2026-11-05 LS native C++ 전환(CCR-107)은 화면과 CGI API/상태/Job schema를
 바꾸지 않는다. FE 회귀 검증은 기존 Start/Stop, 비동기 STARTING, monitoring,
 로그레벨/조회, overrun reset 및 설정 화면 흐름을 그대로 기준으로 한다.

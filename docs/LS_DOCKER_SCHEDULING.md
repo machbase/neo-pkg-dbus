@@ -1,24 +1,28 @@
-# LS Collector: Docker 실행 및 우선순위 확인
+# LS Collector: Docker/Podman 실행 및 우선순위 확인
 
 이 문서는 Linux/amd64 PLC에서 Collector의 FIFO/nice 정책을 적용하고 Timer
 검증을 요청할 때 사용하는 실행 예시다. Machbase Neo 8.5.12와 PREEMPT_RT PLC에서
 확인했다. 비RT Linux도 같은 설정 API를 사용하지만 측정 지터가 같다는 의미는 아니다.
 
-2026-10-27 이후 테스트 PLC의 CPU 기준은 **6·7번**으로 한다. 아래 명령은 이 기준을
-사용한다. 기존 CPU 4·5번 시험 결과는 당시 조건으로 보존하며, 6·7번에서 동일한
-성능을 검증한 결과로 해석하지 않는다. 6·7번도 일부 PLC·DBUS 일반 스레드의 실행
-허용 범위에 포함되므로 전용으로 격리된 CPU는 아니다.
+2026-11-18 새 테스트 PLC `192.168.1.132`는 Podman을 사용한다. 허용 CPU는
+**8~11번**, 2 CPU 시험 기본값은 **10·11번**이다. 아래 명령은 이 기준을 사용한다.
+기존 PLC `192.168.1.55`의 CPU 4·5번 및 6·7번 시험 결과는 당시 조건으로 보존하며
+새 PLC의 결과와 구분한다. CPU 고정은 전용 CPU 격리를 뜻하지 않는다.
+
+아래 Docker 예시를 rootful Podman에서 사용할 때는 `docker`를 `sudo podman`으로
+바꾼다. rootless 설치는 `podman`을 사용하지만 FIFO/nice 적용 권한을 얻는다는 의미는
+아니다. `conditional`은 실제 권한 확인에 실패하면 일반 정책으로 실행하고 사유를 남긴다.
 
 ## 필요한 설정
 
 ```text
 --cap-add SYS_NICE
---cpuset-cpus 6,7
+--cpuset-cpus 10,11
 ```
 
 - `SYS_NICE`: Collector가 Reader의 `SCHED_FIFO`와 일반 Collector thread의
   nice를 설정할 권한이다. `--privileged`는 필요하지 않다.
-- `--cpuset-cpus`: 사용할 **호스트의 논리 CPU 번호**다. `6,7`은 테스트 PLC의
+- `--cpuset-cpus`: 사용할 **호스트의 논리 CPU 번호**다. `10,11`은 새 테스트 PLC의
   예시이며 다른 장비에서는 사용할 수 있는 번호로 바꾼다. CPU 개수를 뜻하지 않는다.
 - cpuset은 해당 CPU에서 실행할 수 있도록 범위를 제한한다. 다른 호스트 프로그램의
   접근까지 막는 전용 CPU 예약은 아니다.
@@ -61,9 +65,9 @@ docker cp machbase-neo-test:/root/.config/machbase/. ./neo-config/
 기존 volume 설치를 바꿀 때는 위 절차에 따라 기존 volume으로 치환한다.
 
 ```bash
-HOST_IP=192.168.1.55
-NEO_CPUS=6,7
-IMAGE=machbase-neo-local:8.5.12-pkg
+HOST_IP=192.168.1.132
+NEO_CPUS=10,11
+IMAGE=machbase/machbase-neo:v8.5.12
 NEO_ROOT="$(pwd)"
 
 mkdir -p "$NEO_ROOT/neo-data" "$NEO_ROOT/neo-file/public" \
@@ -74,7 +78,7 @@ docker run -d \
   --restart=no \
   --cap-add SYS_NICE \
   --cpuset-cpus "$NEO_CPUS" \
-  -p "${HOST_IP}:5652-5654:5652-5654" \
+  -p "${HOST_IP}:5652-5656:5652-5656" \
   -v "$NEO_ROOT/neo-data:/data" \
   -v "$NEO_ROOT/neo-file:/file" \
   -v "$NEO_ROOT/neo-file/public:/opt/public" \
@@ -129,12 +133,27 @@ docker exec machbase-neo-test \
   tail -n 5 /opt/public/neo-pkg-dbus/logs/_collector.log
 ```
 
-시작 로그에서 아래 값들을 확인한다. CPU mask의 `6-7`과 `6,7`은 같은 범위다.
+시작 로그에서 아래 값들을 확인한다. CPU mask의 `10-11`과 `10,11`은 같은 범위다.
 
 ```text
 mode=conditional enabled=true
-cpus="6-7" cpuset="6-7"
+docker=true podman=false cpus=10-11 cpuset=10-11
 requestedFIFO=50 requestedNice=-10 appliedNice=-10 implementation=cpp gomaxprocs=not-applicable configuredGoMaxProcs=0
+```
+
+Podman에서는 `docker=false podman=true`가 정상이다. `/run/.containerenv` 또는
+libpod cgroup으로 runtime을 식별하고, 별도로 제한된 cgroup cpuset을 검증한다.
+marker 파일만 있거나 CPU 총량만 제한한 경우는 조건부 적용 근거가 되지 않는다.
+인식 정보가 부족해도 `force`로 자동 전환하지 않는다.
+
+새 PLC의 rootful Podman 조회 예시는 다음과 같다.
+
+```bash
+sudo podman inspect machbase-neo-test \
+  --format '{{json .HostConfig.CapAdd}} {{.HostConfig.CpusetCpus}}'
+sudo podman exec machbase-neo-test \
+  tail -n 5 /opt/public/neo-pkg-dbus/logs/_collector.log
+sudo podman exec machbase-neo-test ps -eLo pid,tid,cls,rtprio,ni,psr,comm
 ```
 
 Job 시작 로그에는 Reader의 실제 OS thread ID, FIFO priority와 nice가 기록된다.
@@ -158,4 +177,5 @@ Job의 Timer 방식·주기·Tag 수, 시험 시간과 retention 조건을 함�
 
 공식 참고:
 [Docker CPU/RT resource constraints](https://docs.docker.com/engine/containers/resource_constraints/),
-[Docker runtime capabilities](https://docs.docker.com/engine/containers/run/#runtime-privilege-and-linux-capabilities).
+[Docker runtime capabilities](https://docs.docker.com/engine/containers/run/#runtime-privilege-and-linux-capabilities),
+[Podman run](https://docs.podman.io/en/v5.0.0/markdown/podman-run.1.html).

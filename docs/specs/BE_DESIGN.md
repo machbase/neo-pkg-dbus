@@ -1,5 +1,16 @@
 # DBus Collector Backend 설계서
 
+2026-11-23 **CCR-113**에 따라 LS shared writer의 `queueCapacity` 허용 범위는
+1~2,147,483,647 batch다. 기존 CCR-112의 4,096 상한을 정수 표현 한계로 높인다.
+JSH 검증과 C++ policy loader에 같은 상한을 적용하며 기본값
+512, 기존 장비 설정, queue-full skip·drain·buffer 소유권은 유지한다. 전체 용량을
+미리 할당하지 않지만, 실제 적재된 batch 수와 cycle 행 수에 따라 메모리가 증가한다.
+
+2026-11-18 Podman 조건부 스케줄링은 **CCR-111**을 따른다. LS C++는 Docker 또는
+Podman을 식별한 뒤 기존 cgroup cpuset·권한 검증을 적용한다. `off`/`force`,
+일반 실행 fallback, 설정·lifecycle·control socket은 유지하며 시작 로그에 `podman`
+판정을 추가한다. Go 보관 소스와 generic은 이 변경에 포함하지 않는다.
+
 2026-11-05 C++ 전환은 DBUS_SDD.md의 **CCR-107**을 따른다. LS native Collector를
 독립 C++로 구현하며 기존 Go source는 보관한다. 아래의 이전 Go/goroutine
 구현 설명에서 데이터 경로의 소유권과 의미는 유지하고 실행 단위만 native
