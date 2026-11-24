@@ -2,6 +2,10 @@
 
 const { error } = require('./errors.js');
 
+// Match the LS C++ queue depth/capacity counters (signed 32-bit int).
+// This is a representation limit, not a buffer allocation or operating target.
+const MAX_WRITER_QUEUE_CAPACITY = 2147483647;
+
 function positiveInteger(value) {
   return Number.isInteger(value) && value > 0;
 }
@@ -39,7 +43,7 @@ function lsPolicy(value) {
     || !['off', 'conditional', 'force'].includes(scheduler.mode)
     || !['fifoPriority', 'nice', 'gomaxprocs'].every((key) => Number.isSafeInteger(scheduler[key]))
     || !writer || typeof writer !== 'object' || Array.isArray(writer)
-    || !positiveInteger(writer.queueCapacity) || writer.queueCapacity > 1024
+    || !positiveInteger(writer.queueCapacity) || writer.queueCapacity > MAX_WRITER_QUEUE_CAPACITY
     || !positiveInteger(writer.flushMaxRows) || writer.flushMaxRows > 65535
     || !positiveInteger(writer.flushIntervalMs) || writer.flushIntervalMs > 60 * 60 * 1000
     || !performance || typeof performance !== 'object' || Array.isArray(performance)
@@ -57,6 +61,8 @@ function lsPolicy(value) {
     // corrections remain visible. Modes/types are configuration errors.
     scheduler: { mode: scheduler.mode, fifoPriority: scheduler.fifoPriority, nice: scheduler.nice, gomaxprocs: scheduler.gomaxprocs },
     // Shared writer settings; users do not edit them in the frontend.
+    // queueCapacity counts batches (1..INT32_MAX), not rows. Keep the range
+    // aligned with collector-cpp/src/model.cpp; queued row buffers grow on demand.
     writer: {
       queueCapacity: writer.queueCapacity,
       flushMaxRows: writer.flushMaxRows,

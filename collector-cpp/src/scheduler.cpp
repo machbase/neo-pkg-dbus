@@ -47,11 +47,23 @@ static std::string decode_mount(std::string value) {
     }
     return value;
 }
-SchedulingEnvironment scheduling_environment(const std::function<std::string(const fs::path &)> &read) {
+SchedulingEnvironment scheduling_environment(const std::function<std::string(const fs::path &)> &read,
+                                             const std::function<bool(const fs::path &)> &exists) {
     SchedulingEnvironment env;
+    auto present = [&](const fs::path &path) {
+        if (exists)
+            return exists(path);
+        std::error_code error;
+        return fs::exists(path, error);
+    };
     auto groups = read("/proc/self/cgroup");
-    env.docker = fs::exists("/.dockerenv") || groups.find("/docker/") != std::string::npos ||
+    env.docker = present("/.dockerenv") || groups.find("/docker/") != std::string::npos ||
                  groups.find("docker-") != std::string::npos;
+    // Podman's documented marker can be an empty file. With /run overmounted,
+    // libpod cgroup paths can still identify the runtime. Neither signal alone
+    // proves CPU pinning: retain the independent cgroup cpuset checks below.
+    env.podman = present("/run/.containerenv") || groups.find("/libpod/") != std::string::npos ||
+                 groups.find("/libpod-") != std::string::npos;
     std::istringstream status(read("/proc/self/status"));
     std::string line;
     while (std::getline(status, line))
@@ -199,12 +211,12 @@ Scheduler Scheduler::prepare(const Policies &policy, Audit audit) {
     result.environment = scheduling_environment();
     auto &env = result.environment;
     result.enabled = policy.scheduler_mode == "force" ||
-                     (policy.scheduler_mode == "conditional" && env.docker && env.fixed);
+                     (policy.scheduler_mode == "conditional" && env.supports_conditional());
     result.reason = policy.scheduler_mode == "off"     ? "disabled by configuration"
                     : policy.scheduler_mode == "force" ? "forced by configuration"
                     : result.enabled                   ? env.reason
-                    : env.docker                       ? env.reason
-                                                       : "not running in Docker";
+                    : env.docker || env.podman          ? env.reason
+                                                       : "not running in Docker or Podman";
     for (auto &change : policy.corrections)
         audit("WARN", "configuration corrected; " + change);
     if (result.enabled) {
@@ -235,7 +247,8 @@ Scheduler Scheduler::prepare(const Policies &policy, Audit audit) {
     audit(policy.scheduler_mode == "conditional" && !result.enabled ? "WARN" : "INFO",
           "policy selected; mode=" + policy.scheduler_mode +
               " enabled=" + (result.enabled ? "true" : "false") + " reason=" + result.reason +
-              " docker=" + (env.docker ? "true" : "false") + " cpus=" + env.cpus + " cpuset=" + env.cpuset +
+              " docker=" + (env.docker ? "true" : "false") +
+              " podman=" + (env.podman ? "true" : "false") + " cpus=" + env.cpus + " cpuset=" + env.cpuset +
               " rtKernel=" + env.rt + " requestedFIFO=" + std::to_string(policy.fifo) + " requestedNice=" +
               std::to_string(policy.nice) + " appliedNice=" + std::to_string(getpriority(PRIO_PROCESS, 0)) +
               " implementation=cpp gomaxprocs=not-applicable configuredGoMaxProcs=" +

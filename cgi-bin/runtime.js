@@ -837,6 +837,7 @@ var require_settings_validator = __commonJS({
   "cgi-bin/src/config/settings-validator.js"(exports2, module2) {
     "use strict";
     var { error } = require_errors();
+    var MAX_WRITER_QUEUE_CAPACITY = 2147483647;
     function positiveInteger(value) {
       return Number.isInteger(value) && value > 0;
     }
@@ -857,7 +858,7 @@ var require_settings_validator = __commonJS({
       const writer = value?.writer;
       const scheduler = value?.scheduler === void 0 ? { mode: "conditional", fifoPriority: 50, nice: -10, gomaxprocs: 0 } : value.scheduler;
       const performance = value?.performance;
-      if (!value || typeof value !== "object" || Array.isArray(value) || !interval || typeof interval !== "object" || Array.isArray(interval) || typeof interval.useTaskCycle !== "boolean" || !timer || typeof timer !== "object" || Array.isArray(timer) || typeof timer.showAbsoluteTimerOption !== "boolean" || typeof timer.defaultUseAbsoluteTimer !== "boolean" || !scheduler || typeof scheduler !== "object" || Array.isArray(scheduler) || !["off", "conditional", "force"].includes(scheduler.mode) || !["fifoPriority", "nice", "gomaxprocs"].every((key) => Number.isSafeInteger(scheduler[key])) || !writer || typeof writer !== "object" || Array.isArray(writer) || !positiveInteger(writer.queueCapacity) || writer.queueCapacity > 1024 || !positiveInteger(writer.flushMaxRows) || writer.flushMaxRows > 65535 || !positiveInteger(writer.flushIntervalMs) || writer.flushIntervalMs > 60 * 60 * 1e3 || !performance || typeof performance !== "object" || Array.isArray(performance) || typeof performance.enabled !== "boolean" || performance.overrunDetailEnabled !== void 0 && typeof performance.overrunDetailEnabled !== "boolean" || !positiveInteger(performance.jobSampleCount) || !positiveInteger(performance.writerSummaryIntervalMs)) {
+      if (!value || typeof value !== "object" || Array.isArray(value) || !interval || typeof interval !== "object" || Array.isArray(interval) || typeof interval.useTaskCycle !== "boolean" || !timer || typeof timer !== "object" || Array.isArray(timer) || typeof timer.showAbsoluteTimerOption !== "boolean" || typeof timer.defaultUseAbsoluteTimer !== "boolean" || !scheduler || typeof scheduler !== "object" || Array.isArray(scheduler) || !["off", "conditional", "force"].includes(scheduler.mode) || !["fifoPriority", "nice", "gomaxprocs"].every((key) => Number.isSafeInteger(scheduler[key])) || !writer || typeof writer !== "object" || Array.isArray(writer) || !positiveInteger(writer.queueCapacity) || writer.queueCapacity > MAX_WRITER_QUEUE_CAPACITY || !positiveInteger(writer.flushMaxRows) || writer.flushMaxRows > 65535 || !positiveInteger(writer.flushIntervalMs) || writer.flushIntervalMs > 60 * 60 * 1e3 || !performance || typeof performance !== "object" || Array.isArray(performance) || typeof performance.enabled !== "boolean" || performance.overrunDetailEnabled !== void 0 && typeof performance.overrunDetailEnabled !== "boolean" || !positiveInteger(performance.jobSampleCount) || !positiveInteger(performance.writerSummaryIntervalMs)) {
         throw error("SETTINGS_INVALID", "LS interval \uC124\uC815\uC774 \uC798\uBABB\uB418\uC5C8\uC2B5\uB2C8\uB2E4.");
       }
       return {
@@ -868,6 +869,8 @@ var require_settings_validator = __commonJS({
         // corrections remain visible. Modes/types are configuration errors.
         scheduler: { mode: scheduler.mode, fifoPriority: scheduler.fifoPriority, nice: scheduler.nice, gomaxprocs: scheduler.gomaxprocs },
         // Shared writer settings; users do not edit them in the frontend.
+        // queueCapacity counts batches (1..INT32_MAX), not rows. Keep the range
+        // aligned with collector-cpp/src/model.cpp; queued row buffers grow on demand.
         writer: {
           queueCapacity: writer.queueCapacity,
           flushMaxRows: writer.flushMaxRows,

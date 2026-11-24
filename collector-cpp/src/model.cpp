@@ -31,7 +31,10 @@ Policies load_policies(const fs::path &root) {
     p.logging.max_files = int(normalized(log, "maxFiles", 3, 1, 10));
     p.logging.summary_ms = normalized(log, "summaryIntervalMs", 3'600'000, 60'000, 86'400'000);
     auto writer = d.value("writer", Json::object());
-    p.queue_capacity = int(normalized(writer, "queueCapacity", 512, 1, 1024));
+    // Batch count, not rows. INT_MAX is the representation limit of the queue
+    // depth/capacity counters, not an operating target. Match the JSH validator;
+    // buffers are allocated as readers enqueue work, never for the full capacity.
+    p.queue_capacity = int(normalized(writer, "queueCapacity", 512, 1, INT_MAX));
     p.flush_rows = int(normalized(writer, "flushMaxRows", 8192, 1, 65'535));
     p.flush_ms = normalized(writer, "flushIntervalMs", 1000, 1, 3'600'000);
     auto perf = d.value("performance", Json::object());

@@ -13,6 +13,11 @@ LS 완료 산출물은 기존 cgi-bin/bin/neo-dbus-collector 위치에 준비한
 Generic은 이번 전환 범위에서 제외한다. 성능 probe 결과를 전체 기능 검증
 완료로 취급하지 않으며 제품 통합 후 회귀 및 최소24시간 메모리 관찰을 수행한다.
 
+2026-11-18 승인 보완 **CCR-111**: LS C++ Collector의 `conditional` 적용 환경을
+Docker에서 Docker 또는 Podman으로 확장한다. 제한된 cgroup cpuset 확인과
+FIFO/nice 적용·읽기 검증, 권한 실패 시 일반 실행, 서비스 재시작 정책은 유지한다.
+세부 근거와 승인 기록은 1.1의 CCR-111을 따른다.
+
 ## 1. 결정 요약과 우선순위
 
 이 문서는 `neo-pkg-dbus` 구현의 단일 기능 기준이다. 기능이 `FE_DESIGN.md` 또는 `BE_DESIGN.md`와 다르게 읽히면 이 문서의 결정이 우선한다. 시각 규칙은 저장소 루트 `DESIGN.md`가 우선하며 이 문서는 화면의 기능과 상태만 정한다.
@@ -164,6 +169,47 @@ CCR-110 저장 로그 스크롤 — 승인됨, 2026-11-10 사용자 요청: Tail
 읽어도 적용한다. 선택 Job의 로그 본문 아래 오른쪽에 Top 버튼을 제공하여 로그
 페이지의 맨 위로 돌아가게 한다. 기존 파일 선택·Content/All/Tail 읽기와 API, 다른
 패널의 스크롤 및 수집 동작은 유지한다.
+
+CCR-111 Podman 조건부 스케줄링 — 승인됨, 2026-11-18 사용자 요청:
+“podman에서도 conditional 적용되게 해야할 것 같다”, 브랜치 확인 후 “여기서 작업하자.”
+이전 CCR-099는 `conditional`에서 Docker와 제한된 cgroup cpuset을 모두 요구했다.
+새 계약은 LS C++에서 Docker 또는 Podman을 확인하고 제한된 cpuset과 적용 권한을
+검증한다. Podman은 빈 파일일 수도 있는 `/run/.containerenv` 또는 `/libpod/`,
+`/libpod-...` cgroup 경로로 식별한다. marker/cgroup runtime 식별만으로 우선순위를
+적용하지 않는다. cpuset이 상속·전체 CPU·불명확하거나 권한 적용이 실패하면 기존처럼
+일반 실행과 사유 로그를 유지한다. `off`/`force`, 숫자 범위, RT 커널 비필수, CPU 자동
+검출, FIFO Reader 범위, 서비스 재시작 전용 설정, 공개 API/Job schema/FE는 유지한다.
+시작 로그에 기존 `docker`와 별도 `podman` flag를 남긴다. 새 PLC의 Podman 5.0.3에서
+빈 marker와 libpod cgroup, CPU 10~11, SYS_NICE를 확인했으나 종전 실행파일은
+`docker=false`여서 조건부 대상에서 제외했다. 당시 운영 NG의 원인이라는 가설은
+원본 로그 없이 확정하지 않는다. 로컬 cgroup v1/v2 및 실패 조건 회귀와 실제 PLC의
+conditional 적용·수집 검증은 구현 후 확인하며 rootless 권한 성공이나 장비별 지터
+상한을 일괄 보장하지 않는다. 보관 중인 Go와 generic은 이번 수정 범위가 아니다.
+
+CCR-112 LS writer queue 상한 확대 — 승인됨, 2026-11-18 사용자:
+“queue 최대 크기가 1024 였던 걸로 기억하는데 최대 크기를 좀 늘리자.”
+이전 JSH settings 검증과 C++ policy loader는 1~1,024 batch만 허용했다.
+새 허용 범위는 1~4,096 batch이며 두 경로를 함께 변경한다. 기본값 512와 기존
+장비의 설정값은 자동 변경하지 않는다. 하나의 batch는 한 Job cycle의 모든 Call
+결과이며 queue는 모든 Job이 공유한다. 기존 queue-full 전 DBUS skip, buffer lease
+소유권, Stop drain, 주기 Flush 및 서비스 재시작 적용 정책은 유지한다. capacity만큼
+데이터 buffer를 미리 만들지는 않지만 Linux/amd64에서 4,096행 batch는 row payload
+약 192KiB이므로 4,096 batch가 쌓이면 payload만 약 768MiB다. queue 확대는 일시적인
+writer 정지 흡수이며 지속 입력률 개선이나 무누락 보장을 뜻하지 않는다. Go 보관
+소스와 generic 전용 경로, FE/API/Job schema는 변경하지 않는다.
+
+CCR-113 LS writer queue 운영 상한 해제 — 승인됨, 2026-11-23 사용자:
+“queue 최대크기 제한을 없애던지, 아주 크게하자. 우리가 테스트해서 지정할 거여서
+우리가 조심하면 된다.” 이전 CCR-112의 1~4,096 batch 범위를 LS C++의 queue
+depth/capacity 정수 표현 범위인 1~2,147,483,647 batch로 확대한다. JSH 검증과
+C++ policy loader를 함께 변경하며, 초과·음수·0·비정수 설정의 기존 실패/fallback
+정책은 유지한다. 실제 운영 capacity는 내부 settings.json에서 정하고, 기본값512와
+기존 장비 설정은 자동 변경하지 않는다. 전체 용량을 미리 할당하지 않으며 실제
+queue 적재 시에만 row buffer가 증가한다. queue-full skip, buffer 소유권·반환,
+Stop drain, Flush, FE/API/Job schema 및 보관 중인 Go/generic 동작은 변경하지 않는다.
+큰 상한을 설정한 뒤의 무손실 성능이나 메모리 소비를 사전 보장하는 변경은 아니다.
+Append 완료 후 반환된 buffer 중 Job당 최대32개는 pool에 보관하고 나머지는 해제한다.
+allocator의 OS 메모리 반환 시점과 buffer 소유권 해제는 구분하며 RSS 감소를 강제하지 않는다.
 
 CCR-061 배포 기준 재확인 — 2026-10-13 사용자: 별도 지시가 없으면 현재 수정·검증·
 커밋 산출물은 LS 기준이다. generic은 향후 사용을 위한 source 보관 대상으로만 두고

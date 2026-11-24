@@ -210,19 +210,124 @@ static void environments() {
             auto it = files.find(p.string());
             return it == files.end() ? std::string() : it->second;
         };
-        auto env = scheduling_environment(read);
+        auto exists = [&](const fs::path &p) { return files.count(p.string()) != 0; };
+        auto environment = [&] { return scheduling_environment(read, exists); };
+        auto env = environment();
         check(env.docker && env.fixed && env.rt == "false", "non-RT Docker restricted CPU detection");
+        check(env.supports_conditional(), "Docker cpuset permits conditional scheduling");
         files["/sys/fs/cgroup/cpuset.cpus"] = "";
-        check(!scheduling_environment(read).fixed, "CPU quota/inherited cpuset is not explicit CPU pinning");
+        check(!environment().supports_conditional(), "CPU quota/inherited cpuset is not explicit CPU pinning");
         files["/sys/fs/cgroup/cpuset.cpus"] = "0-127";
-        check(!scheduling_environment(read).fixed, "all CPUs are not restricted CPU pinning");
+        check(!environment().supports_conditional(), "all CPUs are not restricted CPU pinning");
         files["/sys/fs/cgroup/cpuset.cpus"] = cpu;
         files["/sys/fs/cgroup/cpuset.cpus.effective"] = "127";
-        check(!scheduling_environment(read).fixed, "effective CPU mismatch fails closed");
+        check(!environment().supports_conditional(), "effective CPU mismatch fails closed");
         files["/proc/self/cgroup"] = "3:cpuset:/docker/test\n";
         files["/proc/self/mountinfo"] = "1 2 0:1 / /sys/fs/cgroup/cpuset rw - cgroup cpuset rw,cpuset\n";
         files["/sys/fs/cgroup/cpuset/docker/test/cpuset.cpus"] = cpu;
-        check(scheduling_environment(read).fixed, "cgroup v1 CPU pinning detection");
+        check(environment().supports_conditional(), "cgroup v1 CPU pinning detection");
+    }
+    // Isolated fixtures must not inherit the test runner's container markers.
+    for (auto runtime : {std::string("docker"), std::string("podman")})
+        for (bool v2 : {false, true})
+            for (bool marker : {false, true}) {
+                auto group = runtime == "docker" ? "/docker/test" : "/libpod_parent/libpod-test";
+                // A marker is sufficient even with a private cgroup namespace.
+                std::string path = marker ? "/" : group;
+                std::string mount = v2 ? "/sys/fs/cgroup" : "/sys/fs/cgroup/cpuset";
+                std::string directory = mount + (path == "/" ? "" : path);
+                std::unordered_map<std::string, std::string> files = {
+                    {"/proc/self/cgroup", (v2 ? "0::" : "1:cpuset:") + path + "\n"},
+                    {"/proc/self/status", "Cpus_allowed_list:\t10-11\n"},
+                    {"/proc/self/mountinfo", "1 2 0:1 / " + mount + " rw - " +
+                                                (v2 ? "cgroup2 cgroup rw\n" : "cgroup cpuset rw,cpuset\n")},
+                    {"/sys/devices/system/cpu/online", "0-15"},
+                    {"/sys/kernel/realtime", "1"},
+                    {directory + "/cpuset.cpus", "10-11"},
+                    {directory + "/cpuset.cpus.effective", "10-11"}};
+                if (marker)
+                    files[runtime == "docker" ? "/.dockerenv" : "/run/.containerenv"] = "";
+                auto read = [&](const fs::path &p) {
+                    auto it = files.find(p.string());
+                    return it == files.end() ? std::string() : it->second;
+                };
+                auto exists = [&](const fs::path &p) { return files.count(p.string()) != 0; };
+                auto environment = [&] { return scheduling_environment(read, exists); };
+                auto env = environment();
+                check(env.docker == (runtime == "docker") && env.podman == (runtime == "podman") &&
+                          env.supports_conditional(),
+                      "runtime marker/cgroup grants conditional only with a confirmed cpuset");
+                files["/sys/kernel/realtime"] = "0";
+                check(environment().supports_conditional(), "non-RT container uses the same eligibility checks");
+                files[directory + "/cpuset.cpus"] = "";
+                check(!environment().supports_conditional(), "container without explicit cpuset fails closed");
+                files[directory + "/cpuset.cpus"] = "0-15";
+                check(!environment().supports_conditional(), "container with all CPUs fails closed");
+                files[directory + "/cpuset.cpus"] = "10-11";
+                if (v2) {
+                    files[directory + "/cpuset.cpus.effective"] = "10";
+                    check(!environment().supports_conditional(), "effective container cpuset mismatch fails closed");
+                    files[directory + "/cpuset.cpus.effective"] = "10-11";
+                }
+                files["/proc/self/status"] = "Cpus_allowed_list:\t9-11\n";
+                check(!environment().supports_conditional(), "container affinity/cpuset mismatch fails closed");
+                files["/proc/self/status"] = "Cpus_allowed_list:\t10-11\n";
+                files["/sys/devices/system/cpu/online"] = "0-10";
+                check(!environment().supports_conditional(), "offline configured CPU fails closed");
+                files["/sys/devices/system/cpu/online"] = "0-15";
+                files["/proc/self/mountinfo"] = "";
+                check(!environment().supports_conditional(), "missing cgroup mount fails closed");
+            }
+    // Rootless Podman under systemd uses a scope path rather than /libpod/.
+    auto no_markers = [](const fs::path &) { return false; };
+    for (auto group : {std::string("/user.slice/user-1000.slice/user@1000.service/libpod-test.scope"),
+                       std::string("/libpod/test"), std::string("/"),
+                       std::string("/system.slice/my-libpod-helper.service")}) {
+        auto read = [&](const fs::path &p) -> std::string {
+            if (p == "/proc/self/cgroup") return "0::" + group + "\n";
+            if (p == "/proc/self/status") return "Cpus_allowed_list:\t10-11\n";
+            if (p == "/sys/devices/system/cpu/online") return "0-15";
+            if (p == "/proc/self/mountinfo") return "1 2 0:1 / /sys/fs/cgroup rw - cgroup2 cgroup rw\n";
+            if (p == fs::path("/sys/fs/cgroup" + (group == "/" ? "" : group)) / "cpuset.cpus" ||
+                p == fs::path("/sys/fs/cgroup" + (group == "/" ? "" : group)) / "cpuset.cpus.effective")
+                return "10-11";
+            return {};
+        };
+        auto env = scheduling_environment(read, no_markers);
+        bool podman = group.find("/libpod") != std::string::npos;
+        check(env.podman == podman && !env.docker && env.supports_conditional() == podman,
+              "systemd Podman scopes work; bare host or unrelated service remains ineligible");
+    }
+}
+static void queue_policies() {
+    fs::path root = fs::absolute("dist/check/queue-policy-" + std::to_string(getpid()));
+    require(!fs::exists(root), "policy test directory already exists");
+    struct Cleanup {
+        fs::path path;
+        ~Cleanup() {
+            std::error_code error;
+            fs::remove_all(path, error);
+        }
+    } cleanup{root};
+    Json document{{"schemaVersion", 2}};
+    auto load = [&] {
+        write_json_atomic(root / "conf.d/go-collector.json", document);
+        return load_policies(root).queue_capacity;
+    };
+    check(load() == 512, "default writer queue changed");
+    for (int capacity : {1, 512, 1024, 1025, 2048, 4096, 4097, 65536, 1000000, INT_MAX}) {
+        document["writer"] = {{"queueCapacity", capacity}};
+        check(load() == capacity, "valid writer queue capacity was not preserved");
+    }
+    // Invalid direct snapshots retain the existing fallback policy. JSH rejects
+    // these values before writing its snapshot instead of silently reducing it.
+    for (int64_t capacity : {int64_t(-1), int64_t(0), int64_t(INT_MAX) + 1, INT64_MAX}) {
+        document["writer"] = {{"queueCapacity", capacity}};
+        check(load() == 512, "invalid writer queue did not retain the default fallback");
+    }
+    for (auto value : {Json("4096"), Json(1.5), Json(nullptr), Json(true)}) {
+        document["writer"] = {{"queueCapacity", value}};
+        rejects([&] { load(); });
     }
 }
 int main(int argc, char **argv) {
@@ -232,6 +337,7 @@ int main(int argc, char **argv) {
         pool();
         timers();
         environments();
+        queue_policies();
         std::cout << "core assertions=" << assertions << " passed\n";
         if (argc > 1 && std::string(argv[1]) == "--benchmark") {
             auto call = call_for(8, 4096);
